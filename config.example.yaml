@@ -1,0 +1,29 @@
+# Feishu Link Secretary - configuration example
+# Copy to config.yaml and fill in your values.
+
+# mode: A (thread reply) or B (archive channel, default)
+mode: B
+
+# Required for mode B: the chat_id of your archive channel (oc_xxx)
+archive_chat_id: ""
+
+# Optional: YouTube Data API v3 key (for duration + channel info)
+# Without this, falls back to OG scraping (no duration).
+youtube_api_key: ""
+
+# Regex patterns to skip (comma-separated or YAML list)
+link_blacklist:
+  - "localhost"
+  - "127\\.0\\.0\\.1"
+
+log_level: INFO
+log_dir: logs
+
+# Path to lark-cli binary (default: lark-cli, assumes it is on PATH)
+lark_cli_bin: lark-cli
+
+# HTTP request timeout in seconds
+request_timeout: 10.0
+
+# Number of send retry attempts before giving up
+send_retry_attempts: 3

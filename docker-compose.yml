@@ -1,0 +1,12 @@
+services:
+  feishu-link:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - ./config.yaml:/etc/feishu-link/config.yaml:ro
+      - ~/.config/@larksuite/cli:/root/.config/@larksuite/cli:ro
+      - ./logs:/app/logs
+    environment:
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-}
