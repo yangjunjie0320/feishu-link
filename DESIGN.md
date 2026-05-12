@@ -122,54 +122,60 @@ lark-cli WebSocket 收到消息事件
 
 ### 链接解析器错误策略（`ParserError`）
 
-- HTTP 请求失败或非 2xx 状态码 → 抛出 `ParserError(url, status_code, reason)`，禁止静默跳过。
-- OG meta 解析失败 → 降级至 fallback 解析器（仅提取 `<title>` 和域名）。
-- fallback 也失败 → 抛出 `ParserError`，pipeline 捕获后在日志中以 ERROR 级别记录完整上下文，继续处理同一消息的其他 URL。
+- HTTP 请求失败或非 2xx 状态码 → 抛出 `ParserError(url, reason)`，禁止静默跳过。
+- OG meta 解析失败（`ParserError`）→ dispatcher 自动降级至 fallback 解析器（仅提取 `<title>` 和域名）。
+- fallback 也失败 → 抛出 `ParserError`，pipeline 在日志中以 ERROR 级别记录完整上下文（url、message_id），跳过该 URL 并继续处理同一消息的其他 URL；不发送不完整卡片。
 - 发送失败 → tenacity 重试（3 次，退避 1 s/3 s/9 s），耗尽后记录 CRITICAL 并继续，不终止监听进程。
 
 ## 实现计划
 
-### 第一阶段：核心监听与解析
+### 第一阶段：核心监听与解析（已完成）
 
 目标：跑通主流程，能够识别自己发出的链接并回复卡片。
 
-1. 配置 lark-cli，完成用户身份授权
-2. 实现 WebSocket 事件监听脚本（`lark-cli event consume` 子进程封装）
-3. 实现 sender_id 过滤逻辑（对比启动时查询的自身 open_id）
-4. 实现 URL 正则提取（兼容飞书富文本格式）
-5. 实现 Open Graph / HTML meta 解析，含 fallback 降级
-6. 实现飞书 interactive 卡片组装（标题、描述、打开链接按钮）
-7. 实现卡片发送（模式 A：Thread 回复；模式 B：归档频道）
+1. [x] 配置 lark-cli，完成用户身份授权
+2. [x] 实现 WebSocket 事件监听脚本（`lark-cli event consume` 子进程封装，见 `feishu_link/listener.py`）
+3. [x] 实现 sender_id 过滤逻辑（启动时通过 `lark-cli auth status --format json` 查询自身 open_id，见 `main.py`）
+4. [x] 实现 URL 正则提取（兼容飞书 text / post 富文本格式，见 `feishu_link/url_extract.py`）
+5. [x] 实现 Open Graph / HTML meta 解析，含 fallback 降级（见 `feishu_link/parsers/og_meta.py`、`fallback.py`）
+6. [x] 实现飞书 interactive 卡片组装（封面图、标题、副标题、描述、打开链接按钮，见 `feishu_link/card.py`）
+7. [x] 实现卡片发送（模式 A：Thread 回复；模式 B：归档频道，见 `feishu_link/sender.py`）
+8. [x] Dockerfile（python:3.12-slim + Node.js 22 + lark-cli）+ docker-compose
 
-交付物：可在 Docker 容器中运行的 Python 服务（`python main.py`）
+交付物：可通过 `docker compose up -d` 运行的 Python 服务。
 
 ---
 
-### 第二阶段：YouTube 专项支持
+### 第二阶段：YouTube 专项支持（已完成）
 
 目标：YouTube 链接展示封面图、时长、频道名。
 
-1. 接入 YouTube Data API v3
-2. 从链接中提取 video_id
-3. 拉取视频详情并渲染卡片
+1. [x] 从链接提取 video_id（支持 `watch?v=`、`youtu.be/`、`/shorts/`、`/embed/` 四种格式，见 `feishu_link/parsers/youtube.py`）
+2. [x] 接入 YouTube Data API v3（`videos.list?part=snippet,contentDetails`），解析 ISO-8601 时长
+3. [x] API 不可用时自动降级为 OG meta 抓取（无时长字段）
+4. [x] 卡片副标题渲染时长（`MM:SS` / `H:MM:SS`）和频道名
 
 ---
 
-### 第三阶段：稳定性与配置化
+### 第三阶段：稳定性与配置化（待实现）
 
 目标：长期可靠运行，支持个性化配置。
 
-1. 进程守护（pm2 或 systemd）
-2. 配置文件：目标会话 ID、模式 A/B 切换、链接黑名单
-3. 错误处理：解析失败时静默跳过，不发送损坏卡片
-4. 日志：记录每次解析结果，方便回溯
+1. [ ] Docker HEALTHCHECK：监听进程定期写心跳文件，`docker healthcheck` 检测
+2. [ ] 消息去重：内存 LRU 缓存已处理的 `message_id`，防止断线重连时重复发卡
+3. [ ] SIGHUP 热重载配置：收到 SIGHUP 后重新读取 `config.yaml`（`link_blacklist`、`mode`、`archive_chat_id`），监听连接保持不断
+4. [ ] 结构化日志：`LOG_FORMAT=json` 时切换为 JSON 格式，每行携带 `message_id`、`chat_id`、`url` 上下文字段
+5. [ ] 运行时计数器：统计已接收事件数、过滤数、解析成功/失败数、发送成功/失败数；收到 SIGUSR1 时输出到日志
 
 ---
 
 ## 关键约束
 
+**进程守护**
+生产运行通过 Docker `restart: unless-stopped` 实现自动重启；监听子进程（`lark-cli event consume`）断线后 Python 层以 5 s 退避自动重连，无需外部进程守护工具。
+
 **监听范围**
-CLI 以用户身份运行，只能监听机器人或用户账号在场的会话。用户与他人的私聊若未授权，无法监听。建议的覆盖范围：将机器人拉入常用群组，或使用用户身份授权。
+CLI 以用户身份（`--as user`）运行，监听用户本人参与的会话；`sender_id == self_open_id` 过滤后只处理自己发出的消息。若会话中未添加机器人，需使用用户身份授权（`lark-cli auth login --recommend`）。
 
 **YouTube 在国内不可直接访问**
 YouTube Data API 需要代理或在境外服务器运行。如果本地没有代理，可以降级为抓取 YouTube 页面的 og:title 和 og:image，无需 API Key，但无法获取时长。
