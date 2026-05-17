@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from ..platforms import detect_platform
 from .base import LinkMetadata, ParserError
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ class OGMetaParser:
             description=meta.get("og:description", ""),
             cover_url=meta.get("og:image", ""),
             site_name=meta.get("og:site_name") or domain,
+            platform=detect_platform(url),
         )
 
 

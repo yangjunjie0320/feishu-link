@@ -8,7 +8,7 @@ from feishu_link.url_extract import extract_urls
 
 @pytest.fixture
 def s() -> Settings:
-    return Settings(self_open_id="ou_x")
+    return Settings()
 
 
 def test_plain_text_url(s: Settings) -> None:
@@ -33,7 +33,7 @@ def test_trailing_punctuation_stripped(s: Settings) -> None:
 
 
 def test_blacklist(s: Settings) -> None:
-    s2 = Settings(self_open_id="ou_x", link_blacklist=["example\\.com"])
+    s2 = Settings(link_blacklist=["example\\.com"])
     content = json.dumps({"text": "https://example.com"})
     assert extract_urls("text", content, s2) == []
 

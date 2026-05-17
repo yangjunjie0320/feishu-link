@@ -1,10 +1,14 @@
 # Feishu Link Secretary - configuration example
 # Copy to config.yaml and fill in your values.
 
-# mode: A (thread reply) or B (archive channel, default)
-mode: B
+# Feishu custom app credentials (required)
+app_id: "cli_xxx"
+app_secret: "xxx"
 
-# Required for mode B: the chat_id of your archive channel (oc_xxx)
+# mode: A (thread reply in original chat, default) or B (archive channel)
+mode: A
+
+# Required only for mode B: the chat_id of your archive channel (oc_xxx)
 archive_chat_id: ""
 
 # Optional: YouTube Data API v3 key (for duration + channel info)
@@ -15,15 +19,41 @@ youtube_api_key: ""
 link_blacklist:
   - "localhost"
   - "127\\.0\\.0\\.1"
+  - "v\\.douyin\\.com"
+  - "douyin\\.com"
+  - "iesdouyin\\.com"
 
 log_level: INFO
 log_dir: logs
-
-# Path to lark-cli binary (default: lark-cli, assumes it is on PATH)
-lark_cli_bin: lark-cli
 
 # HTTP request timeout in seconds
 request_timeout: 10.0
 
 # Number of send retry attempts before giving up
 send_retry_attempts: 3
+
+# Short video append behavior. Cards are always sent first; videos are best-effort.
+video_append_enabled: true
+max_video_duration_seconds: 180
+max_video_file_mb: 50
+allowed_video_platforms:
+  - bilibili
+  - instagram
+  - tiktok
+  - youtube
+  - x
+video_temp_dir: "/tmp/feishu-link"
+
+# Optional per-platform cookie files mounted read-only in Docker.
+# If omitted, the app also auto-detects /etc/feishu-link/cookies/{platform}.txt.
+# Example:
+# platform_cookie_files:
+#   instagram: "/etc/feishu-link/cookies/instagram.txt"
+platform_cookie_files: {}
+
+# Optional title translation. Only non-Chinese titles are translated.
+title_translation_enabled: false
+deepseek_api_key: ""
+deepseek_base_url: "https://api.deepseek.com"
+deepseek_model: "deepseek-chat"
+translation_timeout: 10.0

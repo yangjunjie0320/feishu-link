@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from .base import LinkMetadata, ParserError
+from .base import LinkMetadata, MediaType, ParserError
 from .og_meta import OGMetaParser
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ class YouTubeParser:
                 api_url,
                 params={
                     "id": video_id,
-                    "part": "snippet,contentDetails",
+                    "part": "snippet,contentDetails,statistics",
                     "key": self._api_key,
                 },
             )
@@ -87,6 +87,7 @@ class YouTubeParser:
         item = items[0]
         snippet: dict[str, Any] = item.get("snippet", {})
         details: dict[str, Any] = item.get("contentDetails", {})
+        statistics: dict[str, Any] = item.get("statistics", {})
 
         thumbnails: dict[str, Any] = snippet.get("thumbnails", {})
         cover = (
@@ -102,13 +103,31 @@ class YouTubeParser:
             description=snippet.get("description", "")[:200],
             cover_url=cover,
             site_name="YouTube",
+            platform="youtube",
+            canonical_url=f"https://www.youtube.com/watch?v={video_id}",
+            media_type=MediaType.VIDEO,
             channel=snippet.get("channelTitle"),
             duration_seconds=_parse_duration(details.get("duration", "")),
+            view_count=_parse_int(statistics.get("viewCount")),
+            like_count=_parse_int(statistics.get("likeCount")),
+            comment_count=_parse_int(statistics.get("commentCount")),
         )
 
     async def _parse_via_og(self, url: str, video_id: str) -> LinkMetadata:
         watch_url = f"https://www.youtube.com/watch?v={video_id}"
         meta = await self._og_parser.parse(watch_url)
         meta.site_name = "YouTube"
+        meta.platform = "youtube"
+        meta.canonical_url = watch_url
+        meta.media_type = MediaType.VIDEO
         meta.source_url = url
         return meta
+
+
+def _parse_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value))
+    except ValueError:
+        return None

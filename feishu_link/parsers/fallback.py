@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from ..platforms import detect_platform
 from .base import LinkMetadata, ParserError
 
 logger = logging.getLogger(__name__)
@@ -47,4 +48,5 @@ class FallbackParser:
             source_url=url,
             title=title or domain,
             site_name=domain,
+            platform=detect_platform(url),
         )

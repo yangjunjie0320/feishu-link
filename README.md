@@ -1,52 +1,38 @@
 # feishu-link
 
-Feishu "link secretary": monitors your own outgoing messages via WebSocket, extracts URLs, fetches metadata, and replies with a structured interactive card.
+Feishu "link secretary": monitors messages visible to a Feishu custom app via WebSocket, extracts URLs, fetches metadata, and replies with a structured interactive card.
 
-No custom Feishu app required. lark-cli uses its own built-in credentials; you only need to log in with your Feishu account.
+This project runs through a Feishu custom app. Configure the app credentials, subscribe to message events, and add the app to the conversations you want it to process.
 
 ## Quick start
 
-### 1. Install and authenticate lark-cli
+### 1. Create and configure a Feishu custom app
 
-```bash
-npm install -g @larksuite/cli
-lark-cli auth login --recommend
-```
+Create a custom app in Feishu Open Platform, enable the permissions needed to receive and send messages, subscribe to `im.message.receive_v1`, and copy the app credentials:
 
-A browser window opens for Feishu OAuth. Log in with your own account. Credentials are stored at `~/.config/@larksuite/cli/`.
+- `app_id`
+- `app_secret`
 
-Verify it worked:
+Add the app to the conversations whose messages should be processed. The service does not filter by sender.
 
-```bash
-lark-cli auth status   # should show your open_id
-```
-
-### 2. Find your archive chat ID
-
-```bash
-lark-cli im +chats-list --format table
-```
-
-Pick the group or self-chat you want to use as the archive channel. Copy its `chat_id` (`oc_xxx`).
-
-### 3. Create your config
+### 2. Create your config
 
 ```bash
 cp config.example.yaml config.yaml
 ```
 
-Set `archive_chat_id` in `config.yaml`. Everything else has sensible defaults.
+Set `app_id` and `app_secret` in `config.yaml`. If you use `mode: B`, also set `archive_chat_id`.
 
-### 4. Run locally
+### 3. Run locally
 
 ```bash
 uv sync
 uv run python main.py --config config.yaml
 ```
 
-When you see `lark-cli event consumer ready`, the daemon is listening. Send a message containing a URL from your own Feishu account — the archive channel should receive an interactive card shortly after.
+When you see `WebSocket long connection started`, the daemon is listening. Send a message containing a URL in a conversation where the app can receive events; the archive channel should receive an interactive card shortly after.
 
-### 5. Run with Docker (production)
+### 4. Run with Docker (production)
 
 ```bash
 docker compose up -d
@@ -55,7 +41,6 @@ docker compose logs -f
 
 The container mounts:
 - `./config.yaml` — runtime config (read-only)
-- `~/.config/@larksuite/cli` — lark-cli credentials (read-only)
 - `./logs` — writable log directory
 
 ## Configuration reference
@@ -64,8 +49,10 @@ See `config.example.yaml` for all options. Key settings:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mode` | `B` | `A` = thread reply in original chat; `B` = send to archive channel |
-| `archive_chat_id` | — | Required for mode B (`oc_xxx`) |
+| `app_id` | — | Feishu custom app ID |
+| `app_secret` | — | Feishu custom app secret |
+| `mode` | `A` | `A` = thread reply in original chat; `B` = send to archive channel |
+| `archive_chat_id` | — | Required only for mode B (`oc_xxx`) |
 | `youtube_api_key` | — | Optional; enables duration + channel metadata for YouTube links |
 | `link_blacklist` | `[]` | Regex list of URL patterns to ignore |
 
@@ -78,6 +65,18 @@ uv sync --extra dev
 uv run pytest -q
 uv run ruff check .
 uv run pyright
+```
+
+To send one real card to Feishu for integration verification:
+
+```bash
+FEISHU_LINK_INTEGRATION_SEND=1 uv run --extra dev pytest tests/test_integration_feishu_send.py
+```
+
+For `mode: A`, provide a real message ID to reply to:
+
+```bash
+FEISHU_LINK_INTEGRATION_SEND=1 FEISHU_LINK_INTEGRATION_MESSAGE_ID=om_xxx uv run --extra dev pytest tests/test_integration_feishu_send.py
 ```
 
 ## Architecture

@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./config.yaml:/etc/feishu-link/config.yaml:ro
-      - ~/.config/@larksuite/cli:/root/.config/@larksuite/cli:ro
+      - ./cookies:/etc/feishu-link/cookies:ro
       - ./logs:/app/logs
     environment:
       - HTTPS_PROXY=${HTTPS_PROXY:-}

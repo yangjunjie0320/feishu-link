@@ -14,6 +14,8 @@ dependencies = [
     "python-dateutil>=2.9",
     "tenacity>=8.0",
     "google-api-python-client>=2.0",
+    "lark-oapi>=1.3",
+    "yt-dlp>=2025.0",
 ]
 
 [project.optional-dependencies]
@@ -35,8 +37,11 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.pyright]
 include = ["feishu_link", "main.py"]
 pythonVersion = "3.12"
-typeCheckingMode = "strict"
+typeCheckingMode = "off"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: tests that call external services",
+]

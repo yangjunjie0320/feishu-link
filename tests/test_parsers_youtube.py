@@ -15,6 +15,11 @@ YOUTUBE_API_RESPONSE = {
             },
         },
         "contentDetails": {"duration": "PT3M33S"},
+        "statistics": {
+            "viewCount": "1000000",
+            "likeCount": "12000",
+            "commentCount": "345",
+        },
     }]
 }
 
@@ -53,6 +58,9 @@ async def test_youtube_api_success() -> None:
     assert meta.channel == "Rick Astley"
     assert meta.duration_seconds == 213  # 3m33s
     assert meta.site_name == "YouTube"
+    assert meta.view_count == 1000000
+    assert meta.like_count == 12000
+    assert meta.comment_count == 345
 
 
 @respx.mock
