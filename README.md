@@ -1,38 +1,70 @@
 # feishu-link
 
-Feishu "link secretary": monitors messages visible to a Feishu custom app via WebSocket, extracts URLs, fetches metadata, and replies with a structured interactive card.
+Feishu link assistant that listens to messages visible to a Feishu custom app, extracts links, fetches metadata, replies with compact interactive cards, and then tries to append downloadable short videos.
 
-This project runs through a Feishu custom app. Configure the app credentials, subscribe to message events, and add the app to the conversations you want it to process.
+The project is designed for personal or team link collection workflows: send a supported link in Feishu, get a readable card first, and get the original video only when it can be downloaded and uploaded safely.
 
-## Quick start
+## Features
 
-### 1. Create and configure a Feishu custom app
+- Feishu WebSocket listener through a custom app.
+- Compact interactive cards with cover image, platform label, title, author or channel, duration, and source button.
+- Multi-platform parsing for YouTube, Instagram, TikTok, Bilibili, X/Twitter, and normal web pages.
+- Video metrics when available: views, likes, comments, and reposts.
+- Optional title translation through DeepSeek. Non-Chinese titles are translated and shown together with the original title.
+- Optional short-video append. Videos up to 180 seconds are downloaded, converted to Feishu-friendly MP4, uploaded, and sent after the card.
+- Optional cookie files for platforms that require login state.
+- Explicit logging for parse, download, upload, and send failures. Card delivery is prioritized over video delivery.
 
-Create a custom app in Feishu Open Platform, enable the permissions needed to receive and send messages, subscribe to `im.message.receive_v1`, and copy the app credentials:
+## Supported Platforms
 
-- `app_id`
-- `app_secret`
+| Platform | Card metadata | Image or cover | Stats | Video append |
+|----------|---------------|----------------|-------|--------------|
+| YouTube / Shorts | Title, channel, duration | Yes | Views, likes, comments when available | Yes, when <= 180 seconds and downloadable |
+| Instagram | Caption/title, author, duration | Yes | Likes, comments, views when available | Yes, for accessible reels/videos |
+| TikTok | Caption/title, author, duration | Yes | Views, likes, comments, reposts when available | Yes, when enabled and downloadable |
+| Bilibili | Title, UP, duration | Yes | Views, likes, comments, reposts when available | Yes, when <= 180 seconds and downloadable |
+| X / Twitter | Text summary, author, duration | Yes | Likes, comments, reposts when available | Yes, for accessible media posts |
+| Web pages | Open Graph title, description, site | Yes | No | No |
 
-Add the app to the conversations whose messages should be processed. The service does not filter by sender.
+Douyin is intentionally not parsed by default. If Feishu itself expands a Douyin message, this service still ignores Douyin URLs unless you explicitly add support later.
 
-### 2. Create your config
+## Quick Start
+
+### 1. Create a Feishu custom app
+
+Create a custom app in Feishu Open Platform, then configure:
+
+- App credentials: `app_id`, `app_secret`
+- Event subscription: `im.message.receive_v1`
+- Message permissions for receiving and sending messages
+- The conversations where the app should be added
+
+The service does not filter by sender. Any message visible to the app can trigger parsing.
+
+### 2. Create runtime config
 
 ```bash
 cp config.example.yaml config.yaml
 ```
 
-Set `app_id` and `app_secret` in `config.yaml`. If you use `mode: B`, also set `archive_chat_id`.
+Edit `config.yaml` and set at least:
 
-### 3. Run locally
-
-```bash
-uv sync
-uv run python main.py --config config.yaml
+```yaml
+app_id: "cli_xxx"
+app_secret: "xxx"
+mode: "A"
 ```
 
-When you see `WebSocket long connection started`, the daemon is listening. Send a message containing a URL in a conversation where the app can receive events; the archive channel should receive an interactive card shortly after.
+Use `mode: A` to reply in the original message thread. Use `mode: B` to send cards and videos to an archive chat:
 
-### 4. Run with Docker (production)
+```yaml
+mode: "B"
+archive_chat_id: "oc_xxx"
+```
+
+`config.yaml` is intentionally ignored by Git.
+
+### 3. Run with Docker
 
 ```bash
 docker compose up -d
@@ -40,23 +72,165 @@ docker compose logs -f
 ```
 
 The container mounts:
-- `./config.yaml` — runtime config (read-only)
-- `./logs` — writable log directory
 
-## Configuration reference
+- `./config.yaml` as read-only runtime config
+- `./cookies` as optional read-only platform cookie directory
+- `./logs` as writable log directory
 
-See `config.example.yaml` for all options. Key settings:
+### 4. Run locally for development
+
+```bash
+uv sync --extra dev
+uv run python main.py --config config.yaml
+```
+
+When you see the WebSocket long-connection log, send a supported link in a Feishu conversation where the app can receive events.
+
+## Run Without Docker
+
+Docker is recommended for production because it pins Python, `ffmpeg`, `ffprobe`, and runtime mounts in one place. If you do not want to use Docker, run the same `main.py` entry point with `uv`.
+
+### 1. Install system tools
+
+Install Python 3.12, `uv`, `ffmpeg`, and `ffprobe`.
+
+macOS:
+
+```bash
+brew install python@3.12 uv ffmpeg
+```
+
+Ubuntu/Debian:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3.12 ffmpeg
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Verify:
+
+```bash
+uv --version
+ffmpeg -version
+ffprobe -version
+```
+
+### 2. Install Python dependencies
+
+```bash
+uv sync
+```
+
+For development and tests:
+
+```bash
+uv sync --extra dev
+```
+
+### 3. Prepare config and cookies
+
+```bash
+cp config.example.yaml config.yaml
+mkdir -p cookies logs
+```
+
+Set real credentials in `config.yaml`. If you use cookie files outside Docker, configure local paths:
+
+```yaml
+platform_cookie_files:
+  instagram: "cookies/instagram.txt"
+  tiktok: "cookies/tiktok.txt"
+  youtube: "cookies/youtube.txt"
+  bilibili: "cookies/bilibili.txt"
+  x: "cookies/x.txt"
+```
+
+### 4. Start the service
+
+```bash
+uv run python main.py --config config.yaml
+```
+
+Keep the process running with your preferred process manager, for example `systemd`, `supervisor`, `launchd`, or `tmux`. The service still uses `main.py` as the only runtime entry point.
+
+## Configuration
+
+See `config.example.yaml` for the full reference. Common settings:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `app_id` | — | Feishu custom app ID |
-| `app_secret` | — | Feishu custom app secret |
-| `mode` | `A` | `A` = thread reply in original chat; `B` = send to archive channel |
-| `archive_chat_id` | — | Required only for mode B (`oc_xxx`) |
-| `youtube_api_key` | — | Optional; enables duration + channel metadata for YouTube links |
-| `link_blacklist` | `[]` | Regex list of URL patterns to ignore |
+| `app_id` | Required | Feishu custom app ID |
+| `app_secret` | Required | Feishu custom app secret |
+| `mode` | `A` | `A` replies to the original message, `B` sends to archive chat |
+| `archive_chat_id` | Empty | Required when `mode` is `B` |
+| `youtube_api_key` | Empty | Optional YouTube Data API key for stable YouTube metadata |
+| `link_blacklist` | `[]` | Regex URL patterns to ignore |
+| `enable_video_send` | `true` | Whether to try appending short videos after cards |
+| `max_video_duration_seconds` | `180` | Max duration for downloadable videos |
+| `max_video_file_mb` | Config example | Max uploaded video size |
+| `allowed_video_platforms` | Config example | Platforms allowed for video append |
+| `platform_cookie_files` | `{}` | Optional cookie file paths per platform |
+| `deepseek_api_key` | Empty | Enables title translation when configured |
+| `deepseek_base_url` | DeepSeek API | Optional compatible API endpoint |
+| `enable_title_translation` | `false` | Translate non-Chinese titles when true |
 
-All settings can also be set via environment variables prefixed with `FEISHU_LINK_`. See `.env.example`.
+All settings can also be provided through environment variables prefixed with `FEISHU_LINK_`.
+
+## Cookies
+
+Some platforms restrict metadata or video download for anonymous requests. Cookie files are optional and should use Netscape format, for example files exported by Cookie-Editor.
+
+Recommended layout:
+
+```text
+cookies/
+  instagram.txt
+  tiktok.txt
+  youtube.txt
+  bilibili.txt
+  x.txt
+```
+
+Example config:
+
+```yaml
+platform_cookie_files:
+  instagram: "/app/cookies/instagram.txt"
+  tiktok: "/app/cookies/tiktok.txt"
+  youtube: "/app/cookies/youtube.txt"
+  bilibili: "/app/cookies/bilibili.txt"
+  x: "/app/cookies/x.txt"
+```
+
+Only provide cookies for accounts you control. Cookie files are ignored by Git and should not be shared.
+
+## Title Translation
+
+Title translation is optional. When enabled, the service calls DeepSeek only if the detected title does not contain Chinese text.
+
+```yaml
+enable_title_translation: true
+deepseek_api_key: "sk-xxx"
+deepseek_model: "deepseek-chat"
+```
+
+Cards display both the Chinese translation and the original title. Translation failures are logged and do not block card sending.
+
+## Video Sending
+
+The service always sends the card first. After that it tries video sending only when all conditions are met:
+
+1. The URL is recognized as a video platform.
+2. Duration is known and no longer than `max_video_duration_seconds`.
+3. A downloadable media candidate is available.
+4. Authentication requirements are satisfied by configured cookies if needed.
+5. The downloaded and converted MP4 is within `max_video_file_mb`.
+6. Feishu upload and message send both succeed.
+
+Before upload, videos are converted to MP4 with H.264 video, AAC audio, `yuv420p`, and faststart metadata. The uploader probes the converted file duration with `ffprobe` and sends duration in milliseconds so Feishu can generate a correct preview.
+
+If any video step fails, the service logs the reason and does not send an extra failure message to the chat.
 
 ## Development
 
@@ -79,6 +253,49 @@ For `mode: A`, provide a real message ID to reply to:
 FEISHU_LINK_INTEGRATION_SEND=1 FEISHU_LINK_INTEGRATION_MESSAGE_ID=om_xxx uv run --extra dev pytest tests/test_integration_feishu_send.py
 ```
 
+## Troubleshooting
+
+### Card is sent but video is not sent
+
+Check logs for an explicit reason. Common causes are unknown duration, duration over the configured limit, missing cookies, platform rate limits, download failure, file size over limit, upload failure, or Feishu send failure.
+
+### Instagram or X parsing fails
+
+Try providing platform cookies in Netscape format. Private, deleted, region-restricted, or login-gated posts may still fail even with cookies.
+
+### Feishu video preview shows the wrong duration
+
+Make sure `ffmpeg` and `ffprobe` are available in the runtime image and that uploaded videos are converted before sending. The Docker image includes these tools.
+
+### The service ignores a link
+
+Check `link_blacklist`, platform support, and URL extraction logs. Some apps paste text without a plain `http` URL; the service can only parse links that appear in the message payload or Feishu rich-text link fields.
+
+## Repository Hygiene
+
+The repository intentionally excludes runtime secrets and local agent files:
+
+- `config.yaml`
+- `cookies/`
+- `logs/`
+- `.env`
+- IDE directories
+- local agent instructions
+- `DESIGN.md`
+
+Use `config.example.yaml` as the public template and keep real credentials only in local runtime config or deployment secrets.
+
 ## Architecture
 
-See `DESIGN.md` for the full specification.
+The main runtime entry point is `main.py`. Core modules:
+
+- `feishu_link/listener.py`: Feishu WebSocket event listener
+- `feishu_link/url_extract.py`: URL extraction from text and rich-text messages
+- `feishu_link/dispatch.py`: parser dispatch and fallback behavior
+- `feishu_link/parsers/`: platform and metadata parsers
+- `feishu_link/card.py`: interactive card rendering
+- `feishu_link/image_uploader.py`: cover upload helper
+- `feishu_link/media_downloader.py`: short-video download and conversion
+- `feishu_link/sender.py`: Feishu card, image, and video sending
+- `feishu_link/translator.py`: DeepSeek title translation
+- `feishu_link/pipeline.py`: card-first, video-second orchestration
