@@ -31,7 +31,10 @@ class Dispatcher:
         parser = self._ytdlp if is_short_video_platform(url) else self._og
 
         try:
-            return await parser.parse(url)
+            meta = await parser.parse(url)
+            if parser is self._ytdlp:
+                _normalize_short_platform_meta(meta)
+            return meta
         except ParserError as e:
             if parser is self._ytdlp:
                 try:
@@ -40,8 +43,8 @@ class Dispatcher:
                     meta = await self._fallback.parse(url)
                 meta.platform = meta.platform or "web"
                 meta.media_type = _fallback_media_type(url, meta.platform, e.reason)
-                if meta.media_type == MediaType.ARTICLE and meta.platform == "instagram":
-                    _normalize_instagram_post_meta(meta)
+                if meta.media_type == MediaType.ARTICLE:
+                    _normalize_image_post_meta(meta)
                 meta.parse_warnings.append(
                     _friendly_parse_warning(url, meta.platform, e.reason)
                 )
@@ -60,7 +63,7 @@ class Dispatcher:
                 meta = await self._fallback.parse(url)
         meta.platform = "instagram"
         meta.media_type = MediaType.ARTICLE
-        _normalize_instagram_post_meta(meta)
+        _normalize_image_post_meta(meta)
         meta.parse_warnings = ["instagram 图文内容已发送卡片, 未尝试下载视频"]
         return meta
 
@@ -99,6 +102,8 @@ def _friendly_parse_warning(url: str, platform: str, reason: str) -> str:
     lowered = reason.lower()
     if _is_instagram_post_without_video(url, platform, lowered):
         return "instagram 图文内容已发送卡片, 未发现可下载视频"
+    if _is_x_post_without_video(platform, lowered):
+        return "x 图文内容已发送卡片, 未发现可下载视频"
     if "login required" in lowered or "rate-limit" in lowered or "not available" in lowered:
         return f"{platform} 内容受限或需要 cookie, 已先发送卡片"
     return f"{platform} 视频解析失败, 已先发送卡片"
@@ -110,7 +115,10 @@ def _is_generic_title(title: str, platform: str) -> bool:
 
 
 def _fallback_media_type(url: str, platform: str, reason: str) -> MediaType:
-    if _is_instagram_post_without_video(url, platform, reason.lower()):
+    lowered_reason = reason.lower()
+    if _is_instagram_post_without_video(url, platform, lowered_reason):
+        return MediaType.ARTICLE
+    if _is_x_post_without_video(platform, lowered_reason):
         return MediaType.ARTICLE
     return MediaType.VIDEO
 
@@ -120,6 +128,8 @@ def _fallback_title(url: str, platform: str, media_type: MediaType) -> str:
         if _instagram_path_kind(url) == "p":
             return "Instagram Post"
         return "Instagram"
+    if platform == "x" and media_type == MediaType.ARTICLE:
+        return "X Post"
 
     labels = {
         "instagram": "Instagram Reel",
@@ -139,6 +149,14 @@ def _is_instagram_post_without_video(url: str, platform: str, lowered_reason: st
     )
 
 
+def _is_x_post_without_video(platform: str, lowered_reason: str) -> bool:
+    return platform == "x" and (
+        "no video formats found" in lowered_reason
+        or "unsupported url" in lowered_reason
+        or "no formats" in lowered_reason
+    )
+
+
 def _instagram_path_kind(url: str) -> str:
     parts = [part for part in urlparse(url).path.split("/") if part]
     return parts[0].lower() if parts else ""
@@ -153,27 +171,19 @@ def _is_instagram_image_post_url(url: str) -> bool:
     return "img_index" in parse_qs(parsed.query)
 
 
-def _normalize_instagram_post_meta(meta: LinkMetadata) -> None:
-    meta.site_name = "Instagram"
-    meta.channel = meta.channel or _extract_instagram_handle(meta.description)
-    likes, comments = _extract_instagram_counts(meta.description)
+def _normalize_image_post_meta(meta: LinkMetadata) -> None:
+    if meta.platform == "instagram":
+        _normalize_instagram_post_meta(meta)
+        return
+    if meta.platform == "x":
+        _normalize_x_post_meta(meta)
 
-    caption = _extract_instagram_caption(meta.description) or _extract_instagram_caption(
-        meta.title
-    )
-    if caption:
-        meta.description = caption
 
-    if not meta.title or _is_generic_title(meta.title, meta.platform) or caption:
-        if meta.channel:
-            meta.title = f"Post by {meta.channel}"
-        else:
-            meta.title = "Instagram Post"
-
-    if meta.like_count is None:
-        meta.like_count = likes
-    if meta.comment_count is None:
-        meta.comment_count = comments
+def _normalize_short_platform_meta(meta: LinkMetadata) -> None:
+    if meta.platform == "x" and meta.media_type != MediaType.VIDEO:
+        meta.media_type = MediaType.ARTICLE
+        _normalize_x_post_meta(meta)
+        meta.parse_warnings = ["x 图文内容已发送卡片, 未尝试下载视频"]
 
 
 def _extract_instagram_caption(text: str) -> str:
@@ -218,3 +228,57 @@ def _parse_compact_count(match: re.Match[str] | None) -> int | None:
 
 def _clean_caption(text: str) -> str:
     return " ".join(text.strip().split())
+
+
+def _normalize_instagram_post_meta(meta: LinkMetadata) -> None:
+    meta.site_name = "Instagram"
+    meta.channel = meta.channel or _extract_instagram_handle(meta.description)
+    likes, comments = _extract_instagram_counts(meta.description)
+
+    caption = _extract_instagram_caption(meta.description) or _extract_instagram_caption(
+        meta.title
+    )
+    if caption:
+        meta.description = caption
+
+    if not meta.title or _is_generic_title(meta.title, meta.platform) or caption:
+        if meta.channel:
+            meta.title = f"Post by {meta.channel}"
+        else:
+            meta.title = "Instagram Post"
+
+    if meta.like_count is None:
+        meta.like_count = likes
+    if meta.comment_count is None:
+        meta.comment_count = comments
+
+
+def _normalize_x_post_meta(meta: LinkMetadata) -> None:
+    meta.site_name = "X"
+    meta.channel = _normalize_x_channel(meta.channel)
+    description = _clean_caption(meta.description)
+
+    if description:
+        meta.description = description
+    elif meta.title and not _is_generic_title(meta.title, meta.platform):
+        meta.description = _clean_x_title(meta.title)
+
+    if not meta.title or _is_generic_title(meta.title, meta.platform) or meta.description:
+        if meta.channel:
+            meta.title = f"Post by {meta.channel}"
+        else:
+            meta.title = "X Post"
+
+
+def _normalize_x_channel(channel: str | None) -> str | None:
+    if not channel:
+        return None
+    normalized = channel.strip()
+    return normalized if normalized.startswith("@") else f"@{normalized}"
+
+
+def _clean_x_title(title: str) -> str:
+    cleaned = re.sub(r"\s*/\s*X\s*$", "", title.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r"^X\s+on\s+X:\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^[^:]{1,80}\s+on\s+X:\s*", "", cleaned, flags=re.IGNORECASE)
+    return _clean_caption(cleaned.strip("\""))
