@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     mode: Mode = Mode.A
     archive_chat_id: str = ""  # required for mode B
     youtube_api_key: str = ""
+    link_allowlist: list[str] = []
     link_blacklist: list[str] = []
 
     log_level: str = "INFO"
@@ -49,7 +50,15 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-chat"
     translation_timeout: float = 10.0
 
+    _allowlist_patterns: list[re.Pattern[str]] = []
     _blacklist_patterns: list[re.Pattern[str]] = []
+
+    @field_validator("link_allowlist", mode="before")
+    @classmethod
+    def _parse_allowlist(cls, v: Any) -> list[str]:
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v  # type: ignore[return-value]
 
     @field_validator("link_blacklist", mode="before")
     @classmethod
@@ -67,6 +76,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _compile_patterns(self) -> Settings:
+        self._allowlist_patterns = [re.compile(p) for p in self.link_allowlist]
         self._blacklist_patterns = [re.compile(p) for p in self.link_blacklist]
         self.allowed_video_platforms = [
             platform.strip().lower()
@@ -74,6 +84,11 @@ class Settings(BaseSettings):
             if platform.strip()
         ]
         return self
+
+    def is_allowed(self, url: str) -> bool:
+        if not self._allowlist_patterns:
+            return True
+        return any(p.search(url) for p in self._allowlist_patterns)
 
     def is_blacklisted(self, url: str) -> bool:
         return any(p.search(url) for p in self._blacklist_patterns)

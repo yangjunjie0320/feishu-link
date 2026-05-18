@@ -11,4 +11,6 @@ def test_detect_platforms() -> None:
     assert detect_platform("https://www.tiktok.com/@u/video/123") == "tiktok"
     assert detect_platform("https://youtu.be/abc") == "youtube"
     assert detect_platform("https://twitter.com/u/status/123") == "x"
+    assert detect_platform("https://www.zhihu.com/question/123/answer/456") == "zhihu"
+    assert detect_platform("https://zhuanlan.zhihu.com/p/123") == "zhihu"
     assert detect_platform("https://example.com") == "web"

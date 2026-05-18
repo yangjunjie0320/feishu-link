@@ -15,7 +15,20 @@ archive_chat_id: ""
 # Without this, falls back to OG scraping (no duration).
 youtube_api_key: ""
 
-# Regex patterns to skip (comma-separated or YAML list)
+# Regex patterns to allow. If non-empty, only matching URLs are parsed.
+link_allowlist:
+  - "bilibili\\.com"
+  - "b23\\.tv"
+  - "instagram\\.com"
+  - "tiktok\\.com"
+  - "youtube\\.com"
+  - "youtu\\.be"
+  - "x\\.com"
+  - "twitter\\.com"
+  - "zhihu\\.com"
+  - "zhuanlan\\.zhihu\\.com"
+
+# Regex patterns to skip even when allowlisted (comma-separated or YAML list)
 link_blacklist:
   - "localhost"
   - "127\\.0\\.0\\.1"

@@ -29,6 +29,8 @@ def extract_urls(message_type: str, content_raw: str, settings: Settings) -> lis
         seen.add(url)
         if _SKIP_DOMAINS.match(url):
             continue
+        if not settings.is_allowed(url):
+            continue
         if settings.is_blacklisted(url):
             continue
         result.append(url)

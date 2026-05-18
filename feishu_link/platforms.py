@@ -24,6 +24,8 @@ def detect_platform(url: str) -> str:
         return "youtube"
     if domain in {"x.com", "twitter.com"} or domain.endswith(".twitter.com"):
         return "x"
+    if domain in {"zhihu.com", "zhuanlan.zhihu.com"} or domain.endswith(".zhihu.com"):
+        return "zhihu"
     return "web"
 
 

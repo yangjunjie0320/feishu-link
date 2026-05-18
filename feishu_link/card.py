@@ -13,6 +13,7 @@ _SOURCE_COLORS = {
     "bilibili": "blue",
     "instagram": "purple",
     "tiktok": "grey",
+    "zhihu": "blue",
 }
 
 

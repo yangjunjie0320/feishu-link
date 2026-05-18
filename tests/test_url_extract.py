@@ -38,6 +38,27 @@ def test_blacklist(s: Settings) -> None:
     assert extract_urls("text", content, s2) == []
 
 
+def test_allowlist_excludes_unknown_domains() -> None:
+    settings = Settings(link_allowlist=["youtube\\.com", "youtu\\.be"])
+    content = json.dumps({
+        "text": "https://example.com https://www.youtube.com/watch?v=abc"
+    })
+    assert extract_urls("text", content, settings) == [
+        "https://www.youtube.com/watch?v=abc"
+    ]
+
+
+def test_blacklist_overrides_allowlist() -> None:
+    settings = Settings(
+        link_allowlist=["example\\.com"],
+        link_blacklist=["example\\.com/private"],
+    )
+    content = json.dumps({
+        "text": "https://example.com/public https://example.com/private"
+    })
+    assert extract_urls("text", content, settings) == ["https://example.com/public"]
+
+
 def test_no_url(s: Settings) -> None:
     content = json.dumps({"text": "hello world"})
     assert extract_urls("text", content, s) == []
