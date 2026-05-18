@@ -153,3 +153,38 @@ def test_social_image_card_does_not_show_technical_warning() -> None:
     )
     assert "未尝试下载视频" not in body_text
     assert "图文内容已发送卡片" not in body_text
+
+
+def test_other_social_article_card_uses_description_as_primary() -> None:
+    meta = LinkMetadata(
+        source_url="https://www.tiktok.com/@u/photo/123",
+        title="TikTok Post",
+        description="A tiny desk setup with three vintage monitors.",
+        translated_description="一个摆着三台复古显示器的小桌面布置。",
+        site_name="TikTok",
+        platform="tiktok",
+    )
+    card = json.loads(build_card(meta))
+    body_text = next(
+        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
+    )
+    assert body_text.startswith("一个摆着三台复古显示器的小桌面布置。")
+    assert "原文: A tiny desk setup" in body_text
+    assert "TikTok Post" not in body_text
+
+
+def test_web_article_card_keeps_title_primary() -> None:
+    meta = LinkMetadata(
+        source_url="https://example.com/post",
+        title="Article Title",
+        description="A short article summary.",
+        translated_description="一段短文章摘要。",
+        site_name="Example",
+        platform="web",
+    )
+    card = json.loads(build_card(meta))
+    body_text = next(
+        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
+    )
+    assert body_text.startswith("**Article Title**")
+    assert "一段短文章摘要。" in body_text

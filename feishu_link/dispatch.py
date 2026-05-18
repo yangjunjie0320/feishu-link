@@ -104,6 +104,8 @@ def _friendly_parse_warning(url: str, platform: str, reason: str) -> str:
         return ""
     if _is_x_post_without_video(platform, lowered):
         return ""
+    if _is_social_post_without_video(platform, lowered):
+        return ""
     if "login required" in lowered or "rate-limit" in lowered or "not available" in lowered:
         return f"{platform} 内容受限或需要 cookie, 已先发送卡片"
     return f"{platform} 视频解析失败, 已先发送卡片"
@@ -120,6 +122,8 @@ def _fallback_media_type(url: str, platform: str, reason: str) -> MediaType:
         return MediaType.ARTICLE
     if _is_x_post_without_video(platform, lowered_reason):
         return MediaType.ARTICLE
+    if _is_social_post_without_video(platform, lowered_reason):
+        return MediaType.ARTICLE
     return MediaType.VIDEO
 
 
@@ -130,6 +134,8 @@ def _fallback_title(url: str, platform: str, media_type: MediaType) -> str:
         return "Instagram"
     if platform == "x" and media_type == MediaType.ARTICLE:
         return "X Post"
+    if platform == "tiktok" and media_type == MediaType.ARTICLE:
+        return "TikTok Post"
 
     labels = {
         "instagram": "Instagram Reel",
@@ -157,6 +163,14 @@ def _is_x_post_without_video(platform: str, lowered_reason: str) -> bool:
     )
 
 
+def _is_social_post_without_video(platform: str, lowered_reason: str) -> bool:
+    return platform in {"tiktok"} and (
+        "no video formats found" in lowered_reason
+        or "unsupported url" in lowered_reason
+        or "no formats" in lowered_reason
+    )
+
+
 def _instagram_path_kind(url: str) -> str:
     parts = [part for part in urlparse(url).path.split("/") if part]
     return parts[0].lower() if parts else ""
@@ -177,12 +191,19 @@ def _normalize_image_post_meta(meta: LinkMetadata) -> None:
         return
     if meta.platform == "x":
         _normalize_x_post_meta(meta)
+        return
+    if meta.platform in {"tiktok"}:
+        _normalize_generic_social_post_meta(meta)
 
 
 def _normalize_short_platform_meta(meta: LinkMetadata) -> None:
     if meta.platform == "x" and meta.media_type != MediaType.VIDEO:
         meta.media_type = MediaType.ARTICLE
         _normalize_x_post_meta(meta)
+        meta.parse_warnings = []
+    if meta.platform in {"tiktok"} and meta.media_type != MediaType.VIDEO:
+        meta.media_type = MediaType.ARTICLE
+        _normalize_generic_social_post_meta(meta)
         meta.parse_warnings = []
 
 
@@ -282,3 +303,18 @@ def _clean_x_title(title: str) -> str:
     cleaned = re.sub(r"^X\s+on\s+X:\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^[^:]{1,80}\s+on\s+X:\s*", "", cleaned, flags=re.IGNORECASE)
     return _clean_caption(cleaned.strip("\""))
+
+
+def _normalize_generic_social_post_meta(meta: LinkMetadata) -> None:
+    meta.channel = meta.channel or None
+    if meta.description:
+        meta.description = _clean_caption(meta.description)
+    if not meta.title or _is_generic_title(meta.title, meta.platform):
+        meta.title = _generic_social_post_title(meta.platform)
+
+
+def _generic_social_post_title(platform: str) -> str:
+    labels = {
+        "tiktok": "TikTok Post",
+    }
+    return labels.get(platform, "Post")

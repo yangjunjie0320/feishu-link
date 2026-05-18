@@ -123,7 +123,7 @@ def _description_should_be_primary(meta: LinkMetadata, description_block: str) -
     return bool(
         description_block
         and meta.media_type.value == "article"
-        and meta.platform in {"instagram", "x"}
+        and meta.platform != "web"
     )
 
 

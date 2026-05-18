@@ -38,6 +38,15 @@ def test_x_post_without_video_is_treated_as_image_post() -> None:
     assert _friendly_parse_warning(url, "x", reason) == ""
 
 
+def test_tiktok_post_without_video_is_treated_as_image_post() -> None:
+    url = "https://www.tiktok.com/@example/photo/123"
+    reason = "yt-dlp metadata failed: ERROR: [TikTok] 123: No video formats found!"
+
+    assert _fallback_media_type(url, "tiktok", reason) == MediaType.ARTICLE
+    assert _fallback_title(url, "tiktok", MediaType.ARTICLE) == "TikTok Post"
+    assert _friendly_parse_warning(url, "tiktok", reason) == ""
+
+
 def test_normalize_instagram_post_extracts_caption_author_and_counts() -> None:
     meta = LinkMetadata(
         source_url="https://www.instagram.com/p/DXPd2NUiM2n/?img_index=3",
