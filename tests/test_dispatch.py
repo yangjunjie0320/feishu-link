@@ -14,10 +14,7 @@ def test_instagram_post_without_video_is_treated_as_image_post() -> None:
 
     assert _fallback_media_type(url, "instagram", reason) == MediaType.ARTICLE
     assert _fallback_title(url, "instagram", MediaType.ARTICLE) == "Instagram Post"
-    assert (
-        _friendly_parse_warning(url, "instagram", reason)
-        == "instagram 图文内容已发送卡片, 未发现可下载视频"
-    )
+    assert _friendly_parse_warning(url, "instagram", reason) == ""
 
 
 def test_instagram_reel_parse_failure_still_reports_video_failure() -> None:
@@ -38,10 +35,7 @@ def test_x_post_without_video_is_treated_as_image_post() -> None:
 
     assert _fallback_media_type(url, "x", reason) == MediaType.ARTICLE
     assert _fallback_title(url, "x", MediaType.ARTICLE) == "X Post"
-    assert (
-        _friendly_parse_warning(url, "x", reason)
-        == "x 图文内容已发送卡片, 未发现可下载视频"
-    )
+    assert _friendly_parse_warning(url, "x", reason) == ""
 
 
 def test_normalize_instagram_post_extracts_caption_author_and_counts() -> None:

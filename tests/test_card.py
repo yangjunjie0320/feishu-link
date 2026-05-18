@@ -125,6 +125,7 @@ def test_card_with_translated_description_keeps_original() -> None:
         description="BMW M1 widebody, covered in custom rhinestone artwork.",
         translated_description="BMW M1 宽体车, 覆盖定制水钻艺术装饰。",
         site_name="Instagram",
+        platform="instagram",
     )
     card = json.loads(build_card(meta))
     body_text = next(
@@ -132,3 +133,23 @@ def test_card_with_translated_description_keeps_original() -> None:
     )
     assert "BMW M1 宽体车" in body_text
     assert "原文: BMW M1 widebody" in body_text
+    assert "Post by beccu.studio" not in body_text
+    assert "原标题" not in body_text
+
+
+def test_social_image_card_does_not_show_technical_warning() -> None:
+    meta = LinkMetadata(
+        source_url="https://www.instagram.com/p/abc/",
+        title="Post by beccu.studio",
+        description="Get in, loser. We're going shopping.",
+        translated_description="上车吧, 失败者。我们去购物。",
+        site_name="Instagram",
+        platform="instagram",
+        parse_warnings=[],
+    )
+    card = json.loads(build_card(meta))
+    body_text = next(
+        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
+    )
+    assert "未尝试下载视频" not in body_text
+    assert "图文内容已发送卡片" not in body_text

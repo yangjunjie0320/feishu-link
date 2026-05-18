@@ -69,11 +69,15 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
     if meta.duration_seconds is not None:
         meta_parts.append(_fmt_duration(meta.duration_seconds))
 
-    raw_title = meta.translated_title or meta.title
-    title = _truncate(raw_title, 60) if raw_title else (meta.site_name or "Link")
-    body = f"**{title}**"
-    if meta.translated_title and meta.title:
-        body += f"\n<font color='grey'>原标题: {escape(_truncate(meta.title, 80))}</font>"
+    description_block = _format_description_block(meta)
+    if _description_should_be_primary(meta, description_block):
+        body = description_block
+    else:
+        raw_title = meta.translated_title or meta.title
+        title = _truncate(raw_title, 60) if raw_title else (meta.site_name or "Link")
+        body = f"**{title}**"
+        if meta.translated_title and meta.title:
+            body += f"\n<font color='grey'>原标题: {escape(_truncate(meta.title, 80))}</font>"
     if meta_parts:
         tag = _format_source_tag(meta_parts[0])
         body += f"\n{tag}"
@@ -82,8 +86,7 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
     stats = _format_stats(meta)
     if stats:
         body += f"\n<font color='grey'>{escape(stats)}</font>"
-    description_block = _format_description_block(meta)
-    if description_block:
+    if description_block and not _description_should_be_primary(meta, description_block):
         body += f"\n{description_block}"
     if meta.parse_warnings:
         body += f"\n<font color='grey'>{escape(_truncate(meta.parse_warnings[0], 80))}</font>"
@@ -114,6 +117,14 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
     }
 
     return json.dumps(card, ensure_ascii=False)
+
+
+def _description_should_be_primary(meta: LinkMetadata, description_block: str) -> bool:
+    return bool(
+        description_block
+        and meta.media_type.value == "article"
+        and meta.platform in {"instagram", "x"}
+    )
 
 
 def _format_description_block(meta: LinkMetadata) -> str:

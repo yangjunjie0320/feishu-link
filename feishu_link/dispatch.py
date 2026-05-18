@@ -45,9 +45,9 @@ class Dispatcher:
                 meta.media_type = _fallback_media_type(url, meta.platform, e.reason)
                 if meta.media_type == MediaType.ARTICLE:
                     _normalize_image_post_meta(meta)
-                meta.parse_warnings.append(
-                    _friendly_parse_warning(url, meta.platform, e.reason)
-                )
+                warning = _friendly_parse_warning(url, meta.platform, e.reason)
+                if warning:
+                    meta.parse_warnings.append(warning)
                 if _is_generic_title(meta.title, meta.platform):
                     meta.title = _fallback_title(url, meta.platform, meta.media_type)
                 return meta
@@ -64,7 +64,7 @@ class Dispatcher:
         meta.platform = "instagram"
         meta.media_type = MediaType.ARTICLE
         _normalize_image_post_meta(meta)
-        meta.parse_warnings = ["instagram 图文内容已发送卡片, 未尝试下载视频"]
+        meta.parse_warnings = []
         return meta
 
     async def _parse_youtube(self, url: str) -> LinkMetadata:
@@ -101,9 +101,9 @@ class Dispatcher:
 def _friendly_parse_warning(url: str, platform: str, reason: str) -> str:
     lowered = reason.lower()
     if _is_instagram_post_without_video(url, platform, lowered):
-        return "instagram 图文内容已发送卡片, 未发现可下载视频"
+        return ""
     if _is_x_post_without_video(platform, lowered):
-        return "x 图文内容已发送卡片, 未发现可下载视频"
+        return ""
     if "login required" in lowered or "rate-limit" in lowered or "not available" in lowered:
         return f"{platform} 内容受限或需要 cookie, 已先发送卡片"
     return f"{platform} 视频解析失败, 已先发送卡片"
@@ -183,7 +183,7 @@ def _normalize_short_platform_meta(meta: LinkMetadata) -> None:
     if meta.platform == "x" and meta.media_type != MediaType.VIDEO:
         meta.media_type = MediaType.ARTICLE
         _normalize_x_post_meta(meta)
-        meta.parse_warnings = ["x 图文内容已发送卡片, 未尝试下载视频"]
+        meta.parse_warnings = []
 
 
 def _extract_instagram_caption(text: str) -> str:
