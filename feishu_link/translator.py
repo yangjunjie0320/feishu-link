@@ -31,6 +31,8 @@ class TitleTranslator:
             return
         if not meta.title.strip():
             return
+        if _is_generic_social_title(meta.title, meta.platform):
+            return
         if contains_chinese(meta.title):
             return
 
@@ -93,3 +95,15 @@ def _clean_translation(text: str) -> str:
     cleaned = text.strip().strip("\"'")
     cleaned = cleaned.strip(chr(0x201C) + chr(0x201D) + chr(0x2018) + chr(0x2019))
     return " ".join(cleaned.split())
+
+
+def _is_generic_social_title(title: str, platform: str) -> bool:
+    normalized = " ".join(title.strip().lower().split())
+    generic_titles = {
+        "instagram": {"instagram", "instagram reel", "instagram post"},
+        "tiktok": {"tiktok", "tiktok video"},
+        "x": {"x", "x video", "twitter", "twitter video"},
+        "bilibili": {"bilibili", "bilibili video"},
+        "youtube": {"youtube", "youtube video"},
+    }
+    return normalized in generic_titles.get(platform.strip().lower(), set())

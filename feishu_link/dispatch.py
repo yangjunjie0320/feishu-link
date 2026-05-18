@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 import httpx
 
 from .config import Settings
@@ -34,10 +36,12 @@ class Dispatcher:
                 except ParserError:
                     meta = await self._fallback.parse(url)
                 meta.platform = meta.platform or "web"
-                meta.media_type = MediaType.VIDEO
-                meta.parse_warnings.append(_friendly_parse_warning(meta.platform, e.reason))
+                meta.media_type = _fallback_media_type(url, meta.platform, e.reason)
+                meta.parse_warnings.append(
+                    _friendly_parse_warning(url, meta.platform, e.reason)
+                )
                 if _is_generic_title(meta.title, meta.platform):
-                    meta.title = _fallback_video_title(meta.platform)
+                    meta.title = _fallback_title(url, meta.platform, meta.media_type)
                 return meta
             return await self._fallback.parse(url)
 
@@ -72,8 +76,10 @@ class Dispatcher:
         return meta
 
 
-def _friendly_parse_warning(platform: str, reason: str) -> str:
+def _friendly_parse_warning(url: str, platform: str, reason: str) -> str:
     lowered = reason.lower()
+    if _is_instagram_post_without_video(url, platform, lowered):
+        return "instagram 图文内容已发送卡片, 未发现可下载视频"
     if "login required" in lowered or "rate-limit" in lowered or "not available" in lowered:
         return f"{platform} 内容受限或需要 cookie, 已先发送卡片"
     return f"{platform} 视频解析失败, 已先发送卡片"
@@ -84,7 +90,18 @@ def _is_generic_title(title: str, platform: str) -> bool:
     return normalized in {"", platform, "instagram", "x", "twitter", "tiktok"}
 
 
-def _fallback_video_title(platform: str) -> str:
+def _fallback_media_type(url: str, platform: str, reason: str) -> MediaType:
+    if _is_instagram_post_without_video(url, platform, reason.lower()):
+        return MediaType.ARTICLE
+    return MediaType.VIDEO
+
+
+def _fallback_title(url: str, platform: str, media_type: MediaType) -> str:
+    if platform == "instagram" and media_type == MediaType.ARTICLE:
+        if _instagram_path_kind(url) == "p":
+            return "Instagram Post"
+        return "Instagram"
+
     labels = {
         "instagram": "Instagram Reel",
         "tiktok": "TikTok Video",
@@ -93,3 +110,16 @@ def _fallback_video_title(platform: str) -> str:
         "youtube": "YouTube Video",
     }
     return labels.get(platform, "Video")
+
+
+def _is_instagram_post_without_video(url: str, platform: str, lowered_reason: str) -> bool:
+    return (
+        platform == "instagram"
+        and _instagram_path_kind(url) == "p"
+        and "no video formats found" in lowered_reason
+    )
+
+
+def _instagram_path_kind(url: str) -> str:
+    parts = [part for part in urlparse(url).path.split("/") if part]
+    return parts[0].lower() if parts else ""
