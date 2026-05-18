@@ -66,6 +66,33 @@ async def test_translate_non_chinese_title() -> None:
     assert meta.translated_title == "超级反派来了"
 
 
+@respx.mock
+async def test_translate_non_chinese_description() -> None:
+    settings = Settings(
+        title_translation_enabled=True,
+        deepseek_api_key="test-key",
+    )
+    respx.post("https://api.deepseek.com/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "BMW M1 宽体车, 覆盖定制水钻艺术装饰"}}]},
+        )
+    )
+    meta = LinkMetadata(
+        source_url="https://www.instagram.com/p/abc/",
+        title="Instagram Post",
+        description="BMW M1 widebody, covered in custom rhinestone artwork",
+        platform="instagram",
+    )
+
+    async with httpx.AsyncClient() as client:
+        translator = TitleTranslator(settings, client)
+        await translator.translate_metadata(meta)
+
+    assert meta.translated_title == ""
+    assert meta.translated_description == "BMW M1 宽体车, 覆盖定制水钻艺术装饰"
+
+
 @pytest.mark.parametrize("text,expected", [
     ("\"中文标题\"", "中文标题"),
     ("  hello   world  ", "hello world"),

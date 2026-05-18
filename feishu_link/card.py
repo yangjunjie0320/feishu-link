@@ -82,6 +82,9 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
     stats = _format_stats(meta)
     if stats:
         body += f"\n<font color='grey'>{escape(stats)}</font>"
+    description_block = _format_description_block(meta)
+    if description_block:
+        body += f"\n{description_block}"
     if meta.parse_warnings:
         body += f"\n<font color='grey'>{escape(_truncate(meta.parse_warnings[0], 80))}</font>"
 
@@ -111,6 +114,19 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
     }
 
     return json.dumps(card, ensure_ascii=False)
+
+
+def _format_description_block(meta: LinkMetadata) -> str:
+    description = meta.description.strip()
+    translated = meta.translated_description.strip()
+    if translated and description:
+        return (
+            f"{escape(_truncate(translated, 120))}\n"
+            f"<font color='grey'>原文: {escape(_truncate(description, 160))}</font>"
+        )
+    if description and meta.media_type.value == "article":
+        return f"<font color='grey'>{escape(_truncate(description, 160))}</font>"
+    return ""
 
 
 def _build_compact_media_row(

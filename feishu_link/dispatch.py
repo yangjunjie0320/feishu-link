@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from urllib.parse import urlparse
+import re
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -23,6 +24,8 @@ class Dispatcher:
     async def parse(self, url: str) -> LinkMetadata:
         if is_youtube_url(url):
             return await self._parse_youtube(url)
+        if _is_instagram_image_post_url(url):
+            return await self._parse_instagram_image_post(url)
 
         parser: Parser
         parser = self._ytdlp if is_short_video_platform(url) else self._og
@@ -37,6 +40,8 @@ class Dispatcher:
                     meta = await self._fallback.parse(url)
                 meta.platform = meta.platform or "web"
                 meta.media_type = _fallback_media_type(url, meta.platform, e.reason)
+                if meta.media_type == MediaType.ARTICLE and meta.platform == "instagram":
+                    _normalize_instagram_post_meta(meta)
                 meta.parse_warnings.append(
                     _friendly_parse_warning(url, meta.platform, e.reason)
                 )
@@ -44,6 +49,20 @@ class Dispatcher:
                     meta.title = _fallback_title(url, meta.platform, meta.media_type)
                 return meta
             return await self._fallback.parse(url)
+
+    async def _parse_instagram_image_post(self, url: str) -> LinkMetadata:
+        try:
+            meta = await self._ytdlp.parse(url)
+        except ParserError:
+            try:
+                meta = await self._og.parse(url)
+            except ParserError:
+                meta = await self._fallback.parse(url)
+        meta.platform = "instagram"
+        meta.media_type = MediaType.ARTICLE
+        _normalize_instagram_post_meta(meta)
+        meta.parse_warnings = ["instagram 图文内容已发送卡片, 未尝试下载视频"]
+        return meta
 
     async def _parse_youtube(self, url: str) -> LinkMetadata:
         try:
@@ -123,3 +142,79 @@ def _is_instagram_post_without_video(url: str, platform: str, lowered_reason: st
 def _instagram_path_kind(url: str) -> str:
     parts = [part for part in urlparse(url).path.split("/") if part]
     return parts[0].lower() if parts else ""
+
+
+def _is_instagram_image_post_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if _instagram_path_kind(url) != "p":
+        return False
+    if "instagram.com" not in parsed.netloc.lower():
+        return False
+    return "img_index" in parse_qs(parsed.query)
+
+
+def _normalize_instagram_post_meta(meta: LinkMetadata) -> None:
+    meta.site_name = "Instagram"
+    meta.channel = meta.channel or _extract_instagram_handle(meta.description)
+    likes, comments = _extract_instagram_counts(meta.description)
+
+    caption = _extract_instagram_caption(meta.description) or _extract_instagram_caption(
+        meta.title
+    )
+    if caption:
+        meta.description = caption
+
+    if not meta.title or _is_generic_title(meta.title, meta.platform) or caption:
+        if meta.channel:
+            meta.title = f"Post by {meta.channel}"
+        else:
+            meta.title = "Instagram Post"
+
+    if meta.like_count is None:
+        meta.like_count = likes
+    if meta.comment_count is None:
+        meta.comment_count = comments
+
+
+def _extract_instagram_caption(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return ""
+
+    quoted = re.search(r':\s*"(?P<caption>.+?)"\.?\s*$', stripped, flags=re.DOTALL)
+    if quoted:
+        return _clean_caption(quoted.group("caption"))
+
+    title_match = re.search(
+        r"\bon instagram:\s*\"(?P<caption>.+?)\"\s*$",
+        stripped,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if title_match:
+        return _clean_caption(title_match.group("caption"))
+
+    return ""
+
+
+def _extract_instagram_handle(description: str) -> str | None:
+    match = re.search(r"-\s*([A-Za-z0-9._]+)\s+on\s+", description)
+    return match.group(1) if match else None
+
+
+def _extract_instagram_counts(description: str) -> tuple[int | None, int | None]:
+    likes_match = re.search(r"([\d,.]+)\s*([KMB])?\s+likes?", description, re.I)
+    comments_match = re.search(r"([\d,.]+)\s*([KMB])?\s+comments?", description, re.I)
+    return _parse_compact_count(likes_match), _parse_compact_count(comments_match)
+
+
+def _parse_compact_count(match: re.Match[str] | None) -> int | None:
+    if not match:
+        return None
+    number = float(match.group(1).replace(",", ""))
+    suffix = (match.group(2) or "").upper()
+    multiplier = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suffix, 1)
+    return int(number * multiplier)
+
+
+def _clean_caption(text: str) -> str:
+    return " ".join(text.strip().split())

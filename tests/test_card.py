@@ -116,3 +116,19 @@ def test_card_with_translated_title_keeps_original() -> None:
     )
     assert "**兄弟, 我们快要造出超级反派了**" in body_text
     assert "原标题: Bro we boutta get some super villains" in body_text
+
+
+def test_card_with_translated_description_keeps_original() -> None:
+    meta = LinkMetadata(
+        source_url="https://www.instagram.com/p/abc/",
+        title="Post by beccu.studio",
+        description="BMW M1 widebody, covered in custom rhinestone artwork.",
+        translated_description="BMW M1 宽体车, 覆盖定制水钻艺术装饰。",
+        site_name="Instagram",
+    )
+    card = json.loads(build_card(meta))
+    body_text = next(
+        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
+    )
+    assert "BMW M1 宽体车" in body_text
+    assert "原文: BMW M1 widebody" in body_text

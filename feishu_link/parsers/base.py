@@ -35,6 +35,7 @@ class LinkMetadata:
     title: str = ""
     translated_title: str = ""
     description: str = ""
+    translated_description: str = ""
     cover_url: str = ""
     site_name: str = ""
     platform: str = "web"

@@ -33,6 +33,7 @@ class YtDlpMetadataParser:
                     "skip_download": True,
                     "noplaylist": True,
                     "noprogress": True,
+                    "ignore_no_formats_error": True,
                     "logger": _YtDlpLogger(),
                 }
                 if temp_cookie_file:
