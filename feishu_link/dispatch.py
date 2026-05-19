@@ -18,8 +18,8 @@ class Dispatcher:
     def __init__(self, settings: Settings, client: httpx.AsyncClient) -> None:
         self._youtube = YouTubeParser(client, api_key=settings.youtube_api_key)
         self._ytdlp = YtDlpMetadataParser(settings)
-        self._og = OGMetaParser(client)
-        self._fallback = FallbackParser(client)
+        self._og = OGMetaParser(client, settings)
+        self._fallback = FallbackParser(client, settings)
 
     async def parse(self, url: str) -> LinkMetadata:
         if is_youtube_url(url):

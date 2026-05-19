@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from ..config import Settings
+from ..cookie_utils import cookie_header_from_netscape_file
 from ..platforms import detect_platform
 from .base import LinkMetadata, ParserError
 
@@ -20,14 +22,16 @@ _USER_AGENT = (
 
 
 class OGMetaParser:
-    def __init__(self, client: httpx.AsyncClient) -> None:
+    def __init__(self, client: httpx.AsyncClient, settings: Settings | None = None) -> None:
         self._client = client
+        self._settings = settings
 
     async def parse(self, url: str) -> LinkMetadata:
+        platform = detect_platform(url)
         try:
             resp = await self._client.get(
                 url,
-                headers={"User-Agent": _USER_AGENT},
+                headers=_request_headers(platform, self._settings),
                 follow_redirects=True,
             )
         except httpx.RequestError as e:
@@ -46,7 +50,7 @@ class OGMetaParser:
             description=meta.get("og:description", ""),
             cover_url=meta.get("og:image", ""),
             site_name=meta.get("og:site_name") or domain,
-            platform=detect_platform(url),
+            platform=platform,
         )
 
 
@@ -63,3 +67,15 @@ def _extract_og(soup: BeautifulSoup) -> dict[str, str]:
 def _tag_text(soup: BeautifulSoup, tag: str) -> str:
     el = soup.find(tag)
     return el.get_text(strip=True) if el else ""
+
+
+def _request_headers(platform: str, settings: Settings | None) -> dict[str, str]:
+    headers = {"User-Agent": _USER_AGENT}
+    if settings is None:
+        return headers
+    cookie_header = cookie_header_from_netscape_file(
+        settings.cookie_file_for_platform(platform)
+    )
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    return headers
