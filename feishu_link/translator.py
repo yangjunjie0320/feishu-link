@@ -155,7 +155,7 @@ def _is_generic_social_title(title: str, platform: str) -> bool:
     generic_titles = {
         "instagram": {"instagram", "instagram reel", "instagram post"},
         "tiktok": {"tiktok", "tiktok video"},
-        "x": {"x", "x video", "twitter", "twitter video"},
+        "x": {"x", "x video", "x post", "twitter", "twitter video", "twitter post"},
         "bilibili": {"bilibili", "bilibili video"},
         "youtube": {"youtube", "youtube video"},
     }

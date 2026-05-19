@@ -42,6 +42,23 @@ async def test_translate_skips_generic_social_title() -> None:
     assert meta.translated_title == ""
 
 
+async def test_translate_skips_x_post_title() -> None:
+    settings = Settings(
+        title_translation_enabled=True,
+        deepseek_api_key="test-key",
+    )
+    meta = LinkMetadata(
+        source_url="https://x.com/example/status/123",
+        title="X Post",
+        platform="x",
+    )
+    async with httpx.AsyncClient() as client:
+        translator = TitleTranslator(settings, client)
+        await translator.translate_metadata(meta)
+
+    assert meta.translated_title == ""
+
+
 @respx.mock
 async def test_translate_non_chinese_title() -> None:
     settings = Settings(

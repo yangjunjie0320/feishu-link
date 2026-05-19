@@ -94,3 +94,21 @@ def test_normalize_x_post_extracts_text_and_author() -> None:
     assert meta.description == "A compact electric wagon concept with solar roof"
     assert meta.like_count == 123
     assert meta.repost_count == 9
+
+
+def test_normalize_x_post_drops_placeholder_page() -> None:
+    meta = LinkMetadata(
+        source_url="https://x.com/example/status/123",
+        title="x.com",
+        description="x.com",
+        platform="x",
+        media_type=MediaType.ARTICLE,
+    )
+
+    _normalize_x_post_meta(meta)
+
+    assert meta.title == "X Post"
+    assert meta.description == ""
+    assert meta.parse_warnings == [
+        "X 内容受限或需要 cookie, 无法获取正文, 已先发送卡片"
+    ]

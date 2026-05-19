@@ -9,15 +9,17 @@ from .config import Settings
 from .parsers.base import LinkMetadata, MediaType, Parser, ParserError
 from .parsers.fallback import FallbackParser
 from .parsers.og_meta import OGMetaParser
+from .parsers.x_oembed import XOEmbedParser
 from .parsers.youtube import YouTubeParser, is_youtube_url
 from .parsers.ytdlp import YtDlpMetadataParser
-from .platforms import is_short_video_platform
+from .platforms import detect_platform, is_short_video_platform
 
 
 class Dispatcher:
     def __init__(self, settings: Settings, client: httpx.AsyncClient) -> None:
         self._youtube = YouTubeParser(client, api_key=settings.youtube_api_key)
         self._ytdlp = YtDlpMetadataParser(settings)
+        self._x_oembed = XOEmbedParser(client)
         self._og = OGMetaParser(client, settings)
         self._fallback = FallbackParser(client, settings)
 
@@ -37,10 +39,13 @@ class Dispatcher:
             return meta
         except ParserError as e:
             if parser is self._ytdlp:
-                try:
-                    meta = await self._og.parse(url)
-                except ParserError:
-                    meta = await self._fallback.parse(url)
+                if detect_platform(url) == "x":
+                    try:
+                        meta = await self._x_oembed.parse(url)
+                    except ParserError:
+                        meta = await self._parse_og_or_fallback(url)
+                else:
+                    meta = await self._parse_og_or_fallback(url)
                 meta.platform = meta.platform or "web"
                 meta.media_type = _fallback_media_type(url, meta.platform, e.reason)
                 if meta.media_type == MediaType.ARTICLE:
@@ -51,6 +56,12 @@ class Dispatcher:
                 if _is_generic_title(meta.title, meta.platform):
                     meta.title = _fallback_title(url, meta.platform, meta.media_type)
                 return meta
+            return await self._fallback.parse(url)
+
+    async def _parse_og_or_fallback(self, url: str) -> LinkMetadata:
+        try:
+            return await self._og.parse(url)
+        except ParserError:
             return await self._fallback.parse(url)
 
     async def _parse_instagram_image_post(self, url: str) -> LinkMetadata:
@@ -279,16 +290,30 @@ def _normalize_x_post_meta(meta: LinkMetadata) -> None:
     meta.channel = _normalize_x_channel(meta.channel)
     description = _clean_caption(meta.description)
 
-    if description:
+    if description and _is_x_placeholder_text(description):
+        meta.description = ""
+    elif description:
         meta.description = description
     elif meta.title and not _is_generic_title(meta.title, meta.platform):
-        meta.description = _clean_x_title(meta.title)
+        cleaned_title = _clean_x_title(meta.title)
+        if not _is_x_placeholder_text(cleaned_title):
+            meta.description = cleaned_title
 
-    if not meta.title or _is_generic_title(meta.title, meta.platform) or meta.description:
+    if (
+        not meta.title
+        or _is_generic_title(meta.title, meta.platform)
+        or _is_x_placeholder_text(meta.title)
+        or meta.description
+    ):
         if meta.channel:
             meta.title = f"Post by {meta.channel}"
         else:
             meta.title = "X Post"
+
+    if _x_meta_has_only_placeholder(meta):
+        warning = "X 内容受限或需要 cookie, 无法获取正文, 已先发送卡片"
+        if warning not in meta.parse_warnings:
+            meta.parse_warnings.append(warning)
 
 
 def _normalize_x_channel(channel: str | None) -> str | None:
@@ -303,6 +328,29 @@ def _clean_x_title(title: str) -> str:
     cleaned = re.sub(r"^X\s+on\s+X:\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^[^:]{1,80}\s+on\s+X:\s*", "", cleaned, flags=re.IGNORECASE)
     return _clean_caption(cleaned.strip("\""))
+
+
+def _is_x_placeholder_text(text: str) -> bool:
+    normalized = " ".join(text.strip().lower().split())
+    return normalized in {"", "x", "x.com", "twitter", "twitter.com"}
+
+
+def _x_meta_has_only_placeholder(meta: LinkMetadata) -> bool:
+    if meta.platform != "x":
+        return False
+    if meta.description.strip():
+        return False
+    if meta.channel:
+        return False
+    if meta.cover_url:
+        return False
+    counts = (
+        meta.view_count,
+        meta.like_count,
+        meta.comment_count,
+        meta.repost_count,
+    )
+    return all(value is None for value in counts)
 
 
 def _normalize_generic_social_post_meta(meta: LinkMetadata) -> None:
