@@ -36,3 +36,22 @@ def test_metadata_from_ytdlp_info() -> None:
     assert meta.comment_count == 123
     assert meta.repost_count == 45
     assert meta.download_candidates[0].format_id == "18"
+
+
+def test_metadata_uses_nested_thumbnail_for_image_posts() -> None:
+    meta = _metadata_from_info(
+        "https://www.instagram.com/p/abc/",
+        "instagram",
+        {
+            "title": "Instagram Post",
+            "description": "caption",
+            "entries": [{
+                "id": "image-1",
+                "thumbnails": [{
+                    "url": "https://cdn.example.com/photo.webp?token=secret",
+                }],
+            }],
+        },
+    )
+
+    assert meta.cover_url == "https://cdn.example.com/photo.webp?token=secret"

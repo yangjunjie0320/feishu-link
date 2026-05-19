@@ -8,6 +8,7 @@ import httpx
 from .config import Settings
 from .parsers.base import LinkMetadata, MediaType, Parser, ParserError
 from .parsers.fallback import FallbackParser
+from .parsers.instagram_media_info import InstagramMediaInfoParser
 from .parsers.og_meta import OGMetaParser
 from .parsers.x_oembed import XOEmbedParser
 from .parsers.youtube import YouTubeParser, is_youtube_url
@@ -19,6 +20,7 @@ class Dispatcher:
     def __init__(self, settings: Settings, client: httpx.AsyncClient) -> None:
         self._youtube = YouTubeParser(client, api_key=settings.youtube_api_key)
         self._ytdlp = YtDlpMetadataParser(settings)
+        self._instagram_media_info = InstagramMediaInfoParser(client, settings)
         self._x_oembed = XOEmbedParser(client)
         self._og = OGMetaParser(client, settings)
         self._fallback = FallbackParser(client, settings)
@@ -72,6 +74,20 @@ class Dispatcher:
                 meta = await self._og.parse(url)
             except ParserError:
                 meta = await self._fallback.parse(url)
+        if not meta.cover_url:
+            try:
+                api_meta = await self._instagram_media_info.parse(url)
+            except ParserError:
+                api_meta = None
+            if api_meta:
+                _merge_missing_instagram_fields(meta, api_meta)
+        if not meta.cover_url:
+            try:
+                og_meta = await self._og.parse(url)
+            except ParserError:
+                og_meta = None
+            if og_meta and og_meta.cover_url:
+                meta.cover_url = og_meta.cover_url
         meta.platform = "instagram"
         meta.media_type = MediaType.ARTICLE
         _normalize_image_post_meta(meta)
@@ -205,6 +221,23 @@ def _normalize_image_post_meta(meta: LinkMetadata) -> None:
         return
     if meta.platform in {"tiktok"}:
         _normalize_generic_social_post_meta(meta)
+
+
+def _merge_missing_instagram_fields(meta: LinkMetadata, fallback: LinkMetadata) -> None:
+    if not meta.title:
+        meta.title = fallback.title
+    if not meta.description:
+        meta.description = fallback.description
+    if not meta.cover_url:
+        meta.cover_url = fallback.cover_url
+    if not meta.channel:
+        meta.channel = fallback.channel
+    if meta.like_count is None:
+        meta.like_count = fallback.like_count
+    if meta.comment_count is None:
+        meta.comment_count = fallback.comment_count
+    if meta.repost_count is None:
+        meta.repost_count = fallback.repost_count
 
 
 def _normalize_short_platform_meta(meta: LinkMetadata) -> None:

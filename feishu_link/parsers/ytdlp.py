@@ -65,7 +65,7 @@ def _metadata_from_info(url: str, platform: str, info: dict[str, Any]) -> LinkMe
         source_url=url,
         title=str(info.get("title") or info.get("fulltitle") or ""),
         description=str(info.get("description") or "")[:300],
-        cover_url=str(info.get("thumbnail") or ""),
+        cover_url=_cover_url_from_info(info),
         site_name=_site_name(platform, info),
         platform=platform,
         canonical_url=str(info.get("webpage_url") or info.get("original_url") or url),
@@ -80,6 +80,46 @@ def _metadata_from_info(url: str, platform: str, info: dict[str, Any]) -> LinkMe
         requires_auth=_requires_auth(info),
         parse_warnings=warnings,
     )
+
+
+def _cover_url_from_info(info: dict[str, Any]) -> str:
+    thumbnail = info.get("thumbnail")
+    if thumbnail:
+        return str(thumbnail)
+
+    return _find_image_url(info)
+
+
+def _find_image_url(value: object) -> str:
+    if isinstance(value, dict):
+        for key in ("thumbnail", "url"):
+            candidate = value.get(key)
+            if _looks_like_image_url(candidate):
+                return str(candidate)
+        for key in ("thumbnails", "entries", "formats", "requested_downloads"):
+            nested = _find_image_url(value.get(key))
+            if nested:
+                return nested
+        for nested_value in value.values():
+            nested = _find_image_url(nested_value)
+            if nested:
+                return nested
+    if isinstance(value, list):
+        for item in value:
+            nested = _find_image_url(item)
+            if nested:
+                return nested
+    return ""
+
+
+def _looks_like_image_url(value: object) -> bool:
+    if not value:
+        return False
+    text = str(value).lower()
+    if not text.startswith(("http://", "https://")):
+        return False
+    path = text.split("?", 1)[0]
+    return path.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
 
 
 def _download_candidates(info: dict[str, Any]) -> list[DownloadCandidate]:
