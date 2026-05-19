@@ -10,6 +10,7 @@ from .parsers.base import LinkMetadata, MediaType, Parser, ParserError
 from .parsers.fallback import FallbackParser
 from .parsers.instagram_media_info import InstagramMediaInfoParser
 from .parsers.og_meta import OGMetaParser
+from .parsers.x_graphql import XGraphQLParser
 from .parsers.x_oembed import XOEmbedParser
 from .parsers.youtube import YouTubeParser, is_youtube_url
 from .parsers.ytdlp import YtDlpMetadataParser
@@ -21,6 +22,7 @@ class Dispatcher:
         self._youtube = YouTubeParser(client, api_key=settings.youtube_api_key)
         self._ytdlp = YtDlpMetadataParser(settings)
         self._instagram_media_info = InstagramMediaInfoParser(client, settings)
+        self._x_graphql = XGraphQLParser(client, settings)
         self._x_oembed = XOEmbedParser(client)
         self._og = OGMetaParser(client, settings)
         self._fallback = FallbackParser(client, settings)
@@ -46,6 +48,13 @@ class Dispatcher:
                         meta = await self._x_oembed.parse(url)
                     except ParserError:
                         meta = await self._parse_og_or_fallback(url)
+                    if not meta.cover_url:
+                        try:
+                            graphql_meta = await self._x_graphql.parse(url)
+                        except ParserError:
+                            graphql_meta = None
+                        if graphql_meta:
+                            _merge_missing_social_fields(meta, graphql_meta)
                 else:
                     meta = await self._parse_og_or_fallback(url)
                 meta.platform = meta.platform or "web"
@@ -224,6 +233,10 @@ def _normalize_image_post_meta(meta: LinkMetadata) -> None:
 
 
 def _merge_missing_instagram_fields(meta: LinkMetadata, fallback: LinkMetadata) -> None:
+    _merge_missing_social_fields(meta, fallback)
+
+
+def _merge_missing_social_fields(meta: LinkMetadata, fallback: LinkMetadata) -> None:
     if not meta.title:
         meta.title = fallback.title
     if not meta.description:
@@ -232,6 +245,8 @@ def _merge_missing_instagram_fields(meta: LinkMetadata, fallback: LinkMetadata) 
         meta.cover_url = fallback.cover_url
     if not meta.channel:
         meta.channel = fallback.channel
+    if meta.view_count is None:
+        meta.view_count = fallback.view_count
     if meta.like_count is None:
         meta.like_count = fallback.like_count
     if meta.comment_count is None:

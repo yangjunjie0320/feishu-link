@@ -1,0 +1,3 @@
+# Netscape HTTP Cookie File
+.x.com	TRUE	/	TRUE	1801691562	ct0	test-csrf-token
+.x.com	TRUE	/	TRUE	1801691561	auth_token	test-auth-token
