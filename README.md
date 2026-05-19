@@ -88,24 +88,25 @@ When you see the WebSocket long-connection log, send a supported link in a Feish
 
 ## Run Without Docker
 
-Docker is recommended for production because it pins Python, `ffmpeg`, `ffprobe`, and runtime mounts in one place. If you do not want to use Docker, run the same `main.py` entry point with `uv`.
+Docker is recommended for production because it pins Python, `ffmpeg`, `ffprobe`, `deno`, and runtime mounts in one place. If you do not want to use Docker, run the same `main.py` entry point with `uv`.
 
 ### 1. Install system tools
 
-Install Python 3.12, `uv`, `ffmpeg`, and `ffprobe`.
+Install Python 3.12, `uv`, `ffmpeg`, `ffprobe`, and `deno`.
 
 macOS:
 
 ```bash
-brew install python@3.12 uv ffmpeg
+brew install python@3.12 uv ffmpeg deno
 ```
 
 Ubuntu/Debian:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3.12 ffmpeg
+sudo apt-get install -y python3.12 ffmpeg unzip curl
 curl -LsSf https://astral.sh/uv/install.sh | sh
+curl -fsSL https://deno.land/install.sh | sh
 ```
 
 Verify:
@@ -114,6 +115,7 @@ Verify:
 uv --version
 ffmpeg -version
 ffprobe -version
+deno --version
 ```
 
 ### 2. Install Python dependencies

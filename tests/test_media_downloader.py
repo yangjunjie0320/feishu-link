@@ -1,7 +1,12 @@
 from pathlib import Path
 
 from feishu_link.config import Settings
-from feishu_link.media_downloader import _file_name, _strip_symbol_characters, explain_video_skip
+from feishu_link.media_downloader import (
+    _YTDLP_VIDEO_FORMAT,
+    _file_name,
+    _strip_symbol_characters,
+    explain_video_skip,
+)
 from feishu_link.parsers.base import DownloadCandidate, LinkMetadata, MediaType
 
 
@@ -43,6 +48,12 @@ def test_skip_without_download_candidate(settings: Settings) -> None:
 
 def test_video_can_be_attempted(settings: Settings) -> None:
     assert explain_video_skip(_video_meta(), settings) is None
+
+
+def test_ytdlp_format_supports_split_audio_video() -> None:
+    assert "bestvideo" in _YTDLP_VIDEO_FORMAT
+    assert "bestaudio" in _YTDLP_VIDEO_FORMAT
+    assert "best[ext=mp4]" in _YTDLP_VIDEO_FORMAT
 
 
 def test_file_name_strips_symbol_characters() -> None:

@@ -16,6 +16,13 @@ from .parsers.base import LinkMetadata, MediaType
 
 logger = logging.getLogger(__name__)
 
+_YTDLP_VIDEO_FORMAT = (
+    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
+    "bestvideo+bestaudio/"
+    "best[ext=mp4]/"
+    "best"
+)
+
 
 class VideoSkipReason(Exception):
     pass
@@ -76,7 +83,7 @@ async def download_video(meta: LinkMetadata, settings: Settings) -> DownloadedVi
         cookie_file = settings.cookie_file_for_platform(meta.platform)
         with temporary_cookie_file(cookie_file) as temp_cookie_file:
             options: dict[str, Any] = {
-                "format": "best[ext=mp4]/best",
+                "format": _YTDLP_VIDEO_FORMAT,
                 "merge_output_format": "mp4",
                 "noplaylist": True,
                 "outtmpl": str(temp_dir / "%(title).80s-%(id)s.%(ext)s"),
