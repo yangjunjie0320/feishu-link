@@ -74,6 +74,16 @@ def test_youtube_url(s: Settings) -> None:
     assert extract_urls("text", content, s) == ["https://youtu.be/dQw4w9WgXcQ"]
 
 
+def test_url_tightly_followed_by_feishu_mention_is_trimmed(s: Settings) -> None:
+    content = json.dumps({
+        "text": "https://www.instagram.com/p/DYkarnvCH-O/?igsh=abc==@_user_1"
+    })
+
+    assert extract_urls("text", content, s) == [
+        "https://www.instagram.com/p/DYkarnvCH-O/?igsh=abc=="
+    ]
+
+
 def test_extract_prompt_removes_video_url_and_mention() -> None:
     url = "https://youtu.be/dQw4w9WgXcQ"
     content = json.dumps({"text": f"@_user_1 {url} summarize in Chinese"})

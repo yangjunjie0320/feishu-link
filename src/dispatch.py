@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 import httpx
 
@@ -33,8 +33,8 @@ class Dispatcher:
     async def parse(self, url: str) -> LinkMetadata:
         if is_youtube_url(url):
             return await self._parse_youtube(url)
-        if _is_instagram_image_post_url(url):
-            return await self._parse_instagram_image_post(url)
+        if _is_instagram_post_url(url):
+            return await self._parse_instagram_post(url)
 
         parser: Parser
         parser = self._ytdlp if is_short_video_platform(url) else self._og
@@ -78,21 +78,15 @@ class Dispatcher:
         except ParserError:
             return await self._fallback.parse(url)
 
-    async def _parse_instagram_image_post(self, url: str) -> LinkMetadata:
+    async def _parse_instagram_post(self, url: str) -> LinkMetadata:
         try:
-            meta = await self._ytdlp.parse(url)
-        except ParserError:
+            meta = await self._instagram_media_info.parse(url)
+        except ParserError as e:
+            logger.info("instagram media info failed for %s: %s", url, e.reason)
             try:
                 meta = await self._og.parse(url)
             except ParserError:
                 meta = await self._fallback.parse(url)
-        if not meta.cover_url:
-            try:
-                api_meta = await self._instagram_media_info.parse(url)
-            except ParserError:
-                api_meta = None
-            if api_meta:
-                _merge_missing_instagram_fields(meta, api_meta)
         if not meta.cover_url:
             try:
                 og_meta = await self._og.parse(url)
@@ -218,13 +212,10 @@ def _instagram_path_kind(url: str) -> str:
     return parts[0].lower() if parts else ""
 
 
-def _is_instagram_image_post_url(url: str) -> bool:
-    parsed = urlparse(url)
+def _is_instagram_post_url(url: str) -> bool:
     if _instagram_path_kind(url) != "p":
         return False
-    if "instagram.com" not in parsed.netloc.lower():
-        return False
-    return "img_index" in parse_qs(parsed.query)
+    return detect_platform(url) == "instagram"
 
 
 def _normalize_image_post_meta(meta: LinkMetadata) -> None:

@@ -16,6 +16,7 @@ _SKIP_DOMAINS = re.compile(r"https?://(?:open\.feishu\.cn|open\.larksuite\.com)"
 
 # Feishu @mention placeholder pattern in text content: @_user_1 etc.
 _MENTION_PLACEHOLDER_RE = re.compile(r"@_user_\d+")
+_MENTION_TAIL_RE = re.compile(r"@_user_\d+.*$")
 
 
 def extract_urls(message_type: str, content_raw: str, settings: Settings) -> list[str]:
@@ -26,7 +27,7 @@ def extract_urls(message_type: str, content_raw: str, settings: Settings) -> lis
     seen: set[str] = set()
     result: list[str] = []
     for m in _URL_RE.finditer(text):
-        url = m.group(0).rstrip(".,;:!?)\"'")
+        url = _clean_url_match(m.group(0))
         if url in seen:
             continue
         seen.add(url)
@@ -38,6 +39,10 @@ def extract_urls(message_type: str, content_raw: str, settings: Settings) -> lis
             continue
         result.append(url)
     return result
+
+
+def _clean_url_match(raw: str) -> str:
+    return _MENTION_TAIL_RE.sub("", raw).rstrip(".,;:!?)\"'")
 
 
 def _decode_content(message_type: str, raw: str) -> str:

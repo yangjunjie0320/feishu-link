@@ -26,7 +26,7 @@ class InstagramMediaInfoParser:
             "https://www.instagram.com/api/v1/media/"
             f"{_shortcode_to_media_id(shortcode)}/info/"
         )
-        headers = _request_headers("instagram", self._settings)
+        headers = _request_headers("https://www.instagram.com/", self._settings)
         headers.update({
             "Referer": "https://www.instagram.com/",
             "X-IG-App-ID": "936619743392459",

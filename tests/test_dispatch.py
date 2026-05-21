@@ -1,11 +1,80 @@
+import httpx
+
+from src.config import Settings
 from src.dispatch import (
+    Dispatcher,
     _fallback_media_type,
     _fallback_title,
     _friendly_parse_warning,
     _normalize_instagram_post_meta,
     _normalize_x_post_meta,
 )
-from src.parsers.base import LinkMetadata, MediaType
+from src.parsers.base import LinkMetadata, MediaType, ParserError
+
+
+class _StaticParser:
+    def __init__(self, meta: LinkMetadata) -> None:
+        self.meta = meta
+        self.called = False
+
+    async def parse(self, url: str) -> LinkMetadata:
+        self.called = True
+        return self.meta
+
+
+class _FailIfCalledParser:
+    async def parse(self, url: str) -> LinkMetadata:
+        raise AssertionError(f"unexpected parser call for {url}")
+
+
+class _ParserErrorParser:
+    async def parse(self, url: str) -> LinkMetadata:
+        raise ParserError(url, "intentional test failure")
+
+
+async def test_instagram_post_uses_media_info_not_ytdlp() -> None:
+    async with httpx.AsyncClient() as client:
+        dispatcher = Dispatcher(Settings(), client)
+        media_info = _StaticParser(
+            LinkMetadata(
+                source_url="https://www.instagram.com/p/DYkarnvCH-O/",
+                title="Post by al.yasid",
+                description="Ferrari F40 carousel",
+                cover_url="https://cdn.example.com/f40.jpg",
+                platform="instagram",
+                media_type=MediaType.ARTICLE,
+            )
+        )
+        dispatcher._instagram_media_info = media_info  # type: ignore[assignment]
+        dispatcher._ytdlp = _FailIfCalledParser()  # type: ignore[assignment]
+        dispatcher._og = _ParserErrorParser()  # type: ignore[assignment]
+
+        meta = await dispatcher.parse("https://www.instagram.com/p/DYkarnvCH-O/")
+
+    assert media_info.called is True
+    assert meta.cover_url == "https://cdn.example.com/f40.jpg"
+    assert meta.media_type == MediaType.ARTICLE
+
+
+async def test_instagram_reel_still_uses_ytdlp() -> None:
+    async with httpx.AsyncClient() as client:
+        dispatcher = Dispatcher(Settings(), client)
+        ytdlp = _StaticParser(
+            LinkMetadata(
+                source_url="https://www.instagram.com/reel/DWgZM2wEz1A/",
+                title="Video by creator",
+                cover_url="https://cdn.example.com/reel.jpg",
+                platform="instagram",
+                media_type=MediaType.VIDEO,
+            )
+        )
+        dispatcher._ytdlp = ytdlp  # type: ignore[assignment]
+        dispatcher._instagram_media_info = _FailIfCalledParser()  # type: ignore[assignment]
+
+        meta = await dispatcher.parse("https://www.instagram.com/reel/DWgZM2wEz1A/")
+
+    assert ytdlp.called is True
+    assert meta.media_type == MediaType.VIDEO
 
 
 def test_instagram_post_without_video_is_treated_as_image_post() -> None:

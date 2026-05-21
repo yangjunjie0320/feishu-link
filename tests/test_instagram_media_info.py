@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import httpx
 import respx
 
@@ -54,3 +56,39 @@ async def test_instagram_media_info_uses_requested_carousel_image() -> None:
     assert meta.channel == "Rebecca"
     assert meta.like_count == 392
     assert meta.comment_count == 5
+
+
+@respx.mock
+async def test_instagram_media_info_sends_instagram_cookie(tmp_path: Path) -> None:
+    cookie_file = tmp_path / "instagram.txt"
+    cookie_file.write_text(
+        "\n".join([
+            "# Netscape HTTP Cookie File",
+            ".instagram.com\tTRUE\t/\tTRUE\t1800000000\tsessionid\tabc",
+        ]),
+        encoding="utf-8",
+    )
+    media_id = _shortcode_to_media_id("DYfWbunGlNg")
+    route = respx.get(
+        f"https://www.instagram.com/api/v1/media/{media_id}/info/"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "items": [{
+                    "image_versions2": {
+                        "candidates": [{"url": "https://cdn.example.com/one.jpg"}],
+                    },
+                    "user": {"username": "beccu.studio"},
+                }],
+            },
+        )
+    )
+    settings = Settings(platform_cookie_files={"instagram": str(cookie_file)})
+
+    async with httpx.AsyncClient() as client:
+        await InstagramMediaInfoParser(client, settings).parse(
+            "https://www.instagram.com/p/DYfWbunGlNg/"
+        )
+
+    assert route.calls.last.request.headers["Cookie"] == "sessionid=abc"
