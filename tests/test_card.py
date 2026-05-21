@@ -156,6 +156,48 @@ def test_card_with_translated_description_keeps_original() -> None:
     assert "原标题" not in body_text
 
 
+def test_article_description_removes_newlines_and_emoji() -> None:
+    meta = LinkMetadata(
+        source_url="https://www.instagram.com/p/abc/",
+        title="Post by al.yasid",
+        description="| Eh, Mamma Mia 🤌🏽\n\nA slightly modded Ferrari F40.",
+        translated_description="嗯, 妈妈咪呀 🤌🏽\n五年前我轻度改装过一辆法拉利 F40。",
+        site_name="Instagram",
+        platform="instagram",
+        media_type=MediaType.ARTICLE,
+    )
+    card = json.loads(build_card(meta))
+    body_text = next(
+        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
+    )
+
+    assert "🤌" not in body_text
+    assert "🏽" not in body_text
+    assert "妈妈咪呀 五年前" in body_text
+    assert "Mamma Mia A slightly" in body_text
+    assert "Mamma Mia\n\nA slightly" not in body_text
+    assert "F40。\n<font color='grey'>原文:" not in body_text
+
+
+def test_article_description_without_translation_removes_newlines_and_emoji() -> None:
+    meta = LinkMetadata(
+        source_url="https://www.instagram.com/p/abc/",
+        title="Post by al.yasid",
+        description="First line ✌🏼\nsecond line",
+        site_name="Instagram",
+        platform="instagram",
+        media_type=MediaType.ARTICLE,
+    )
+    card = json.loads(build_card(meta))
+    body_text = next(
+        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
+    )
+
+    assert "✌" not in body_text
+    assert "🏼" not in body_text
+    assert "First line second line" in body_text
+
+
 def test_social_image_card_does_not_show_technical_warning() -> None:
     meta = LinkMetadata(
         source_url="https://www.instagram.com/p/abc/",

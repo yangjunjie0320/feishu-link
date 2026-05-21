@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from html import escape
 
 from .parsers.base import LinkMetadata, MediaType
@@ -132,16 +133,30 @@ def _format_description_block(meta: LinkMetadata) -> str:
     if meta.media_type == MediaType.VIDEO:
         return ""
 
-    description = meta.description.strip()
-    translated = meta.translated_description.strip()
+    description = _clean_description_text(meta.description)
+    translated = _clean_description_text(meta.translated_description)
     if translated and description:
         return (
-            f"{escape(_truncate(translated, 120))}\n"
+            f"{escape(_truncate(translated, 120))} "
             f"<font color='grey'>原文: {escape(_truncate(description, 160))}</font>"
         )
     if description and meta.media_type == MediaType.ARTICLE:
         return f"<font color='grey'>{escape(_truncate(description, 160))}</font>"
     return ""
+
+
+def _clean_description_text(text: str) -> str:
+    without_emoji = "".join(ch for ch in text if not _is_emoji_or_modifier(ch))
+    return " ".join(without_emoji.split())
+
+
+def _is_emoji_or_modifier(ch: str) -> bool:
+    codepoint = ord(ch)
+    return (
+        unicodedata.category(ch) == "So"
+        or 0x1F3FB <= codepoint <= 0x1F3FF
+        or codepoint in {0x200D, 0xFE0E, 0xFE0F}
+    )
 
 
 def _build_compact_media_row(
