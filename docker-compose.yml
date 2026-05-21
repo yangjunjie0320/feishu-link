@@ -6,6 +6,7 @@ services:
       - ./config.yaml:/etc/feishu-link/config.yaml:ro
       - ./cookies:/etc/feishu-link/cookies:ro
       - ./logs:/app/logs
+      - ./src:/app/src
     environment:
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - HTTP_PROXY=${HTTP_PROXY:-}

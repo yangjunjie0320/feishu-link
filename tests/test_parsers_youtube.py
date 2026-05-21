@@ -2,7 +2,7 @@ import httpx
 import pytest
 import respx
 
-from feishu_link.parsers.youtube import YouTubeParser, extract_video_id, is_youtube_url
+from src.parsers.youtube import YouTubeParser, extract_video_id, is_youtube_url
 
 YOUTUBE_API_RESPONSE = {
     "items": [{

@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from feishu_link.cookie_utils import cookie_header_from_netscape_file
+from src.cookie_utils import get_cookie_header
 
 
-def test_cookie_header_from_netscape_file(tmp_path: Path) -> None:
+def test_get_cookie_header(tmp_path: Path) -> None:
     cookie_file = tmp_path / "zhihu.txt"
     cookie_file.write_text(
         "\n".join([
@@ -14,4 +14,4 @@ def test_cookie_header_from_netscape_file(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    assert cookie_header_from_netscape_file(str(cookie_file)) == "z_c0=abc; SESSIONID=xyz"
+    assert get_cookie_header(str(cookie_file), "zhihu.com") == "z_c0=abc; SESSIONID=xyz"

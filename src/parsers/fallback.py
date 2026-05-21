@@ -8,7 +8,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from ..config import Settings
-from ..cookie_utils import cookie_header_from_netscape_file
+from ..cookie_utils import get_cookie_header
 from ..platforms import detect_platform
 from .base import LinkMetadata, ParserError
 
@@ -21,17 +21,18 @@ _USER_AGENT = (
 )
 
 
-class OGMetaParser:
+class FallbackParser:
     def __init__(self, client: httpx.AsyncClient, settings: Settings | None = None) -> None:
         self._client = client
         self._settings = settings
 
     async def parse(self, url: str) -> LinkMetadata:
+        domain = re.sub(r"^www\.", "", urlparse(url).netloc)
         platform = detect_platform(url)
         try:
             resp = await self._client.get(
                 url,
-                headers=_request_headers(platform, self._settings),
+                headers=_request_headers(url, self._settings),
                 follow_redirects=True,
             )
         except httpx.RequestError as e:
@@ -41,41 +42,27 @@ class OGMetaParser:
             raise ParserError(url, f"HTTP {resp.status_code}")
 
         soup = BeautifulSoup(resp.text, "lxml")
-        meta = _extract_og(soup)
+        title_el = soup.find("title")
+        title = title_el.get_text(strip=True) if title_el else ""
 
-        domain = re.sub(r"^www\.", "", urlparse(url).netloc)
+        if not title and not domain:
+            raise ParserError(url, "could not extract title or domain")
+
         return LinkMetadata(
             source_url=url,
-            title=meta.get("og:title") or _tag_text(soup, "title") or domain,
-            description=meta.get("og:description", ""),
-            cover_url=meta.get("og:image", ""),
-            site_name=meta.get("og:site_name") or domain,
+            title=title or domain,
+            site_name=domain,
             platform=platform,
         )
 
 
-def _extract_og(soup: BeautifulSoup) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for tag in soup.find_all("meta"):
-        prop = tag.get("property", "") or tag.get("name", "")
-        content = tag.get("content", "")
-        if prop and content:
-            result[prop] = content
-    return result
-
-
-def _tag_text(soup: BeautifulSoup, tag: str) -> str:
-    el = soup.find(tag)
-    return el.get_text(strip=True) if el else ""
-
-
-def _request_headers(platform: str, settings: Settings | None) -> dict[str, str]:
+def _request_headers(url: str, settings: Settings | None) -> dict[str, str]:
     headers = {"User-Agent": _USER_AGENT}
     if settings is None:
         return headers
-    cookie_header = cookie_header_from_netscape_file(
-        settings.cookie_file_for_platform(platform)
-    )
+    domain = urlparse(url).netloc
+    cookie_file = settings.cookie_file_for_platform(detect_platform(url))
+    cookie_header = get_cookie_header(cookie_file, domain)
     if cookie_header:
         headers["Cookie"] = cookie_header
     return headers

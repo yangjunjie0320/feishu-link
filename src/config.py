@@ -28,6 +28,19 @@ class Settings(BaseSettings):
 
     mode: Mode = Mode.A
     archive_chat_id: str = ""  # required for mode B
+    cookie_file: str = "cookies/cookies.txt"
+    platform_cookie_files: dict[str, str] = {}
+
+    # BibiGPT API integration
+    bibigpt_base_url: str = "https://bibigpt.co"
+    bibigpt_timeout: float = 120.0
+    bibigpt_default_prompt: str = """\
+Please summarize this video comprehensively:
+1. One-sentence overview
+2. Key points (bulleted list, each prefixed with a fitting emoji)
+3. Important details and highlights
+4. Conclusion and evaluation"""
+
     youtube_api_key: str = ""
     link_allowlist: list[str] = []
     link_blacklist: list[str] = []
@@ -42,7 +55,6 @@ class Settings(BaseSettings):
     max_video_file_mb: int = 50
     allowed_video_platforms: list[str] = ["bilibili", "instagram", "tiktok", "youtube", "x"]
     video_temp_dir: str = "/tmp/feishu-link"
-    platform_cookie_files: dict[str, str] = {}
 
     title_translation_enabled: bool = False
     deepseek_api_key: str = ""
@@ -94,12 +106,20 @@ class Settings(BaseSettings):
         return any(p.search(url) for p in self._blacklist_patterns)
 
     def cookie_file_for_platform(self, platform: str) -> str:
-        configured = self.platform_cookie_files.get(platform, "")
+        normalized = platform.strip().lower()
+        configured = self.platform_cookie_files.get(normalized, "")
         if configured:
             return configured
 
-        default_path = Path(f"/etc/feishu-link/cookies/{platform}.txt")
-        return str(default_path) if default_path.exists() else ""
+        if self.cookie_file and Path(self.cookie_file).exists():
+            return self.cookie_file
+
+        for cookie_dir in (Path("/etc/feishu-link/cookies"), Path("cookies")):
+            candidate = cookie_dir / f"{normalized}.txt"
+            if candidate.exists():
+                return str(candidate)
+
+        return ""
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Settings:

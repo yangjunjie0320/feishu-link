@@ -2,8 +2,8 @@ import httpx
 import pytest
 import respx
 
-from feishu_link.parsers.base import ParserError
-from feishu_link.parsers.og_meta import OGMetaParser
+from src.parsers.base import ParserError
+from src.parsers.og_meta import OGMetaParser
 
 OG_HTML = """<!DOCTYPE html>
 <html>

@@ -57,8 +57,13 @@ def explain_video_skip(meta: LinkMetadata, settings: Settings) -> str | None:
             "video duration exceeds limit: "
             f"duration={meta.duration_seconds} limit={settings.max_video_duration_seconds}"
         )
-    if meta.requires_auth and not settings.cookie_file_for_platform(meta.platform):
-        return f"platform requires auth: platform={meta.platform}"
+    cookie_file = settings.cookie_file_for_platform(meta.platform)
+    if meta.requires_auth and not cookie_file:
+        logger.warning(
+            "skip download: url=%s needs auth but no cookie file configured",
+            meta.url,
+        )
+        return "platform requires auth"
     if not meta.download_candidates:
         return "no download candidate"
     return None
@@ -80,27 +85,35 @@ async def download_video(meta: LinkMetadata, settings: Settings) -> DownloadedVi
         except ModuleNotFoundError as e:
             raise VideoDownloadError("yt-dlp is not installed") from e
 
-        cookie_file = settings.cookie_file_for_platform(meta.platform)
-        with temporary_cookie_file(cookie_file) as temp_cookie_file:
-            options: dict[str, Any] = {
-                "format": _YTDLP_VIDEO_FORMAT,
-                "merge_output_format": "mp4",
-                "noplaylist": True,
-                "outtmpl": str(temp_dir / "%(title).80s-%(id)s.%(ext)s"),
-                "quiet": True,
-                "no_warnings": True,
-                "noprogress": True,
-                "logger": _YtDlpLogger(),
-            }
-            if temp_cookie_file:
-                options["cookiefile"] = temp_cookie_file
+        options: dict[str, Any] = {
+            "format": _YTDLP_VIDEO_FORMAT,
+            "merge_output_format": "mp4",
+            "noplaylist": True,
+            "outtmpl": str(temp_dir / "%(title).80s-%(id)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "socket_timeout": 30,
+            "logger": _YtDlpLogger(),
+        }
 
+        def do_download(opts: dict[str, Any]) -> set[Path]:
             before = set(temp_dir.iterdir())
             try:
-                with yt_dlp.YoutubeDL(options) as ydl:
+                with yt_dlp.YoutubeDL(opts) as ydl:
                     ydl.download([source_url])
             except Exception as e:
                 raise VideoDownloadError(f"yt-dlp download failed: {e}") from e
+            return before
+
+        cookie_file = settings.cookie_file_for_platform(meta.platform)
+        if cookie_file:
+            with temporary_cookie_file(cookie_file) as temp_cookie_file:
+                if temp_cookie_file:
+                    options["cookiefile"] = temp_cookie_file
+                before = do_download(options)
+        else:
+            before = do_download(options)
 
         after = [p for p in temp_dir.iterdir() if p.is_file() and p not in before]
         if not after:

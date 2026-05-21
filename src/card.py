@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from html import escape
 
-from .parsers.base import LinkMetadata
+from .parsers.base import LinkMetadata, MediaType
 
 _SOURCE_COLORS = {
     "youtube": "red",
@@ -123,12 +123,15 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
 def _description_should_be_primary(meta: LinkMetadata, description_block: str) -> bool:
     return bool(
         description_block
-        and meta.media_type.value == "article"
+        and meta.media_type == MediaType.ARTICLE
         and meta.platform != "web"
     )
 
 
 def _format_description_block(meta: LinkMetadata) -> str:
+    if meta.media_type == MediaType.VIDEO:
+        return ""
+
     description = meta.description.strip()
     translated = meta.translated_description.strip()
     if translated and description:
@@ -136,7 +139,7 @@ def _format_description_block(meta: LinkMetadata) -> str:
             f"{escape(_truncate(translated, 120))}\n"
             f"<font color='grey'>原文: {escape(_truncate(description, 160))}</font>"
         )
-    if description and meta.media_type.value == "article":
+    if description and meta.media_type == MediaType.ARTICLE:
         return f"<font color='grey'>{escape(_truncate(description, 160))}</font>"
     return ""
 

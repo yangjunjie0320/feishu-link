@@ -1,13 +1,13 @@
 from pathlib import Path
 
-from feishu_link.config import Settings
-from feishu_link.media_downloader import (
+from src.config import Settings
+from src.media_downloader import (
     _YTDLP_VIDEO_FORMAT,
     _file_name,
     _strip_symbol_characters,
     explain_video_skip,
 )
-from feishu_link.parsers.base import DownloadCandidate, LinkMetadata, MediaType
+from src.parsers.base import DownloadCandidate, LinkMetadata, MediaType
 
 
 def _video_meta(**kwargs: object) -> LinkMetadata:

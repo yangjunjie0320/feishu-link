@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from feishu_link.config import Settings
-from feishu_link.url_extract import extract_urls
+from src.config import Settings
+from src.url_extract import extract_prompt, extract_urls
 
 
 @pytest.fixture
@@ -72,3 +72,17 @@ def test_feishu_internal_url_skipped(s: Settings) -> None:
 def test_youtube_url(s: Settings) -> None:
     content = json.dumps({"text": "watch https://youtu.be/dQw4w9WgXcQ"})
     assert extract_urls("text", content, s) == ["https://youtu.be/dQw4w9WgXcQ"]
+
+
+def test_extract_prompt_removes_video_url_and_mention() -> None:
+    url = "https://youtu.be/dQw4w9WgXcQ"
+    content = json.dumps({"text": f"@_user_1 {url} summarize in Chinese"})
+
+    assert extract_prompt("text", content, url) == "summarize in Chinese"
+
+
+def test_extract_prompt_returns_none_when_only_url_and_mention() -> None:
+    url = "https://youtu.be/dQw4w9WgXcQ"
+    content = json.dumps({"text": f"@_user_1 {url}"})
+
+    assert extract_prompt("text", content, url) is None

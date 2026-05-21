@@ -1,7 +1,7 @@
 import httpx
 import respx
 
-from feishu_link.parsers.x_oembed import XOEmbedParser
+from src.parsers.x_oembed import XOEmbedParser
 
 
 @respx.mock

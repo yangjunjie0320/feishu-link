@@ -7,7 +7,7 @@ from urllib.parse import urlencode, urlparse
 import httpx
 
 from ..config import Settings
-from ..cookie_utils import cookie_header_from_netscape_file
+from ..cookie_utils import get_cookie_header
 from .base import LinkMetadata, MediaType, ParserError
 
 _BEARER_TOKEN = (
@@ -32,9 +32,9 @@ class XGraphQLParser:
         if not tweet_id:
             raise ParserError(url, "x tweet id not found")
 
-        cookie_header = cookie_header_from_netscape_file(
-            self._settings.cookie_file_for_platform("x")
-        )
+        domain = urlparse(url).netloc
+        cookie_file = self._settings.cookie_file_for_platform("x")
+        cookie_header = get_cookie_header(cookie_file, domain)
         csrf_token = _cookie_value(cookie_header, "ct0")
         if not cookie_header or not csrf_token:
             raise ParserError(url, "x cookie is not configured")

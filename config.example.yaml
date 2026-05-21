@@ -57,12 +57,30 @@ allowed_video_platforms:
   - x
 video_temp_dir: "/tmp/feishu-link"
 
-# Optional per-platform cookie files mounted read-only in Docker.
-# If omitted, the app also auto-detects /etc/feishu-link/cookies/{platform}.txt.
+# Optional unified Netscape cookie file mounted read-only in Docker.
+# It may contain cookies for multiple domains, including BibiGPT, YouTube, X,
+# Instagram, TikTok, and Bilibili.
+cookie_file: "/etc/feishu-link/cookies/cookies.txt"
+
+# Optional per-platform cookie files. These override cookie_file for a platform
+# and preserve the older cookies/{platform}.txt layout.
+platform_cookie_files: {}
 # Example:
 # platform_cookie_files:
+#   bibigpt: "/etc/feishu-link/cookies/bibigpt.txt"
 #   instagram: "/etc/feishu-link/cookies/instagram.txt"
-platform_cookie_files: {}
+#   x: "/etc/feishu-link/cookies/x.txt"
+
+# Optional BibiGPT integration. Mention the bot with a YouTube or Bilibili URL
+# to send a summary instead of appending the video.
+bibigpt_base_url: "https://bibigpt.co"
+bibigpt_timeout: 120.0
+bibigpt_default_prompt: |
+  Please summarize this video comprehensively:
+  1. One-sentence overview
+  2. Key points
+  3. Important details and highlights
+  4. Conclusion and evaluation
 
 # Optional title translation. Only non-Chinese titles are translated.
 title_translation_enabled: false

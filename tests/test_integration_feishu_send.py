@@ -6,11 +6,11 @@ from pathlib import Path
 import lark_oapi as lark
 import pytest
 
-from feishu_link.card import build_card
-from feishu_link.config import Mode, Settings
-from feishu_link.parsers.base import LinkMetadata
-from feishu_link.sender import CardSender
-from feishu_link.time_utils import format_beijing, now_utc
+from src.card import build_card
+from src.config import Mode, Settings
+from src.parsers.base import LinkMetadata
+from src.sender import CardSender
+from src.time_utils import format_beijing, now_utc
 
 
 def _integration_enabled() -> bool:

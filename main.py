@@ -7,10 +7,10 @@ import sys
 
 import lark_oapi as lark
 
-from feishu_link import log
-from feishu_link.config import Settings
-from feishu_link.listener import LarkEventListener
-from feishu_link.pipeline import Pipeline
+from src import log
+from src.config import Settings
+from src.listener import LarkEventListener
+from src.pipeline import Pipeline
 
 
 async def _run(settings: Settings) -> None:

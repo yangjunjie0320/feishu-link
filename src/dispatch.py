@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -15,6 +16,8 @@ from .parsers.x_oembed import XOEmbedParser
 from .parsers.youtube import YouTubeParser, is_youtube_url
 from .parsers.ytdlp import YtDlpMetadataParser
 from .platforms import detect_platform, is_short_video_platform
+
+logger = logging.getLogger(__name__)
 
 
 class Dispatcher:
@@ -110,8 +113,11 @@ class Dispatcher:
             meta = await self._fallback.parse(url)
 
         try:
+            logger.info("starting ytdlp metadata extraction for %s", url)
             media_meta = await self._ytdlp.parse(url)
+            logger.info("finished ytdlp metadata extraction for %s", url)
         except ParserError as e:
+            logger.warning("ytdlp metadata failed: %s", e)
             meta.parse_warnings.append(e.reason)
             return meta
 

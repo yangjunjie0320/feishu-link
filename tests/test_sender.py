@@ -1,6 +1,6 @@
 import json
 
-from feishu_link.sender import build_media_content
+from src.sender import build_media_content
 
 
 def test_build_media_content_without_cover() -> None:

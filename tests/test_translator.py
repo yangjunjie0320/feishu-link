@@ -2,9 +2,9 @@ import httpx
 import pytest
 import respx
 
-from feishu_link.config import Settings
-from feishu_link.parsers.base import LinkMetadata
-from feishu_link.translator import TitleTranslator, contains_chinese
+from src.config import Settings
+from src.parsers.base import LinkMetadata
+from src.translator import TitleTranslator, contains_chinese
 
 
 def test_contains_chinese() -> None:
@@ -115,6 +115,6 @@ async def test_translate_non_chinese_description() -> None:
     ("  hello   world  ", "hello world"),
 ])
 def test_clean_translation(text: str, expected: str) -> None:
-    from feishu_link.translator import _clean_translation
+    from src.translator import _clean_translation
 
     assert _clean_translation(text) == expected

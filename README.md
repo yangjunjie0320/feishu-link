@@ -10,9 +10,10 @@ The project is designed for personal or team link collection workflows: send a s
 - Compact interactive cards with cover image, platform label, title, author or channel, duration, and source button.
 - Multi-platform parsing for YouTube, Instagram, TikTok, Bilibili, X/Twitter, and normal web pages.
 - Video metrics when available: views, likes, comments, and reposts.
-- Optional title translation through DeepSeek. Non-Chinese titles are translated and shown together with the original title.
 - Optional short-video append. Videos up to 180 seconds are downloaded, converted to Feishu-friendly MP4, uploaded, and sent after the card.
-- Optional cookie files for platforms that require login state.
+- **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube or Bilibili link to receive an AI-generated video summary via BibiGPT instead of downloading the video.
+- Optional title translation through DeepSeek. Non-Chinese titles are translated and shown together with the original title.
+- Unified Netscape cookie file for platforms that require login state (like Instagram, X, and BibiGPT).
 - Explicit logging for parse, download, upload, and send failures. Card delivery is prioritized over video delivery.
 
 ## Supported Platforms
@@ -172,7 +173,10 @@ See `config.example.yaml` for the full reference. Common settings:
 | `max_video_duration_seconds` | `180` | Max duration for downloadable videos |
 | `max_video_file_mb` | Config example | Max uploaded video size |
 | `allowed_video_platforms` | Config example | Platforms allowed for video append |
-| `platform_cookie_files` | `{}` | Optional cookie file paths per platform |
+| `cookie_file` | `cookies/cookies.txt` | Unified Netscape cookie file path |
+| `bibigpt_base_url` | `https://bibigpt.co` | Base URL for BibiGPT API |
+| `bibigpt_timeout` | `120.0` | Timeout in seconds for BibiGPT summary requests |
+| `bibigpt_default_prompt` | Default | Prompt to send to BibiGPT |
 | `deepseek_api_key` | Empty | Enables title translation when configured |
 | `deepseek_base_url` | DeepSeek API | Optional compatible API endpoint |
 | `enable_title_translation` | `false` | Translate non-Chinese titles when true |
@@ -181,28 +185,19 @@ All settings can also be provided through environment variables prefixed with `F
 
 ## Cookies
 
-Some platforms restrict metadata or video download for anonymous requests. Cookie files are optional and should use Netscape format, for example files exported by Cookie-Editor.
+Some platforms restrict metadata or video download for anonymous requests. The `cookie_file` setting is optional and should point to a single Netscape format file exported by extensions like Cookie-Editor. This file can contain cookies for multiple domains (e.g., YouTube, X, Instagram, BibiGPT).
 
 Recommended layout:
 
 ```text
 cookies/
-  instagram.txt
-  tiktok.txt
-  youtube.txt
-  bilibili.txt
-  x.txt
+  cookies.txt
 ```
 
 Example config:
 
 ```yaml
-platform_cookie_files:
-  instagram: "/app/cookies/instagram.txt"
-  tiktok: "/app/cookies/tiktok.txt"
-  youtube: "/app/cookies/youtube.txt"
-  bilibili: "/app/cookies/bilibili.txt"
-  x: "/app/cookies/x.txt"
+cookie_file: "/etc/feishu-link/cookies/cookies.txt"
 ```
 
 Only provide cookies for accounts you control. Cookie files are ignored by Git and should not be shared.
@@ -291,13 +286,13 @@ Use `config.example.yaml` as the public template and keep real credentials only 
 
 The main runtime entry point is `main.py`. Core modules:
 
-- `feishu_link/listener.py`: Feishu WebSocket event listener
-- `feishu_link/url_extract.py`: URL extraction from text and rich-text messages
-- `feishu_link/dispatch.py`: parser dispatch and fallback behavior
-- `feishu_link/parsers/`: platform and metadata parsers
-- `feishu_link/card.py`: interactive card rendering
-- `feishu_link/image_uploader.py`: cover upload helper
-- `feishu_link/media_downloader.py`: short-video download and conversion
-- `feishu_link/sender.py`: Feishu card, image, and video sending
-- `feishu_link/translator.py`: DeepSeek title translation
-- `feishu_link/pipeline.py`: card-first, video-second orchestration
+- `src/listener.py`: Feishu WebSocket event listener
+- `src/url_extract.py`: URL extraction from text and rich-text messages
+- `src/dispatch.py`: parser dispatch and fallback behavior
+- `src/parsers/`: platform and metadata parsers
+- `src/card.py`: interactive card rendering
+- `src/image_uploader.py`: cover upload helper
+- `src/media_downloader.py`: short-video download and conversion
+- `src/sender.py`: Feishu card, image, and video sending
+- `src/translator.py`: DeepSeek title translation
+- `src/pipeline.py`: card-first, video-second orchestration

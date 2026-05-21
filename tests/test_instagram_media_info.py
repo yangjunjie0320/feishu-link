@@ -1,8 +1,8 @@
 import httpx
 import respx
 
-from feishu_link.config import Settings
-from feishu_link.parsers.instagram_media_info import (
+from src.config import Settings
+from src.parsers.instagram_media_info import (
     InstagramMediaInfoParser,
     _shortcode_to_media_id,
 )

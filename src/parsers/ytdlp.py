@@ -25,17 +25,19 @@ class YtDlpMetadataParser:
             except ModuleNotFoundError as e:
                 raise ParserError(url, "yt-dlp is not installed") from e
 
+            options: dict[str, Any] = {
+                "quiet": False,
+                "no_warnings": False,
+                "skip_download": True,
+                "noplaylist": True,
+                "noprogress": True,
+                "ignore_no_formats_error": True,
+                "socket_timeout": 15,
+                "source_address": "0.0.0.0",
+            }
+
             cookie_file = self._settings.cookie_file_for_platform(platform)
             with temporary_cookie_file(cookie_file) as temp_cookie_file:
-                options: dict[str, Any] = {
-                    "quiet": True,
-                    "no_warnings": True,
-                    "skip_download": True,
-                    "noplaylist": True,
-                    "noprogress": True,
-                    "ignore_no_formats_error": True,
-                    "logger": _YtDlpLogger(),
-                }
                 if temp_cookie_file:
                     options["cookiefile"] = temp_cookie_file
 

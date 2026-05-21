@@ -1,4 +1,4 @@
-from feishu_link.platforms import detect_platform, normalized_domain
+from src.platforms import detect_platform, normalized_domain
 
 
 def test_normalized_domain() -> None:

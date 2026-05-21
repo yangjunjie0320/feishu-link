@@ -19,7 +19,7 @@ COPY pyproject.toml uv.lock* ./
 RUN uv sync --frozen --no-dev
 
 COPY main.py ./
-COPY feishu_link/ feishu_link/
+COPY src/ src/
 
 RUN mkdir -p logs
 

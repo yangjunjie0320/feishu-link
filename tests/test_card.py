@@ -1,7 +1,7 @@
 import json
 
-from feishu_link.card import _fmt_count, _fmt_duration, _format_source_tag, build_card
-from feishu_link.parsers.base import LinkMetadata
+from src.card import _fmt_count, _fmt_duration, _format_source_tag, build_card
+from src.parsers.base import LinkMetadata, MediaType
 
 
 def test_fmt_duration_short() -> None:
@@ -87,6 +87,25 @@ def test_card_with_youtube_metadata() -> None:
     assert "播放 1.2万" in body_text
     assert "点赞 678" in body_text
     assert "评论 90" in body_text
+
+
+def test_video_card_omits_description_even_if_translated() -> None:
+    meta = LinkMetadata(
+        source_url="https://youtu.be/abc123",
+        title="Useful Video Title",
+        description="Get 30% off today. Long sponsor copy follows.",
+        translated_description="今日购买可享 30% 折扣。后面是很长的赞助文案。",
+        site_name="YouTube",
+        platform="youtube",
+        media_type=MediaType.VIDEO,
+    )
+    card = json.loads(build_card(meta))
+    body_text = next(
+        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
+    )
+    assert "Useful Video Title" in body_text
+    assert "30%" not in body_text
+    assert "赞助文案" not in body_text
 
 
 def test_card_with_parse_warning() -> None:

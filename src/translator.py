@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from .config import Settings
-from .parsers.base import LinkMetadata
+from .parsers.base import LinkMetadata, MediaType
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +123,9 @@ class TitleTranslator:
             meta.translated_title = translated
 
     async def _translate_description_if_needed(self, meta: LinkMetadata) -> None:
+        if meta.media_type == MediaType.VIDEO:
+            return
+
         description = meta.description.strip()
         if not description:
             return

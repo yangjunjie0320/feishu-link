@@ -1,8 +1,8 @@
 import httpx
 import respx
 
-from feishu_link.config import Settings
-from feishu_link.parsers.x_graphql import XGraphQLParser
+from src.config import Settings
+from src.parsers.x_graphql import XGraphQLParser
 
 
 @respx.mock
@@ -38,7 +38,7 @@ async def test_x_graphql_extracts_post_image_and_counts() -> None:
             },
         )
     )
-    settings = Settings(platform_cookie_files={"x": "tests/fixtures/x-cookie.txt"})
+    settings = Settings(cookie_file="tests/fixtures/x-cookie.txt")
 
     async with httpx.AsyncClient() as client:
         meta = await XGraphQLParser(client, settings).parse(

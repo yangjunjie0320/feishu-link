@@ -6,6 +6,7 @@ from collections import OrderedDict
 import httpx
 import lark_oapi as lark
 
+from .bibi_client import BibiClient
 from .card import build_card
 from .config import Settings
 from .dispatch import Dispatcher
@@ -13,9 +14,9 @@ from .image_uploader import upload_cover
 from .listener import MessageEvent
 from .media_downloader import VideoSkipReason, download_video
 from .parsers.base import LinkMetadata, ParserError
-from .sender import CardSender, VideoSender
+from .sender import CardSender, TextSender, VideoSender
 from .translator import TitleTranslator
-from .url_extract import extract_urls
+from .url_extract import extract_prompt, extract_urls
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +30,12 @@ class Pipeline:
         self._dispatcher = Dispatcher(settings, self._http)
         self._translator = TitleTranslator(settings, self._http)
         self._sender = CardSender(settings, lark_client)
+        self._text_sender = TextSender(settings, lark_client)
         self._video_sender = VideoSender(settings, lark_client)
+        self._bibi_client = BibiClient(settings)
         self._lark_client = lark_client
         self._seen: OrderedDict[str, None] = OrderedDict()
+        self._bot_open_id: str | None = None
 
     async def handle(self, event: MessageEvent) -> None:
         if event.message_id in self._seen:
@@ -40,6 +44,14 @@ class Pipeline:
         self._seen[event.message_id] = None
         if len(self._seen) > _SEEN_CAPACITY:
             self._seen.popitem(last=False)
+
+        is_bot_mentioned = False
+        if event.mentions:
+            if self._bot_open_id is None:
+                self._bot_open_id = await self._fetch_bot_open_id()
+            if self._bot_open_id in event.mentions:
+                is_bot_mentioned = True
+                logger.debug("message @mentions the bot itself, message_id=%s", event.message_id)
 
         urls = extract_urls(event.message_type, event.content, self._settings)
         if not urls:
@@ -51,9 +63,9 @@ class Pipeline:
         )
 
         for url in urls:
-            await self._process_url(url, event)
+            await self._process_url(url, event, is_bot_mentioned)
 
-    async def _process_url(self, url: str, event: MessageEvent) -> None:
+    async def _process_url(self, url: str, event: MessageEvent, is_bot_mentioned: bool) -> None:
         logger.debug("parsing url=%s", url)
         try:
             meta = await self._dispatcher.parse(url)
@@ -87,7 +99,18 @@ class Pipeline:
             meta.title[:50] if meta.title else "",
             event.message_id,
         )
-        await self._try_send_video(meta, event, img_key)
+
+        domain = ""
+        url_lower = url.lower()
+        if "youtube.com" in url_lower or "youtu.be" in url_lower:
+            domain = "youtube"
+        elif "bilibili.com" in url_lower or "b23.tv" in url_lower:
+            domain = "bilibili"
+
+        if is_bot_mentioned and domain in ("youtube", "bilibili"):
+            await self._try_send_bibigpt_summary(url, event)
+        else:
+            await self._try_send_video(meta, event, img_key)
 
     async def _try_send_video(
         self,
@@ -133,3 +156,66 @@ class Pipeline:
             )
         finally:
             video.cleanup()
+
+    async def _try_send_bibigpt_summary(
+        self,
+        url: str,
+        event: MessageEvent,
+    ) -> None:
+        prompt = extract_prompt(event.message_type, event.content, url)
+        logger.info(
+            "summarizing video=%s prompt=%s message_id=%s",
+            url,
+            prompt[:30] if prompt else "(default)",
+            event.message_id,
+        )
+
+        try:
+            result = await self._bibi_client.summarize(url, prompt=prompt)
+        except Exception as e:
+            error = str(e) or e.__class__.__name__
+            logger.error(
+                "summarize failed: url=%s message_id=%s error=%s",
+                url,
+                event.message_id,
+                error,
+            )
+            await self._text_sender.send(
+                f"Summarization failed: {error}",
+                event.chat_id,
+                event.message_id,
+            )
+            return
+
+        try:
+            await self._text_sender.send(result.content, event.chat_id, event.message_id)
+            logger.info(
+                "done: video=%s tokens=%d cached=%s message_id=%s",
+                url,
+                result.usage.total_tokens,
+                result.from_cache,
+                event.message_id,
+            )
+        except Exception as e:
+            logger.error("reply failed: url=%s message_id=%s error=%s", url, event.message_id, e)
+
+    async def _fetch_bot_open_id(self) -> str:
+        request = (
+            lark.BaseRequest.builder()
+            .http_method(lark.HttpMethod.GET)
+            .uri("/open-apis/bot/v3/info")
+            .token_types({lark.AccessTokenType.TENANT})
+            .build()
+        )
+        try:
+            resp = await self._lark_client.arequest(request)
+            if not resp.success():
+                logger.warning("failed to fetch bot info: code=%s msg=%s", resp.code, resp.msg)
+                return ""
+            import json
+
+            data = json.loads(resp.raw.content.decode("utf-8"))
+            return data.get("bot", {}).get("open_id", "")
+        except Exception as e:
+            logger.warning("failed to fetch bot info: %s", e)
+            return ""

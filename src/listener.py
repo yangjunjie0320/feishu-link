@@ -22,6 +22,7 @@ class MessageEvent:
     message_type: str
     content: str
     timestamp_utc: datetime
+    mentions: list[str]
 
 
 class LarkEventListener:
@@ -60,6 +61,13 @@ def _parse_event(data: lark.im.v1.P2ImMessageReceiveV1) -> MessageEvent | None:
     try:
         msg = data.event.message
         sender = data.event.sender
+        mentions = getattr(msg, "mentions", None)
+        mention_ids = []
+        if mentions:
+            for m in mentions:
+                if m.id and m.id.open_id:
+                    mention_ids.append(m.id.open_id)
+
         return MessageEvent(
             sender_id=sender.sender_id.open_id,
             message_id=msg.message_id,
@@ -68,6 +76,7 @@ def _parse_event(data: lark.im.v1.P2ImMessageReceiveV1) -> MessageEvent | None:
             message_type=msg.message_type,
             content=msg.content,
             timestamp_utc=datetime.now(UTC),
+            mentions=mention_ids,
         )
     except AttributeError as e:
         logger.warning("failed to parse event: %s", e)

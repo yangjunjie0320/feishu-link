@@ -14,6 +14,9 @@ _URL_RE = re.compile(
 # Feishu rich-text "at" and mention patterns to skip
 _SKIP_DOMAINS = re.compile(r"https?://(?:open\.feishu\.cn|open\.larksuite\.com)")
 
+# Feishu @mention placeholder pattern in text content: @_user_1 etc.
+_MENTION_PLACEHOLDER_RE = re.compile(r"@_user_\d+")
+
 
 def extract_urls(message_type: str, content_raw: str, settings: Settings) -> list[str]:
     text = _decode_content(message_type, content_raw)
@@ -67,3 +70,21 @@ def _flatten_post(obj: Any) -> str:
             elif isinstance(span, dict):
                 parts.append(str(span.get("text", "")))
     return " ".join(parts)
+
+
+def extract_prompt(message_type: str, raw: str, video_url: str) -> str | None:
+    """Extract custom prompt from message text.
+
+    Removes the video URL and @mention placeholders, returns remaining text
+    as the custom prompt, or None if nothing meaningful remains.
+    """
+    text = _decode_content(message_type, raw)
+    remaining = text.replace(video_url, "")
+    remaining = _MENTION_PLACEHOLDER_RE.sub("", remaining)
+    remaining = remaining.strip()
+
+    # If only whitespace/punctuation remains, no custom prompt.
+    if not remaining or len(remaining) < 2:
+        return None
+
+    return remaining

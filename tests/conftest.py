@@ -1,6 +1,6 @@
 import pytest
 
-from feishu_link.config import Settings
+from src.config import Settings
 
 
 @pytest.fixture

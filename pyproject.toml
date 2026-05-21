@@ -35,7 +35,7 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.pyright]
-include = ["feishu_link", "main.py"]
+include = ["src", "main.py"]
 pythonVersion = "3.12"
 typeCheckingMode = "off"
 

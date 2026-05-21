@@ -208,3 +208,76 @@ def build_media_content(file_key: str, image_key: str | None = None) -> str:
     if image_key:
         content["image_key"] = image_key
     return json.dumps(content, ensure_ascii=False)
+
+
+class TextSender:
+    def __init__(self, settings: Settings, client: lark.Client) -> None:
+        self._settings = settings
+        self._client = client
+
+    async def send(self, text: str, chat_id: str, message_id: str) -> bool:
+        @tenacity.retry(
+            stop=tenacity.stop_after_attempt(self._settings.send_retry_attempts),
+            wait=tenacity.wait_exponential(multiplier=1, min=1, max=9),
+            reraise=True,
+        )
+        async def _attempt() -> None:
+            content_json = json.dumps({"text": text}, ensure_ascii=False)
+            if self._settings.mode == Mode.A:
+                await self._reply_text(content_json, message_id)
+            else:
+                await self._send_text_to_archive(content_json)
+
+        try:
+            await _attempt()
+        except Exception as e:
+            logger.critical(
+                "text send exhausted all retries: message_id=%s error=%s",
+                message_id,
+                e,
+            )
+            return False
+        return True
+
+    async def _reply_text(self, content: str, message_id: str) -> None:
+        request = (
+            ReplyMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .msg_type("text")
+                .content(content)
+                .build()
+            )
+            .build()
+        )
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None, lambda: self._client.im.v1.message.reply(request)
+        )
+        if not response.success():
+            raise SendError(f"text reply failed: code={response.code} msg={response.msg}")
+        logger.info("text sent as thread reply: message_id=%s", message_id)
+
+    async def _send_text_to_archive(self, content: str) -> None:
+        if not self._settings.archive_chat_id:
+            raise SendError("archive_chat_id not configured for mode B")
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(self._settings.archive_chat_id)
+                .msg_type("text")
+                .content(content)
+                .build()
+            )
+            .build()
+        )
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None, lambda: self._client.im.v1.message.create(request)
+        )
+        if not response.success():
+            raise SendError(f"text create failed: code={response.code} msg={response.msg}")
+        logger.info("text sent to archive: chat_id=%s", self._settings.archive_chat_id)

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from feishu_link.time_utils import format_beijing, now_utc, to_beijing, to_us_eastern
+from src.time_utils import format_beijing, now_utc, to_beijing, to_us_eastern
 
 
 def test_now_utc_is_utc() -> None:

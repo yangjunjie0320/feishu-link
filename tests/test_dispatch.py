@@ -1,11 +1,11 @@
-from feishu_link.dispatch import (
+from src.dispatch import (
     _fallback_media_type,
     _fallback_title,
     _friendly_parse_warning,
     _normalize_instagram_post_meta,
     _normalize_x_post_meta,
 )
-from feishu_link.parsers.base import LinkMetadata, MediaType
+from src.parsers.base import LinkMetadata, MediaType
 
 
 def test_instagram_post_without_video_is_treated_as_image_post() -> None:
