@@ -15,6 +15,11 @@ _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 )
+_OUTPUT_INSTRUCTIONS = """\
+
+Output requirements:
+- Do not use any emoji.
+- Use Markdown formatting for headings, bullet lists, emphasis, and structure."""
 
 
 class BibiAPIError(Exception):
@@ -65,7 +70,9 @@ class BibiClient:
         Returns:
             SummaryResult with the AI-generated summary.
         """
-        effective_prompt = prompt or self._settings.bibigpt_default_prompt
+        effective_prompt = _with_output_instructions(
+            prompt or self._settings.bibigpt_default_prompt
+        )
 
         body: dict[str, Any] = {
             "messages": [
@@ -123,3 +130,7 @@ class BibiClient:
             raise AuthenticationError(response.status_code, response.text)
         if not response.is_success:
             raise BibiAPIError(response.status_code, response.text)
+
+
+def _with_output_instructions(prompt: str) -> str:
+    return f"{prompt.strip()}\n\n{_OUTPUT_INSTRUCTIONS.strip()}"

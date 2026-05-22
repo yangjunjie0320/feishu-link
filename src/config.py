@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     bibigpt_default_prompt: str = """\
 Please summarize this video comprehensively:
 1. One-sentence overview
-2. Key points (bulleted list, each prefixed with a fitting emoji)
+2. Key points
 3. Important details and highlights
 4. Conclusion and evaluation"""
 

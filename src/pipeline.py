@@ -7,7 +7,7 @@ import httpx
 import lark_oapi as lark
 
 from .bibi_client import BibiClient
-from .card import build_card
+from .card import build_card, build_markdown_card
 from .config import Settings
 from .dispatch import Dispatcher
 from .image_uploader import upload_cover
@@ -188,7 +188,19 @@ class Pipeline:
             return
 
         try:
-            await self._text_sender.send(result.content, event.chat_id, event.message_id)
+            card_json = build_markdown_card(
+                "BibiGPT 总结",
+                result.content,
+                source_url=url,
+            )
+            card_sent = await self._sender.send(card_json, event.chat_id, event.message_id)
+            if not card_sent:
+                logger.error(
+                    "summary card send failed: url=%s message_id=%s",
+                    url,
+                    event.message_id,
+                )
+                return
             logger.info(
                 "done: video=%s tokens=%d cached=%s message_id=%s",
                 url,

@@ -1,6 +1,12 @@
 import json
 
-from src.card import _fmt_count, _fmt_duration, _format_source_tag, build_card
+from src.card import (
+    _fmt_count,
+    _fmt_duration,
+    _format_source_tag,
+    build_card,
+    build_markdown_card,
+)
 from src.parsers.base import LinkMetadata, MediaType
 
 
@@ -54,6 +60,25 @@ def test_card_structure() -> None:
     assert actions
     assert actions[0]["actions"][0]["url"] == "https://example.com"
     assert actions[0]["actions"][0]["text"]["content"] == "打开链接"
+
+
+def test_markdown_card_preserves_markdown_and_removes_emoji() -> None:
+    card = json.loads(
+        build_markdown_card(
+            "BibiGPT 总结",
+            "## 重点 🔥\n- **第一点**\n- 第二点",
+            source_url="https://youtu.be/abc123",
+        )
+    )
+
+    content = card["elements"][0]["text"]["content"]
+    assert "**BibiGPT 总结**" in content
+    assert "## 重点" in content
+    assert "- **第一点**" in content
+    assert "🔥" not in content
+    action = card["elements"][1]["actions"][0]
+    assert action["url"] == "https://youtu.be/abc123"
+    assert action["text"]["content"] == "打开视频"
 
 
 def test_card_no_cover() -> None:

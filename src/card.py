@@ -59,6 +59,42 @@ def _format_stats(meta: LinkMetadata) -> str:
     return " · ".join(parts)
 
 
+def build_markdown_card(
+    title: str,
+    markdown: str,
+    *,
+    source_url: str | None = None,
+) -> str:
+    safe_title = escape(title.strip() or "Summary")
+    content = _strip_emoji_symbols(markdown).strip() or "No summary content."
+    elements: list[dict[str, object]] = [{
+        "tag": "div",
+        "text": {
+            "tag": "lark_md",
+            "content": f"**{safe_title}**\n{content}",
+        },
+    }]
+
+    if source_url:
+        elements.append({
+            "tag": "action",
+            "actions": [{
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "打开视频"},
+                "url": source_url,
+                "type": "primary",
+            }],
+        })
+
+    return json.dumps(
+        {
+            "config": {"wide_screen_mode": True},
+            "elements": elements,
+        },
+        ensure_ascii=False,
+    )
+
+
 def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
     elements: list[dict[str, object]] = []
 
@@ -146,8 +182,11 @@ def _format_description_block(meta: LinkMetadata) -> str:
 
 
 def _clean_description_text(text: str) -> str:
-    without_emoji = "".join(ch for ch in text if not _is_emoji_or_modifier(ch))
-    return " ".join(without_emoji.split())
+    return " ".join(_strip_emoji_symbols(text).split())
+
+
+def _strip_emoji_symbols(text: str) -> str:
+    return "".join(ch for ch in text if not _is_emoji_or_modifier(ch))
 
 
 def _is_emoji_or_modifier(ch: str) -> bool:
