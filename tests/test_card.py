@@ -62,23 +62,30 @@ def test_card_structure() -> None:
     assert actions[0]["actions"][0]["text"]["content"] == "打开链接"
 
 
-def test_markdown_card_preserves_markdown_and_removes_emoji() -> None:
+def test_markdown_card_uses_markdown_component_and_normalizes_bullets() -> None:
     card = json.loads(
         build_markdown_card(
             "BibiGPT 总结",
-            "## 重点 🔥\n- **第一点**\n- 第二点",
+            "## 重点 🔥\n* **第一点**\n  * 子点\n+ 第三点\n- 第二点",
             source_url="https://youtu.be/abc123",
         )
     )
 
-    content = card["elements"][0]["text"]["content"]
-    assert "**BibiGPT 总结**" in content
-    assert "## 重点" in content
+    assert card["schema"] == "2.0"
+    assert card["header"]["title"]["content"] == "BibiGPT 总结"
+    content = card["body"]["elements"][0]["content"]
+    assert card["body"]["elements"][0]["tag"] == "markdown"
+    assert "- 重点" in content
     assert "- **第一点**" in content
+    assert "    - 子点" in content
+    assert "- 第三点" in content
     assert "🔥" not in content
-    action = card["elements"][1]["actions"][0]
-    assert action["url"] == "https://youtu.be/abc123"
-    assert action["text"]["content"] == "打开视频"
+    assert "## 重点" not in content
+    assert "* **第一点**" not in content
+    assert card["card_link"]["url"] == "https://youtu.be/abc123"
+    link = card["body"]["elements"][1]
+    assert link["tag"] == "markdown"
+    assert link["content"] == "[打开视频](https://youtu.be/abc123)"
 
 
 def test_card_no_cover() -> None:

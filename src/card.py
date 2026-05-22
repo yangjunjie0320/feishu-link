@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
 from html import escape
 
@@ -65,34 +66,31 @@ def build_markdown_card(
     *,
     source_url: str | None = None,
 ) -> str:
-    safe_title = escape(title.strip() or "Summary")
-    content = _strip_emoji_symbols(markdown).strip() or "No summary content."
+    safe_title = _strip_emoji_symbols(title).strip() or "Summary"
+    content = _normalize_summary_markdown(markdown)
     elements: list[dict[str, object]] = [{
-        "tag": "div",
-        "text": {
-            "tag": "lark_md",
-            "content": f"**{safe_title}**\n{content}",
-        },
+        "tag": "markdown",
+        "content": content,
     }]
 
     if source_url:
         elements.append({
-            "tag": "action",
-            "actions": [{
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "打开视频"},
-                "url": source_url,
-                "type": "primary",
-            }],
+            "tag": "markdown",
+            "content": f"[打开视频]({source_url})",
         })
 
-    return json.dumps(
-        {
-            "config": {"wide_screen_mode": True},
-            "elements": elements,
+    card: dict[str, object] = {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": safe_title},
+            "template": "blue",
         },
-        ensure_ascii=False,
-    )
+        "body": {"elements": elements},
+    }
+    if source_url:
+        card["card_link"] = {"url": source_url}
+
+    return json.dumps(card, ensure_ascii=False)
 
 
 def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
@@ -183,6 +181,41 @@ def _format_description_block(meta: LinkMetadata) -> str:
 
 def _clean_description_text(text: str) -> str:
     return " ".join(_strip_emoji_symbols(text).split())
+
+
+def _normalize_summary_markdown(markdown: str) -> str:
+    content = _strip_emoji_symbols(markdown).strip()
+    if not content:
+        return "No summary content."
+
+    lines: list[str] = []
+    for line in content.splitlines():
+        lines.append(_normalize_summary_markdown_line(line))
+    return "\n".join(lines).strip()
+
+
+def _normalize_summary_markdown_line(line: str) -> str:
+    stripped = line.lstrip(" ")
+    if not stripped:
+        return ""
+
+    indent = len(line) - len(stripped)
+    heading_match = re.match(r"#{1,6}\s+(.+?)\s*#*\s*$", stripped)
+    if heading_match:
+        return f"{_normalize_bullet_indent(indent)}- {heading_match.group(1).strip()}"
+
+    bullet_match = re.match(r"[*+-]\s+(.+)$", stripped)
+    if bullet_match:
+        return f"{_normalize_bullet_indent(indent)}- {bullet_match.group(1)}"
+
+    return line
+
+
+def _normalize_bullet_indent(indent: int) -> str:
+    if indent <= 0:
+        return ""
+    level = indent // 4 if indent % 4 == 0 else max(1, indent // 2)
+    return " " * (level * 4)
 
 
 def _strip_emoji_symbols(text: str) -> str:

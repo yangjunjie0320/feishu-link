@@ -48,3 +48,6 @@ async def test_bibi_client_appends_fixed_markdown_bullet_prompt() -> None:
     assert "Use Markdown formatting." in prompt
     assert "Do not use Markdown headings" in prompt
     assert "Use nested bullet points only" in prompt
+    assert 'Use "-" as the only unordered bullet marker' in prompt
+    assert "Use four spaces for each nested bullet level" in prompt
+    assert "Do not use numbered lists." in prompt

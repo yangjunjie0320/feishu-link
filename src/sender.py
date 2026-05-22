@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import lark_oapi as lark
@@ -10,8 +12,12 @@ import tenacity
 from lark_oapi.api.im.v1 import (
     CreateFileRequest,
     CreateFileRequestBody,
+    CreateMessageReactionRequest,
+    CreateMessageReactionRequestBody,
     CreateMessageRequest,
     CreateMessageRequestBody,
+    DeleteMessageReactionRequest,
+    Emoji,
     ReplyMessageRequest,
     ReplyMessageRequestBody,
 )
@@ -23,6 +29,129 @@ logger = logging.getLogger(__name__)
 
 class SendError(Exception):
     pass
+
+
+class TypingReactionSender:
+    def __init__(self, client: lark.Client) -> None:
+        self._client = client
+
+    @asynccontextmanager
+    async def hold(
+        self,
+        message_id: str,
+        *,
+        label: str,
+    ) -> AsyncIterator[None]:
+        reaction_id = await self.start(message_id, label=label)
+        try:
+            yield
+        finally:
+            await self.stop(message_id, reaction_id, label=label)
+
+    async def start(self, message_id: str, *, label: str = "work") -> str | None:
+        request = (
+            CreateMessageReactionRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                CreateMessageReactionRequestBody.builder()
+                .reaction_type(Emoji.builder().emoji_type("Typing").build())
+                .build()
+            )
+            .build()
+        )
+
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None, lambda: self._client.im.v1.message_reaction.create(request)
+            )
+        except Exception as e:
+            logger.warning(
+                "typing reaction add failed: label=%s message_id=%s error=%s",
+                label,
+                message_id,
+                e,
+            )
+            return None
+
+        if not response.success():
+            logger.warning(
+                "typing reaction add failed: label=%s message_id=%s code=%s msg=%s",
+                label,
+                message_id,
+                response.code,
+                response.msg,
+            )
+            return None
+
+        reaction_id = getattr(response.data, "reaction_id", None)
+        if not reaction_id:
+            logger.warning(
+                "typing reaction add returned no reaction_id: label=%s message_id=%s",
+                label,
+                message_id,
+            )
+            return None
+
+        logger.info(
+            "typing reaction added: label=%s message_id=%s reaction_id=%s",
+            label,
+            message_id,
+            reaction_id,
+        )
+        return reaction_id
+
+    async def stop(
+        self,
+        message_id: str,
+        reaction_id: str | None,
+        *,
+        label: str = "work",
+    ) -> bool:
+        if not reaction_id:
+            return True
+
+        request = (
+            DeleteMessageReactionRequest.builder()
+            .message_id(message_id)
+            .reaction_id(reaction_id)
+            .build()
+        )
+
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None, lambda: self._client.im.v1.message_reaction.delete(request)
+            )
+        except Exception as e:
+            logger.warning(
+                "typing reaction remove failed: label=%s message_id=%s reaction_id=%s error=%s",
+                label,
+                message_id,
+                reaction_id,
+                e,
+            )
+            return False
+
+        if not response.success():
+            logger.warning(
+                "typing reaction remove failed: label=%s message_id=%s reaction_id=%s "
+                "code=%s msg=%s",
+                label,
+                message_id,
+                reaction_id,
+                response.code,
+                response.msg,
+            )
+            return False
+
+        logger.info(
+            "typing reaction removed: label=%s message_id=%s reaction_id=%s",
+            label,
+            message_id,
+            reaction_id,
+        )
+        return True
 
 
 class CardSender:

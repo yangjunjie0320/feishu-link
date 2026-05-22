@@ -21,7 +21,10 @@ Output requirements:
 - Do not use any emoji.
 - Use Markdown formatting.
 - Do not use Markdown headings or standalone section titles.
-- Use nested bullet points only to separate sections and show hierarchy."""
+- Use nested bullet points only to separate sections and show hierarchy.
+- Use "-" as the only unordered bullet marker; do not use "*" or "+" for lists.
+- Use four spaces for each nested bullet level.
+- Do not use numbered lists."""
 
 
 class BibiAPIError(Exception):

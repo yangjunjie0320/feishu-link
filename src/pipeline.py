@@ -14,7 +14,7 @@ from .image_uploader import upload_cover
 from .listener import MessageEvent
 from .media_downloader import VideoSkipReason, download_video
 from .parsers.base import LinkMetadata, ParserError
-from .sender import CardSender, TextSender, VideoSender
+from .sender import CardSender, TextSender, TypingReactionSender, VideoSender
 from .translator import TitleTranslator
 from .url_extract import extract_prompt, extract_urls
 
@@ -32,6 +32,7 @@ class Pipeline:
         self._sender = CardSender(settings, lark_client)
         self._text_sender = TextSender(settings, lark_client)
         self._video_sender = VideoSender(settings, lark_client)
+        self._typing_sender = TypingReactionSender(lark_client)
         self._bibi_client = BibiClient(settings)
         self._lark_client = lark_client
         self._seen: OrderedDict[str, None] = OrderedDict()
@@ -67,38 +68,39 @@ class Pipeline:
 
     async def _process_url(self, url: str, event: MessageEvent, is_bot_mentioned: bool) -> None:
         logger.debug("parsing url=%s", url)
-        try:
-            meta = await self._dispatcher.parse(url)
-        except ParserError as e:
-            logger.error(
-                "parse failed: url=%s message_id=%s reason=%s",
+        async with self._typing_sender.hold(event.message_id, label="card"):
+            try:
+                meta = await self._dispatcher.parse(url)
+            except ParserError as e:
+                logger.error(
+                    "parse failed: url=%s message_id=%s reason=%s",
+                    url,
+                    event.message_id,
+                    e.reason,
+                )
+                return
+
+            await self._translator.translate_metadata(meta)
+
+            img_key: str | None = None
+            if meta.cover_url:
+                img_key = await upload_cover(meta.cover_url, self._lark_client, self._http)
+
+            card_json = build_card(meta, img_key)
+            card_sent = await self._sender.send(card_json, event.chat_id, event.message_id)
+            if not card_sent:
+                logger.error(
+                    "skip video append because card send failed: url=%s message_id=%s",
+                    url,
+                    event.message_id,
+                )
+                return
+            logger.info(
+                "card sent: url=%s title=%r message_id=%s",
                 url,
-                event.message_id,
-                e.reason,
-            )
-            return
-
-        await self._translator.translate_metadata(meta)
-
-        img_key: str | None = None
-        if meta.cover_url:
-            img_key = await upload_cover(meta.cover_url, self._lark_client, self._http)
-
-        card_json = build_card(meta, img_key)
-        card_sent = await self._sender.send(card_json, event.chat_id, event.message_id)
-        if not card_sent:
-            logger.error(
-                "skip video append because card send failed: url=%s message_id=%s",
-                url,
+                meta.title[:50] if meta.title else "",
                 event.message_id,
             )
-            return
-        logger.info(
-            "card sent: url=%s title=%r message_id=%s",
-            url,
-            meta.title[:50] if meta.title else "",
-            event.message_id,
-        )
 
         domain = ""
         url_lower = url.lower()
@@ -118,98 +120,107 @@ class Pipeline:
         event: MessageEvent,
         img_key: str | None,
     ) -> None:
-        try:
-            video = await download_video(meta, self._settings)
-        except VideoSkipReason as e:
-            logger.info(
-                "skip video append: url=%s message_id=%s reason=%s",
-                meta.source_url,
-                event.message_id,
-                e,
-            )
-            return
-        except Exception as e:
-            logger.warning(
-                "video download failed: url=%s message_id=%s error=%s",
-                meta.source_url,
-                event.message_id,
-                e,
-            )
-            return
+        async with self._typing_sender.hold(event.message_id, label="video"):
+            try:
+                video = await download_video(meta, self._settings)
+            except VideoSkipReason as e:
+                logger.info(
+                    "skip video append: url=%s message_id=%s reason=%s",
+                    meta.source_url,
+                    event.message_id,
+                    e,
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    "video download failed: url=%s message_id=%s error=%s",
+                    meta.source_url,
+                    event.message_id,
+                    e,
+                )
+                return
 
-        try:
-            await self._video_sender.send(
-                video.path,
-                video.file_name,
-                video.duration_ms,
-                event.chat_id,
-                event.message_id,
-                img_key,
-            )
-        except Exception as e:
-            logger.warning(
-                "video send failed: url=%s message_id=%s file_name=%s error=%s",
-                meta.source_url,
-                event.message_id,
-                video.file_name,
-                e,
-            )
-        finally:
-            video.cleanup()
+            try:
+                await self._video_sender.send(
+                    video.path,
+                    video.file_name,
+                    video.duration_ms,
+                    event.chat_id,
+                    event.message_id,
+                    img_key,
+                )
+            except Exception as e:
+                logger.warning(
+                    "video send failed: url=%s message_id=%s file_name=%s error=%s",
+                    meta.source_url,
+                    event.message_id,
+                    video.file_name,
+                    e,
+                )
+            finally:
+                video.cleanup()
 
     async def _try_send_bibigpt_summary(
         self,
         url: str,
         event: MessageEvent,
     ) -> None:
-        prompt = extract_prompt(event.message_type, event.content, url)
-        logger.info(
-            "summarizing video=%s prompt=%s message_id=%s",
-            url,
-            prompt[:30] if prompt else "(default)",
-            event.message_id,
-        )
-
-        try:
-            result = await self._bibi_client.summarize(url, prompt=prompt)
-        except Exception as e:
-            error = str(e) or e.__class__.__name__
-            logger.error(
-                "summarize failed: url=%s message_id=%s error=%s",
+        async with self._typing_sender.hold(event.message_id, label="bibigpt"):
+            prompt = extract_prompt(event.message_type, event.content, url)
+            logger.info(
+                "summarizing video=%s prompt=%s message_id=%s",
                 url,
-                event.message_id,
-                error,
-            )
-            await self._text_sender.send(
-                f"Summarization failed: {error}",
-                event.chat_id,
+                prompt[:30] if prompt else "(default)",
                 event.message_id,
             )
-            return
 
-        try:
-            card_json = build_markdown_card(
-                "BibiGPT 总结",
-                result.content,
-                source_url=url,
-            )
-            card_sent = await self._sender.send(card_json, event.chat_id, event.message_id)
-            if not card_sent:
+            try:
+                result = await self._bibi_client.summarize(url, prompt=prompt)
+            except Exception as e:
+                error = str(e) or e.__class__.__name__
                 logger.error(
-                    "summary card send failed: url=%s message_id=%s",
+                    "summarize failed: url=%s message_id=%s error=%s",
                     url,
+                    event.message_id,
+                    error,
+                )
+                await self._text_sender.send(
+                    f"Summarization failed: {error}",
+                    event.chat_id,
                     event.message_id,
                 )
                 return
-            logger.info(
-                "done: video=%s tokens=%d cached=%s message_id=%s",
-                url,
-                result.usage.total_tokens,
-                result.from_cache,
-                event.message_id,
-            )
-        except Exception as e:
-            logger.error("reply failed: url=%s message_id=%s error=%s", url, event.message_id, e)
+
+            try:
+                card_json = build_markdown_card(
+                    "BibiGPT 总结",
+                    result.content,
+                    source_url=url,
+                )
+                card_sent = await self._sender.send(
+                    card_json, event.chat_id, event.message_id
+                )
+                if not card_sent:
+                    logger.error(
+                        "summary card send failed: url=%s message_id=%s",
+                        url,
+                        event.message_id,
+                    )
+                    return
+                logger.info(
+                    "done: video=%s tokens=%d cached=%s message_id=%s",
+                    url,
+                    result.usage.total_tokens,
+                    result.from_cache,
+                    event.message_id,
+                )
+            except Exception as e:
+                logger.error(
+                    "reply failed: url=%s message_id=%s error=%s",
+                    url,
+                    event.message_id,
+                    e,
+                )
 
     async def _fetch_bot_open_id(self) -> str:
         request = (
