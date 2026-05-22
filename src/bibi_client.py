@@ -19,7 +19,9 @@ _OUTPUT_INSTRUCTIONS = """\
 
 Output requirements:
 - Do not use any emoji.
-- Use Markdown formatting for headings, bullet lists, emphasis, and structure."""
+- Use Markdown formatting.
+- Do not use Markdown headings or standalone section titles.
+- Use nested bullet points only to separate sections and show hierarchy."""
 
 
 class BibiAPIError(Exception):

@@ -8,7 +8,7 @@ from src.config import Settings
 
 
 @respx.mock
-async def test_bibi_client_appends_fixed_markdown_prompt() -> None:
+async def test_bibi_client_appends_fixed_markdown_bullet_prompt() -> None:
     route = respx.post("https://bibigpt.test/api/v1/chat/completions").mock(
         return_value=httpx.Response(
             200,
@@ -45,4 +45,6 @@ async def test_bibi_client_appends_fixed_markdown_prompt() -> None:
     assert result.content == "## Summary\n- Point"
     assert "Focus on the business implications." in prompt
     assert "Do not use any emoji." in prompt
-    assert "Use Markdown formatting" in prompt
+    assert "Use Markdown formatting." in prompt
+    assert "Do not use Markdown headings" in prompt
+    assert "Use nested bullet points only" in prompt
