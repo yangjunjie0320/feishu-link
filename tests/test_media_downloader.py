@@ -46,6 +46,27 @@ def test_skip_without_download_candidate(settings: Settings) -> None:
     assert explain_video_skip(meta, settings) == "no download candidate"
 
 
+def test_skip_when_all_known_candidates_exceed_file_limit(settings: Settings) -> None:
+    meta = _video_meta(
+        download_candidates=[
+            DownloadCandidate(url="https://cdn.example.com/large.mp4", filesize=51 * 1024 * 1024)
+        ]
+    )
+
+    assert "filesize exceeds limit" in (explain_video_skip(meta, settings) or "")
+
+
+def test_does_not_skip_file_limit_when_smaller_candidate_known(settings: Settings) -> None:
+    meta = _video_meta(
+        download_candidates=[
+            DownloadCandidate(url="https://cdn.example.com/small.mp4", filesize=10 * 1024 * 1024),
+            DownloadCandidate(url="https://cdn.example.com/large.mp4", filesize=51 * 1024 * 1024),
+        ]
+    )
+
+    assert explain_video_skip(meta, settings) is None
+
+
 def test_video_can_be_attempted(settings: Settings) -> None:
     assert explain_video_skip(_video_meta(), settings) is None
 

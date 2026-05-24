@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -40,26 +42,39 @@ class AuthenticationError(BibiAPIError):
     """Raised when cookie authentication fails (401/403)."""
 
 
+@dataclass(frozen=True)
+class _BibiRoutes:
+    api_base_url: str
+    referer: str
+    origin: str
+    cookie_domain: str
+
+
 class BibiClient:
     """BibiGPT web API client using cookie-based authentication."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._routes = _resolve_routes(settings.bibigpt_base_url)
         cookie_header = get_cookie_header(
             settings.cookie_file_for_platform("bibigpt"),
-            "bibigpt.co",
+            self._routes.cookie_domain,
         )
 
         self._headers = {
             "User-Agent": _USER_AGENT,
-            "Referer": f"{settings.bibigpt_base_url}/",
-            "Origin": settings.bibigpt_base_url,
+            "Referer": self._routes.referer,
+            "Origin": self._routes.origin,
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
         if cookie_header:
             self._headers["Cookie"] = cookie_header
-        logger.info("BibiClient initialized (base_url=%s)", settings.bibigpt_base_url)
+        logger.info(
+            "BibiClient initialized (api_base_url=%s, referer=%s)",
+            self._routes.api_base_url,
+            self._routes.referer,
+        )
 
     async def summarize(
         self,
@@ -92,7 +107,7 @@ class BibiClient:
             "stream": False,
         }
 
-        url = f"{self._settings.bibigpt_base_url}/api/v1/chat/completions"
+        url = f"{self._routes.api_base_url}/api/v1/chat/completions"
         logger.info("Requesting summary for %s", video_url)
 
         async with httpx.AsyncClient(timeout=self._settings.bibigpt_timeout) as client:
@@ -112,7 +127,7 @@ class BibiClient:
 
     async def get_user_info(self) -> dict[str, Any]:
         """Fetch current user profile to verify cookie validity."""
-        url = f"{self._settings.bibigpt_base_url}/api/trpc/user.me"
+        url = f"{self._routes.api_base_url}/api/trpc/user.me"
         logger.debug("Verifying cookie via user.me")
 
         async with httpx.AsyncClient(timeout=self._settings.request_timeout) as client:
@@ -139,3 +154,21 @@ class BibiClient:
 
 def _with_output_instructions(prompt: str) -> str:
     return f"{prompt.strip()}\n\n{_OUTPUT_INSTRUCTIONS.strip()}"
+
+
+def _resolve_routes(base_url: str) -> _BibiRoutes:
+    normalized = (base_url or "https://bibigpt.co").strip().rstrip("/")
+    if "://" not in normalized:
+        normalized = f"https://{normalized}"
+
+    parsed = urlsplit(normalized)
+    origin = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    referer = normalized if parsed.path and parsed.path != "/" else origin
+    cookie_domain = parsed.hostname or parsed.netloc.split(":")[0]
+
+    return _BibiRoutes(
+        api_base_url=origin,
+        referer=f"{referer}/",
+        origin=origin,
+        cookie_domain=cookie_domain,
+    )

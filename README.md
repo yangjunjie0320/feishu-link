@@ -12,6 +12,7 @@ The project is designed for personal or team link collection workflows: send a s
 - Video metrics when available: views, likes, comments, and reposts.
 - Optional short-video append. Videos up to 180 seconds are downloaded, converted to Feishu-friendly MP4, uploaded, and sent after the card.
 - **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube or Bilibili link to receive an AI-generated video summary via BibiGPT instead of downloading the video.
+- Manual download command: mention the bot and send `下载 <link>` to force video download instead of summarization.
 - Optional title translation through DeepSeek. Non-Chinese titles are translated and shown together with the original title.
 - Unified Netscape cookie file for platforms that require login state (like Instagram, X, and BibiGPT).
 - Explicit logging for parse, download, upload, and send failures. Card delivery is prioritized over video delivery.
@@ -174,7 +175,7 @@ See `config.example.yaml` for the full reference. Common settings:
 | `max_video_file_mb` | Config example | Max uploaded video size |
 | `allowed_video_platforms` | Config example | Platforms allowed for video append |
 | `cookie_file` | `cookies/cookies.txt` | Unified Netscape cookie file path |
-| `bibigpt_base_url` | `https://bibigpt.co` | Base URL for BibiGPT API |
+| `bibigpt_base_url` | `https://bibigpt.co` | Base URL for BibiGPT. Use `https://aitodo.co/zh` for the international/overseas route. |
 | `bibigpt_timeout` | `120.0` | Timeout in seconds for BibiGPT summary requests |
 | `bibigpt_default_prompt` | Default | Prompt to send to BibiGPT |
 | `deepseek_api_key` | Empty | Enables title translation when configured |
@@ -228,6 +229,16 @@ The service always sends the card first. After that it tries video sending only 
 Before upload, videos are converted to MP4 with H.264 video, AAC audio, `yuv420p`, and faststart metadata. The uploader probes the converted file duration with `ffprobe` and sends duration in milliseconds so Feishu can generate a correct preview.
 
 If any video step fails, the service logs the reason and does not send an extra failure message to the chat.
+
+## Manual Downloads
+
+Mention the bot and start the message with `下载` followed by a link to force video download and send:
+
+```text
+@bot 下载 https://youtu.be/example
+```
+
+Manual downloads bypass BibiGPT summaries. If the link cannot be parsed as a downloadable video, exceeds the configured duration limit, has a known candidate file larger than `max_video_file_mb`, or the final converted MP4 is too large for upload, the bot replies with the failure reason.
 
 ## Development
 

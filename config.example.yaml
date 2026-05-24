@@ -73,6 +73,7 @@ platform_cookie_files: {}
 
 # Optional BibiGPT integration. Mention the bot with a YouTube or Bilibili URL
 # to send a summary instead of appending the video.
+# Use "https://aitodo.co/zh" for the international/overseas route.
 bibigpt_base_url: "https://bibigpt.co"
 bibigpt_timeout: 120.0
 bibigpt_default_prompt: |

@@ -61,11 +61,26 @@ def explain_video_skip(meta: LinkMetadata, settings: Settings) -> str | None:
     if meta.requires_auth and not cookie_file:
         logger.warning(
             "skip download: url=%s needs auth but no cookie file configured",
-            meta.url,
+            meta.source_url,
         )
         return "platform requires auth"
     if not meta.download_candidates:
         return "no download candidate"
+    smallest_known_size = min(
+        (
+            candidate.filesize
+            for candidate in meta.download_candidates
+            if candidate.filesize is not None
+        ),
+        default=None,
+    )
+    max_bytes = settings.max_video_file_mb * 1024 * 1024
+    if smallest_known_size is not None and smallest_known_size > max_bytes:
+        return (
+            "video filesize exceeds limit: "
+            f"size_mb={smallest_known_size / (1024 * 1024):.2f} "
+            f"limit_mb={settings.max_video_file_mb}"
+        )
     return None
 
 

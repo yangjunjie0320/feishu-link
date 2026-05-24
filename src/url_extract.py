@@ -93,3 +93,13 @@ def extract_prompt(message_type: str, raw: str, video_url: str) -> str | None:
         return None
 
     return remaining
+
+
+def is_manual_download_command(message_type: str, raw: str) -> bool:
+    text = _decode_content(message_type, raw)
+    text = _MENTION_PLACEHOLDER_RE.sub("", text).strip()
+    if not text.startswith("下载"):
+        return False
+
+    tail = text.removeprefix("下载").lstrip(" \t\n\r:").lstrip("\N{FULLWIDTH COLON}")
+    return bool(_URL_RE.search(tail))

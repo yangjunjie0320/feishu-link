@@ -3,7 +3,7 @@ import json
 import pytest
 
 from src.config import Settings
-from src.url_extract import extract_prompt, extract_urls
+from src.url_extract import extract_prompt, extract_urls, is_manual_download_command
 
 
 @pytest.fixture
@@ -96,3 +96,27 @@ def test_extract_prompt_returns_none_when_only_url_and_mention() -> None:
     content = json.dumps({"text": f"@_user_1 {url}"})
 
     assert extract_prompt("text", content, url) is None
+
+
+def test_manual_download_command_detects_download_after_mention() -> None:
+    content = json.dumps({"text": "@_user_1 下载 https://youtu.be/dQw4w9WgXcQ"})
+
+    assert is_manual_download_command("text", content) is True
+
+
+def test_manual_download_command_supports_colon_separator() -> None:
+    content = json.dumps({"text": "下载\uff1ahttps://youtu.be/dQw4w9WgXcQ"})
+
+    assert is_manual_download_command("text", content) is True
+
+
+def test_manual_download_command_requires_download_prefix() -> None:
+    content = json.dumps({"text": "@_user_1 请下载 https://youtu.be/dQw4w9WgXcQ"})
+
+    assert is_manual_download_command("text", content) is False
+
+
+def test_manual_download_command_requires_url_after_download() -> None:
+    content = json.dumps({"text": "@_user_1 下载"})
+
+    assert is_manual_download_command("text", content) is False

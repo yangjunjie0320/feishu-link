@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import OrderedDict
 
 import httpx
@@ -16,7 +17,7 @@ from .media_downloader import VideoSkipReason, download_video
 from .parsers.base import LinkMetadata, ParserError
 from .sender import CardSender, TextSender, TypingReactionSender, VideoSender
 from .translator import TitleTranslator
-from .url_extract import extract_prompt, extract_urls
+from .url_extract import extract_prompt, extract_urls, is_manual_download_command
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +60,27 @@ class Pipeline:
             logger.debug("skip: no URLs in message_id=%s", event.message_id)
             return
 
+        manual_download = is_bot_mentioned and is_manual_download_command(
+            event.message_type,
+            event.content,
+        )
         logger.info(
-            "processing %d URL(s) from message_id=%s", len(urls), event.message_id
+            "processing %d URL(s) from message_id=%s manual_download=%s",
+            len(urls),
+            event.message_id,
+            manual_download,
         )
 
         for url in urls:
-            await self._process_url(url, event, is_bot_mentioned)
+            await self._process_url(url, event, is_bot_mentioned, manual_download)
 
-    async def _process_url(self, url: str, event: MessageEvent, is_bot_mentioned: bool) -> None:
+    async def _process_url(
+        self,
+        url: str,
+        event: MessageEvent,
+        is_bot_mentioned: bool,
+        manual_download: bool,
+    ) -> None:
         logger.debug("parsing url=%s", url)
         async with self._typing_sender.hold(event.message_id, label="card"):
             try:
@@ -78,6 +92,12 @@ class Pipeline:
                     event.message_id,
                     e.reason,
                 )
+                if manual_download:
+                    await self._text_sender.send(
+                        _download_failure_message(url, f"链接解析失败: {e.reason}"),
+                        event.chat_id,
+                        event.message_id,
+                    )
                 return
 
             await self._translator.translate_metadata(meta)
@@ -109,7 +129,9 @@ class Pipeline:
         elif "bilibili.com" in url_lower or "b23.tv" in url_lower:
             domain = "bilibili"
 
-        if is_bot_mentioned and domain in ("youtube", "bilibili"):
+        if manual_download:
+            await self._try_send_video(meta, event, img_key, notify_user=True)
+        elif is_bot_mentioned and domain in ("youtube", "bilibili"):
             await self._try_send_bibigpt_summary(url, event)
         else:
             await self._try_send_video(meta, event, img_key)
@@ -119,6 +141,8 @@ class Pipeline:
         meta: LinkMetadata,
         event: MessageEvent,
         img_key: str | None,
+        *,
+        notify_user: bool = False,
     ) -> None:
         async with self._typing_sender.hold(event.message_id, label="video"):
             try:
@@ -130,6 +154,12 @@ class Pipeline:
                     event.message_id,
                     e,
                 )
+                if notify_user:
+                    await self._text_sender.send(
+                        _download_failure_message(meta.source_url, str(e)),
+                        event.chat_id,
+                        event.message_id,
+                    )
                 return
             except Exception as e:
                 logger.warning(
@@ -138,6 +168,13 @@ class Pipeline:
                     event.message_id,
                     e,
                 )
+                if notify_user:
+                    error = str(e) or e.__class__.__name__
+                    await self._text_sender.send(
+                        _download_failure_message(meta.source_url, error),
+                        event.chat_id,
+                        event.message_id,
+                    )
                 return
 
             try:
@@ -157,6 +194,13 @@ class Pipeline:
                     video.file_name,
                     e,
                 )
+                if notify_user:
+                    error = str(e) or e.__class__.__name__
+                    await self._text_sender.send(
+                        _download_failure_message(meta.source_url, f"发送失败: {error}"),
+                        event.chat_id,
+                        event.message_id,
+                    )
             finally:
                 video.cleanup()
 
@@ -242,3 +286,47 @@ class Pipeline:
         except Exception as e:
             logger.warning("failed to fetch bot info: %s", e)
             return ""
+
+
+def _download_failure_message(url: str, reason: str) -> str:
+    return f"下载失败: {_friendly_download_reason(reason)}\n{url}"
+
+
+def _friendly_download_reason(reason: str) -> str:
+    if reason == "video append disabled":
+        return "视频下载功能已关闭。"
+    if reason.startswith("platform not allowed:"):
+        platform = reason.split(":", 1)[1].strip()
+        return f"该平台不在允许下载列表中: {platform}。"
+    if reason.startswith("not a video:"):
+        return "这个链接没有识别为可下载视频。"
+    if reason == "video duration unknown":
+        return "无法提前确认视频时长, 已停止下载以避免超过飞书限制。"
+    if reason.startswith("video duration exceeds limit:"):
+        duration = _reason_value(reason, "duration")
+        limit = _reason_value(reason, "limit")
+        if duration and limit:
+            return f"视频时长 {duration} 秒, 超过当前限制 {limit} 秒。"
+        return "视频时长超过当前限制。"
+    if reason == "platform requires auth":
+        return "该平台需要登录态 cookie。"
+    if reason == "no download candidate":
+        return "没有找到可下载的视频文件。"
+    if reason.startswith("video filesize exceeds limit:"):
+        size_mb = _reason_value(reason, "size_mb")
+        limit_mb = _reason_value(reason, "limit_mb")
+        if size_mb and limit_mb:
+            return f"视频候选文件约 {size_mb} MB, 超过当前限制 {limit_mb} MB。"
+        return "视频候选文件超过当前体积限制。"
+    if reason.startswith("downloaded video too large:"):
+        size_mb = _reason_value(reason, "size_mb")
+        limit_mb = _reason_value(reason, "limit_mb")
+        if size_mb and limit_mb:
+            return f"下载后文件约 {size_mb} MB, 超过当前限制 {limit_mb} MB。"
+        return "下载后文件超过当前体积限制。"
+    return reason
+
+
+def _reason_value(reason: str, key: str) -> str:
+    match = re.search(rf"\b{re.escape(key)}=([0-9.]+)", reason)
+    return match.group(1) if match else ""
