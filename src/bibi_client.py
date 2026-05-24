@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -35,7 +37,7 @@ class BibiAPIError(Exception):
     def __init__(self, status_code: int, body: str) -> None:
         self.status_code = status_code
         self.body = body
-        super().__init__(f"BibiGPT API error (HTTP {status_code}): {body[:200]}")
+        super().__init__(f"BibiGPT API error (HTTP {status_code}): {_summarize_error_body(body)}")
 
 
 class AuthenticationError(BibiAPIError):
@@ -60,6 +62,7 @@ class BibiClient:
             settings.cookie_file_for_platform("bibigpt"),
             self._routes.cookie_domain,
         )
+        self._cookie_error = _validate_supabase_auth_cookie(cookie_header)
 
         self._headers = {
             "User-Agent": _USER_AGENT,
@@ -68,8 +71,10 @@ class BibiClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        if cookie_header:
+        if cookie_header and not self._cookie_error:
             self._headers["Cookie"] = cookie_header
+        elif self._cookie_error:
+            logger.warning("BibiGPT cookie ignored: %s", self._cookie_error)
         logger.info(
             "BibiClient initialized (api_base_url=%s, referer=%s)",
             self._routes.api_base_url,
@@ -90,17 +95,25 @@ class BibiClient:
         Returns:
             SummaryResult with the AI-generated summary.
         """
+        if self._cookie_error:
+            raise AuthenticationError(0, self._cookie_error)
+
         effective_prompt = _with_output_instructions(
             prompt or self._settings.bibigpt_default_prompt
         )
 
+        if self._settings.bibigpt_access_mode == "api":
+            return await self._summarize_api(video_url, effective_prompt)
+        return await self._summarize_web(video_url, effective_prompt)
+
+    async def _summarize_api(self, video_url: str, prompt: str) -> SummaryResult:
         body: dict[str, Any] = {
             "messages": [
                 {
                     "role": "user",
                     "content": [
                         {"type": "video_url", "video_url": {"url": video_url}},
-                        {"type": "text", "text": effective_prompt},
+                        {"type": "text", "text": prompt},
                     ],
                 }
             ],
@@ -125,8 +138,38 @@ class BibiClient:
         )
         return result
 
+    async def _summarize_web(self, video_url: str, prompt: str) -> SummaryResult:
+        body: dict[str, Any] = {
+            "0": {
+                "json": {
+                    "url": video_url,
+                    "promptConfig": _web_prompt_config(prompt),
+                }
+            }
+        }
+
+        url = f"{self._routes.api_base_url}/api/trpc/video.summaryBySetting?batch=1"
+        logger.info("Requesting web summary for %s", video_url)
+
+        async with httpx.AsyncClient(timeout=self._settings.bibigpt_timeout) as client:
+            response = await client.post(url, json=body, headers=self._headers)
+
+        self._check_response(response)
+        data = _extract_trpc_data(response.json())
+
+        result = SummaryResult.from_web_response(data, video_url=video_url)
+        logger.info(
+            "Web summary complete (model=%s, cached=%s)",
+            result.model,
+            result.from_cache,
+        )
+        return result
+
     async def get_user_info(self) -> dict[str, Any]:
         """Fetch current user profile to verify cookie validity."""
+        if self._cookie_error:
+            raise AuthenticationError(0, self._cookie_error)
+
         url = f"{self._routes.api_base_url}/api/trpc/user.me"
         logger.debug("Verifying cookie via user.me")
 
@@ -154,6 +197,92 @@ class BibiClient:
 
 def _with_output_instructions(prompt: str) -> str:
     return f"{prompt.strip()}\n\n{_OUTPUT_INSTRUCTIONS.strip()}"
+
+
+def _web_prompt_config(prompt: str) -> dict[str, Any]:
+    return {
+        "model": "",
+        "customPrompt": prompt,
+        "customPromptTitle": "Feishu Link",
+        "outputLanguage": "中文",
+        "audioLanguage": "auto",
+        "whisperPrompt": "",
+        "autoTranslateLanguage": "",
+        "transcribeProvider": "auto",
+        "showEmoji": False,
+        "detailLevel": 1500,
+        "sentenceNumber": 5,
+        "isRefresh": False,
+        "showTimestamp": True,
+    }
+
+
+def _extract_trpc_data(data: Any) -> dict[str, Any]:
+    item = data[0] if isinstance(data, list) and data else data
+    if not isinstance(item, dict):
+        raise ValueError("BibiGPT web response has unexpected shape")
+
+    if "error" in item:
+        raise BibiAPIError(200, json.dumps(item["error"], ensure_ascii=False))
+
+    result = item.get("result", item)
+    if not isinstance(result, dict):
+        raise ValueError("BibiGPT web response result has unexpected shape")
+
+    payload = result.get("data", result)
+    if isinstance(payload, dict) and "json" in payload:
+        payload = payload["json"]
+    if not isinstance(payload, dict):
+        raise ValueError("BibiGPT web response data has unexpected shape")
+    return payload
+
+
+def _summarize_error_body(body: str) -> str:
+    stripped = body.strip()
+    if not stripped:
+        return "empty response body"
+    if stripped.startswith("<!DOCTYPE html") or stripped.startswith("<html"):
+        return "service returned an HTML error page"
+    return stripped[:200]
+
+
+def _validate_supabase_auth_cookie(cookie_header: str) -> str:
+    if not cookie_header:
+        return ""
+
+    chunks: list[tuple[int, str]] = []
+    for part in cookie_header.split("; "):
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        prefix, dot, suffix = name.rpartition(".")
+        if not dot or not prefix.endswith("-auth-token"):
+            continue
+        try:
+            index = int(suffix)
+        except ValueError:
+            continue
+        chunks.append((index, value))
+
+    if not chunks:
+        return ""
+
+    chunks.sort(key=lambda item: item[0])
+    if [index for index, _ in chunks] != list(range(len(chunks))):
+        return "BibiGPT auth cookie chunks are incomplete; please re-export aitodo.co cookies."
+
+    value = "".join(chunk for _, chunk in chunks)
+    if not value.startswith("base64-"):
+        return ""
+
+    encoded = value.removeprefix("base64-")
+    try:
+        decoded = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        decoded.decode("utf-8")
+    except Exception:
+        return "BibiGPT auth cookie is corrupted or incomplete; please re-export aitodo.co cookies."
+
+    return ""
 
 
 def _resolve_routes(base_url: str) -> _BibiRoutes:

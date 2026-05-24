@@ -73,6 +73,9 @@ platform_cookie_files: {}
 
 # Optional BibiGPT integration. Mention the bot with a YouTube or Bilibili URL
 # to send a summary instead of appending the video.
+# Use "web" to follow the normal BibiGPT web app billing/quota. Use "api" only
+# when your account has BibiGPT OpenAPI access.
+bibigpt_access_mode: "web"
 # Use "https://aitodo.co/zh" for the international/overseas route.
 bibigpt_base_url: "https://bibigpt.co"
 bibigpt_timeout: 120.0

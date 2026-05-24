@@ -31,7 +31,8 @@ class Settings(BaseSettings):
     cookie_file: str = "cookies/cookies.txt"
     platform_cookie_files: dict[str, str] = {}
 
-    # BibiGPT API integration
+    # BibiGPT integration
+    bibigpt_access_mode: str = "web"
     bibigpt_base_url: str = "https://bibigpt.co"
     bibigpt_timeout: float = 120.0
     bibigpt_default_prompt: str = """\
@@ -85,6 +86,14 @@ Please summarize this video comprehensively:
         if isinstance(v, str):
             return [s.strip() for s in v.split(",") if s.strip()]
         return v  # type: ignore[return-value]
+
+    @field_validator("bibigpt_access_mode")
+    @classmethod
+    def _parse_bibigpt_access_mode(cls, v: Any) -> str:
+        mode = str(v or "web").strip().lower()
+        if mode not in {"web", "api"}:
+            raise ValueError("bibigpt_access_mode must be 'web' or 'api'")
+        return mode
 
     @model_validator(mode="after")
     def _compile_patterns(self) -> Settings:

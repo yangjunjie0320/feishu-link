@@ -7,7 +7,7 @@ from collections import OrderedDict
 import httpx
 import lark_oapi as lark
 
-from .bibi_client import BibiClient
+from .bibi_client import AuthenticationError, BibiAPIError, BibiClient
 from .card import build_card, build_markdown_card
 from .config import Settings
 from .dispatch import Dispatcher
@@ -229,7 +229,7 @@ class Pipeline:
                     error,
                 )
                 await self._text_sender.send(
-                    f"Summarization failed: {error}",
+                    _summary_failure_message(e),
                     event.chat_id,
                     event.message_id,
                 )
@@ -325,6 +325,27 @@ def _friendly_download_reason(reason: str) -> str:
             return f"下载后文件约 {size_mb} MB, 超过当前限制 {limit_mb} MB。"
         return "下载后文件超过当前体积限制。"
     return reason
+
+
+def _summary_failure_message(exc: Exception) -> str:
+    if isinstance(exc, AuthenticationError):
+        if exc.status_code == 0:
+            return (
+                "BibiGPT 总结失败: 本地 cookie 文件不完整或已损坏, "
+                "请重新导出 aitodo.co cookies 后更新 cookies/bibigpt.txt。"
+            )
+        return "BibiGPT 总结失败: BibiGPT 登录态已失效, 请重新导出 aitodo.co cookies。"
+
+    if isinstance(exc, BibiAPIError):
+        detail = str(exc)
+        if "service returned an HTML error page" in detail:
+            return (
+                f"BibiGPT 总结失败: 服务返回了 HTML 错误页 (HTTP {exc.status_code}), "
+                "通常是登录态异常或 BibiGPT 服务端临时异常。"
+            )
+        return f"BibiGPT 总结失败: {detail}"
+
+    return f"BibiGPT 总结失败: {str(exc) or exc.__class__.__name__}"
 
 
 def _reason_value(reason: str, key: str) -> str:

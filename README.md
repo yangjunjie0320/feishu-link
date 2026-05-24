@@ -175,6 +175,7 @@ See `config.example.yaml` for the full reference. Common settings:
 | `max_video_file_mb` | Config example | Max uploaded video size |
 | `allowed_video_platforms` | Config example | Platforms allowed for video append |
 | `cookie_file` | `cookies/cookies.txt` | Unified Netscape cookie file path |
+| `bibigpt_access_mode` | `web` | `web` uses the normal BibiGPT web app quota via tRPC; `api` uses OpenAPI-style chat completions |
 | `bibigpt_base_url` | `https://bibigpt.co` | Base URL for BibiGPT. Use `https://aitodo.co/zh` for the international/overseas route. |
 | `bibigpt_timeout` | `120.0` | Timeout in seconds for BibiGPT summary requests |
 | `bibigpt_default_prompt` | Default | Prompt to send to BibiGPT |
@@ -270,6 +271,10 @@ Check logs for an explicit reason. Common causes are unknown duration, duration 
 ### Instagram or X parsing fails
 
 Try providing platform cookies in Netscape format. Private, deleted, region-restricted, or login-gated posts may still fail even with cookies.
+
+### BibiGPT summary fails with a cookie error
+
+For the aitodo overseas route, set `bibigpt_access_mode: "web"` and `bibigpt_base_url: "https://aitodo.co/zh"`, then provide a complete Netscape cookie export for `aitodo.co`, for example `cookies/bibigpt.txt` or `platform_cookie_files.bibigpt`. If the bot says the local cookie file is incomplete or corrupted, export the cookies again from the browser and replace the whole file. Do not paste only part of split Supabase auth cookies like `*-auth-token.0` / `*-auth-token.1`.
 
 ### Feishu video preview shows the wrong duration
 
