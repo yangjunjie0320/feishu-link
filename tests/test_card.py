@@ -112,8 +112,13 @@ def test_card_with_youtube_metadata() -> None:
     )
     card = json.loads(build_card(meta))
     action_block = next(e for e in card["elements"] if e.get("tag") == "action")
-    assert action_block["actions"][1]["text"]["content"] == "下载视频"
+    assert action_block["actions"][1]["text"]["content"] == "总结视频"
     assert action_block["actions"][1]["value"] == {
+        "action": "summarize_video",
+        "url": "https://youtu.be/abc123",
+    }
+    assert action_block["actions"][2]["text"]["content"] == "下载视频"
+    assert action_block["actions"][2]["value"] == {
         "action": "download_video",
         "url": "https://youtu.be/abc123",
     }
@@ -126,6 +131,21 @@ def test_card_with_youtube_metadata() -> None:
     assert "播放 1.2万" in body_text
     assert "点赞 678" in body_text
     assert "评论 90" in body_text
+
+
+def test_video_card_omits_summary_button_for_unsupported_platform() -> None:
+    meta = LinkMetadata(
+        source_url="https://example.com/video",
+        title="Example Video",
+        platform="example",
+        media_type=MediaType.VIDEO,
+    )
+
+    card = json.loads(build_card(meta))
+    action_block = next(e for e in card["elements"] if e.get("tag") == "action")
+    labels = [action["text"]["content"] for action in action_block["actions"]]
+
+    assert labels == ["打开链接", "下载视频"]
 
 
 def test_video_card_omits_description_even_if_translated() -> None:

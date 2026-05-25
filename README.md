@@ -13,7 +13,7 @@ The project is designed for personal or team link collection workflows: send a s
 - Optional short-video append. Videos up to 180 seconds are downloaded, converted to Feishu-friendly MP4, uploaded, and sent after the card.
 - **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube or Bilibili link to receive an AI-generated video summary via BibiGPT web, browser, or OpenAPI mode.
 - Manual download command: mention the bot and send `下载 <link>` to force video download instead of summarization, without the automatic short-video duration cap.
-- Card download button: video cards include a `下载视频` action that triggers the same manual-download path.
+- Card action buttons: supported video cards include `总结视频` and `下载视频` actions for one-click summary or manual download.
 - Optional title translation through DeepSeek. Non-Chinese titles are translated and shown together with the original title.
 - Unified Netscape cookie file for platforms that require login state (like Instagram, X, and BibiGPT).
 - Explicit logging for parse, download, upload, and send failures. Card delivery is prioritized over video delivery.
@@ -259,7 +259,10 @@ Mention the bot and start the message with `下载` followed by a link to force 
 
 Manual downloads bypass BibiGPT summaries and the automatic short-video duration cap. If the link cannot be parsed as a downloadable video, has no downloadable candidate, has a known candidate file larger than `max_video_file_mb`, produces a final converted MP4 larger than `max_video_file_mb`, or fails Feishu upload/send, the bot replies with the failure reason.
 
-Video cards also include a `下载视频` button. Clicking it triggers the same manual-download path and sends the result as a reply to the card message.
+Supported video cards also include action buttons:
+
+- `总结视频` triggers the same BibiGPT summary path as mentioning the bot with a YouTube or Bilibili URL.
+- `下载视频` triggers the same manual-download path and sends the result as a reply to the card message.
 
 ## Development
 

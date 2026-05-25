@@ -161,6 +161,17 @@ def _build_actions(meta: LinkMetadata) -> list[dict[str, object]]:
     ]
 
     if meta.media_type == MediaType.VIDEO:
+        if _supports_summary_action(meta):
+            actions.append({
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "总结视频"},
+                "type": "default",
+                "value": {
+                    "action": "summarize_video",
+                    "url": meta.source_url,
+                },
+            })
+
         actions.append({
             "tag": "button",
             "text": {"tag": "plain_text", "content": "下载视频"},
@@ -172,6 +183,18 @@ def _build_actions(meta: LinkMetadata) -> list[dict[str, object]]:
         })
 
     return actions
+
+
+def _supports_summary_action(meta: LinkMetadata) -> bool:
+    platform = meta.platform.strip().lower()
+    if platform in {"bilibili", "youtube"}:
+        return True
+
+    url = meta.source_url.lower()
+    return any(
+        domain in url
+        for domain in ("bilibili.com", "b23.tv", "youtube.com", "youtu.be")
+    )
 
 
 def _description_should_be_primary(meta: LinkMetadata, description_block: str) -> bool:

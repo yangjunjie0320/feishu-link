@@ -79,6 +79,16 @@ class Pipeline:
             await self._process_url(url, event, is_bot_mentioned, manual_download)
 
     async def _handle_card_action(self, event: CardActionEvent) -> None:
+        if event.action == "summarize_video":
+            logger.info(
+                "processing card summary action: url=%s message_id=%s operator=%s",
+                event.source_url,
+                event.message_id,
+                event.operator_open_id,
+            )
+            await self._try_send_bibigpt_summary(event.source_url, event)
+            return
+
         if event.action != "download_video":
             logger.info(
                 "ignore unsupported card action: action=%s message_id=%s",
@@ -265,10 +275,14 @@ class Pipeline:
     async def _try_send_bibigpt_summary(
         self,
         url: str,
-        event: MessageEvent,
+        event: MessageEvent | CardActionEvent,
     ) -> None:
         async with self._typing_sender.hold(event.message_id, label="bibigpt"):
-            prompt = extract_prompt(event.message_type, event.content, url)
+            prompt = (
+                extract_prompt(event.message_type, event.content, url)
+                if isinstance(event, MessageEvent)
+                else None
+            )
             logger.info(
                 "summarizing video=%s prompt=%s message_id=%s",
                 url,
