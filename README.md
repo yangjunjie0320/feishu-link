@@ -38,7 +38,7 @@ Douyin is intentionally not parsed by default. If Feishu itself expands a Douyin
 Create a custom app in Feishu Open Platform, then configure:
 
 - App credentials: `app_id`, `app_secret`
-- Event subscription: `im.message.receive_v1` and card action callbacks (`p2.card.action.trigger`)
+- Event subscription: `im.message.receive_v1` and card action callbacks (`card.action.trigger`)
 - Message permissions for receiving and sending messages
 - The conversations where the app should be added
 
@@ -283,6 +283,17 @@ FEISHU_LINK_INTEGRATION_SEND=1 FEISHU_LINK_INTEGRATION_MESSAGE_ID=om_xxx uv run 
 ```
 
 ## Troubleshooting
+
+### Card button click returns code 200340
+
+Feishu returns `200340` when the app has no valid card callback route. In the Feishu Open Platform, open the app and check:
+
+1. `开发配置` -> `事件与回调` uses the same subscription mode as the bot runtime.
+2. `card.action.trigger` (`卡片回传交互`) is added to the subscribed callbacks/events.
+3. The bot's interactive card capability is enabled.
+4. If the app requires versioning, create and publish a new app version after changing callback settings.
+
+The code registers this callback through the Python SDK as `p2.card.action.trigger`; that `p2.` prefix is SDK-internal and should not be typed into the Feishu console.
 
 ### Card is sent but video is not sent
 

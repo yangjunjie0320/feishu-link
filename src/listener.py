@@ -57,12 +57,19 @@ class LarkEventListener:
                 loop.call_soon_threadsafe(self._queue.put_nowait, event)
 
         def on_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
+            logger.info("card action callback received")
             event = _parse_card_action_event(data)
             if event is not None:
+                logger.info(
+                    "card action callback accepted: action=%s message_id=%s",
+                    event.action,
+                    event.message_id,
+                )
                 loop.call_soon_threadsafe(self._queue.put_nowait, event)
                 return P2CardActionTriggerResponse({
                     "toast": {"type": "info", "content": "已开始处理"},
                 })
+            logger.warning("card action callback ignored: unrecognized payload")
             return P2CardActionTriggerResponse({
                 "toast": {"type": "warning", "content": "无法识别这个按钮动作"},
             })
