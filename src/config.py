@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     bibigpt_access_mode: str = "web"
     bibigpt_base_url: str = "https://bibigpt.co"
     bibigpt_timeout: float = 120.0
+    bibigpt_browser_profile_dir: str = "/app/browser-data/bibigpt"
+    bibigpt_browser_headless: bool = True
+    bibigpt_browser_timeout: float = 120.0
     bibigpt_default_prompt: str = """\
 Please summarize this video comprehensively:
 1. One-sentence overview
@@ -91,8 +94,8 @@ Please summarize this video comprehensively:
     @classmethod
     def _parse_bibigpt_access_mode(cls, v: Any) -> str:
         mode = str(v or "web").strip().lower()
-        if mode not in {"web", "api"}:
-            raise ValueError("bibigpt_access_mode must be 'web' or 'api'")
+        if mode not in {"web", "api", "browser"}:
+            raise ValueError("bibigpt_access_mode must be 'web', 'api', or 'browser'")
         return mode
 
     @model_validator(mode="after")

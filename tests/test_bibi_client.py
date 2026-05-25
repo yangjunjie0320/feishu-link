@@ -178,3 +178,94 @@ async def test_bibi_client_rejects_corrupt_supabase_auth_cookie(tmp_path) -> Non
 
     with pytest.raises(AuthenticationError, match="corrupted or incomplete"):
         await BibiClient(settings).summarize("https://youtu.be/abc123")
+
+
+async def test_bibi_client_browser_mode_uses_web_endpoint_with_profile(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text(
+        "\n".join(
+            [
+                "# Netscape HTTP Cookie File",
+                "aitodo.co\tFALSE\t/\tFALSE\t2147483647\t"
+                "sb-hxtizkasyxsfnzgphrtk-auth-token.0\tbase64-abcde",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        bibigpt_base_url="https://aitodo.co/zh",
+        bibigpt_access_mode="browser",
+        cookie_file=str(cookie_file),
+        bibigpt_browser_profile_dir=str(tmp_path / "profile"),
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_browser_fetch(
+        self,
+        url: str,
+        body: dict[str, object] | None,
+        *,
+        method: str = "POST",
+    ) -> object:
+        captured["url"] = url
+        captured["body"] = body
+        captured["method"] = method
+        return [
+            {
+                "result": {
+                    "data": {
+                        "json": {
+                            "summary": "- Browser point",
+                            "fromCache": False,
+                        }
+                    }
+                }
+            }
+        ]
+
+    monkeypatch.setattr(BibiClient, "_browser_fetch_json", fake_browser_fetch)
+
+    result = await BibiClient(settings).summarize(
+        "https://youtu.be/abc123",
+        prompt="Use the web page.",
+    )
+
+    body = captured["body"]
+    assert isinstance(body, dict)
+    prompt_config = body["0"]["json"]["promptConfig"]  # type: ignore[index]
+
+    assert result.content == "- Browser point"
+    assert captured["url"] == "https://aitodo.co/api/trpc/video.summaryBySetting?batch=1"
+    assert captured["method"] == "POST"
+    assert body["0"]["json"]["url"] == "https://youtu.be/abc123"  # type: ignore[index]
+    assert prompt_config["customPrompt"].startswith("Use the web page.")
+    assert "Do not use any emoji." in prompt_config["customPrompt"]
+
+
+async def test_bibi_client_browser_user_probe_reports_missing_login(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = Settings(
+        bibigpt_base_url="https://aitodo.co/zh",
+        bibigpt_access_mode="browser",
+        cookie_file="",
+        bibigpt_browser_profile_dir=str(tmp_path / "profile"),
+    )
+
+    async def fake_browser_fetch(
+        self,
+        url: str,
+        body: dict[str, object] | None,
+        *,
+        method: str = "POST",
+    ) -> object:
+        return {"result": {"data": {"json": None}}}
+
+    monkeypatch.setattr(BibiClient, "_browser_fetch_json", fake_browser_fetch)
+
+    with pytest.raises(AuthenticationError, match="browser profile is not logged in"):
+        await BibiClient(settings).get_user_info()

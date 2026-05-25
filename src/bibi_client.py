@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
+import time
 from dataclasses import dataclass
+from http.cookiejar import MozillaCookieJar
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -58,11 +62,13 @@ class BibiClient:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._routes = _resolve_routes(settings.bibigpt_base_url)
+        self._cookie_file = settings.cookie_file_for_platform("bibigpt")
         cookie_header = get_cookie_header(
-            settings.cookie_file_for_platform("bibigpt"),
+            self._cookie_file,
             self._routes.cookie_domain,
         )
         self._cookie_error = _validate_supabase_auth_cookie(cookie_header)
+        self._browser_lock = asyncio.Lock()
 
         self._headers = {
             "User-Agent": _USER_AGENT,
@@ -95,7 +101,7 @@ class BibiClient:
         Returns:
             SummaryResult with the AI-generated summary.
         """
-        if self._cookie_error:
+        if self._cookie_error and self._settings.bibigpt_access_mode != "browser":
             raise AuthenticationError(0, self._cookie_error)
 
         effective_prompt = _with_output_instructions(
@@ -104,6 +110,8 @@ class BibiClient:
 
         if self._settings.bibigpt_access_mode == "api":
             return await self._summarize_api(video_url, effective_prompt)
+        if self._settings.bibigpt_access_mode == "browser":
+            return await self._summarize_browser(video_url, effective_prompt)
         return await self._summarize_web(video_url, effective_prompt)
 
     async def _summarize_api(self, video_url: str, prompt: str) -> SummaryResult:
@@ -138,6 +146,30 @@ class BibiClient:
         )
         return result
 
+    async def _summarize_browser(self, video_url: str, prompt: str) -> SummaryResult:
+        body: dict[str, Any] = {
+            "0": {
+                "json": {
+                    "url": video_url,
+                    "promptConfig": _web_prompt_config(prompt),
+                }
+            }
+        }
+
+        url = f"{self._routes.api_base_url}/api/trpc/video.summaryBySetting?batch=1"
+        logger.info("Requesting browser-backed web summary for %s", video_url)
+
+        raw_data = await self._browser_fetch_json(url, body)
+        data = _extract_trpc_data(raw_data)
+
+        result = SummaryResult.from_web_response(data, video_url=video_url)
+        logger.info(
+            "Browser-backed web summary complete (model=%s, cached=%s)",
+            result.model,
+            result.from_cache,
+        )
+        return result
+
     async def _summarize_web(self, video_url: str, prompt: str) -> SummaryResult:
         body: dict[str, Any] = {
             "0": {
@@ -167,6 +199,20 @@ class BibiClient:
 
     async def get_user_info(self) -> dict[str, Any]:
         """Fetch current user profile to verify cookie validity."""
+        if self._settings.bibigpt_access_mode == "browser":
+            raw_data = await self._browser_fetch_json(
+                f"{self._routes.api_base_url}/api/trpc/user.me",
+                None,
+                method="GET",
+            )
+            data = _extract_user_data(raw_data)
+            logger.info(
+                "Authenticated via browser profile as %s (%s)",
+                data.get("user_metadata", {}).get("full_name", "unknown"),
+                data.get("email", "unknown"),
+            )
+            return data
+
         if self._cookie_error:
             raise AuthenticationError(0, self._cookie_error)
 
@@ -193,6 +239,123 @@ class BibiClient:
             raise AuthenticationError(response.status_code, response.text)
         if not response.is_success:
             raise BibiAPIError(response.status_code, response.text)
+
+    async def _browser_fetch_json(
+        self,
+        url: str,
+        body: dict[str, Any] | None,
+        *,
+        method: str = "POST",
+    ) -> Any:
+        try:
+            from playwright.async_api import (
+                Error as PlaywrightError,
+            )
+            from playwright.async_api import (
+                TimeoutError as PlaywrightTimeoutError,
+            )
+            from playwright.async_api import (
+                async_playwright,
+            )
+        except ImportError as exc:
+            raise BibiAPIError(
+                0,
+                "Playwright is not installed; rebuild the Docker image or run uv sync.",
+            ) from exc
+
+        profile_dir = Path(self._settings.bibigpt_browser_profile_dir)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        timeout_ms = int(self._settings.bibigpt_browser_timeout * 1000)
+
+        async with self._browser_lock:
+            try:
+                async with async_playwright() as playwright:
+                    context = await playwright.chromium.launch_persistent_context(
+                        user_data_dir=str(profile_dir),
+                        headless=self._settings.bibigpt_browser_headless,
+                        user_agent=_USER_AGENT,
+                        viewport={"width": 1280, "height": 900},
+                        args=[
+                            "--disable-dev-shm-usage",
+                            "--disable-gpu",
+                            "--no-sandbox",
+                        ],
+                        timeout=timeout_ms,
+                    )
+                    try:
+                        await self._seed_browser_cookies(context)
+                        page = context.pages[0] if context.pages else await context.new_page()
+                        await page.goto(
+                            self._routes.referer,
+                            wait_until="domcontentloaded",
+                            timeout=timeout_ms,
+                        )
+                        result = await page.evaluate(
+                            """async ({url, method, body}) => {
+                                const init = {
+                                    method,
+                                    credentials: "include",
+                                    headers: {
+                                        "accept": "application/json",
+                                        "content-type": "application/json"
+                                    }
+                                };
+                                if (body !== null) {
+                                    init.body = JSON.stringify(body);
+                                }
+                                const response = await fetch(url, init);
+                                return {
+                                    status: response.status,
+                                    ok: response.ok,
+                                    text: await response.text()
+                                };
+                            }""",
+                            {"url": url, "method": method, "body": body},
+                        )
+                    finally:
+                        await context.close()
+            except PlaywrightTimeoutError as exc:
+                raise BibiAPIError(
+                    0,
+                    f"BibiGPT browser request timed out after "
+                    f"{self._settings.bibigpt_browser_timeout:g} seconds.",
+                ) from exc
+            except PlaywrightError as exc:
+                raise BibiAPIError(0, f"BibiGPT browser request failed: {exc}") from exc
+
+        if not isinstance(result, dict):
+            raise BibiAPIError(0, "BibiGPT browser request returned an unexpected result.")
+
+        status = int(result.get("status") or 0)
+        text = str(result.get("text") or "")
+        if status in (401, 403):
+            raise AuthenticationError(status, text)
+        if status < 200 or status >= 300:
+            raise BibiAPIError(status, text)
+
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise BibiAPIError(status, text) from exc
+
+    async def _seed_browser_cookies(self, context: Any) -> None:
+        if not self._cookie_file or self._cookie_error:
+            if self._cookie_error:
+                logger.warning(
+                    "Skipping BibiGPT cookie import for browser mode: %s",
+                    self._cookie_error,
+                )
+            return
+
+        cookies = _playwright_cookies_from_file(
+            self._cookie_file,
+            self._routes.cookie_domain,
+        )
+        if not cookies:
+            return
+
+        await context.add_cookies(cookies)
+        logger.debug("Seeded %d BibiGPT cookies into browser context", len(cookies))
 
 
 def _with_output_instructions(prompt: str) -> str:
@@ -235,6 +398,62 @@ def _extract_trpc_data(data: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("BibiGPT web response data has unexpected shape")
     return payload
+
+
+def _extract_user_data(data: Any) -> dict[str, Any]:
+    item = data[0] if isinstance(data, list) and data else data
+    if not isinstance(item, dict):
+        raise ValueError("BibiGPT user response has unexpected shape")
+
+    result = item.get("result", item)
+    payload = result.get("data", result) if isinstance(result, dict) else None
+    if isinstance(payload, dict) and "json" in payload:
+        payload = payload["json"]
+
+    if payload is None:
+        raise AuthenticationError(
+            401,
+            "BibiGPT browser profile is not logged in; log in or provide complete cookies.",
+        )
+    if not isinstance(payload, dict):
+        raise ValueError("BibiGPT user response data has unexpected shape")
+    return payload
+
+
+def _playwright_cookies_from_file(cookie_file: str, domain: str) -> list[dict[str, Any]]:
+    path = Path(cookie_file)
+    if not path.exists():
+        return []
+
+    jar = MozillaCookieJar(str(path))
+    try:
+        jar.load(ignore_discard=True, ignore_expires=True)
+    except Exception as exc:
+        logger.warning("Failed to parse BibiGPT cookies for browser mode: %s", exc)
+        return []
+
+    now = int(time.time())
+    cookies: list[dict[str, Any]] = []
+    for cookie in jar:
+        cookie_domain = cookie.domain.lstrip(".")
+        if cookie_domain != domain and not domain.endswith(f".{cookie_domain}"):
+            continue
+        if cookie.expires is not None and cookie.expires <= now:
+            continue
+
+        item: dict[str, Any] = {
+            "name": cookie.name,
+            "value": cookie.value,
+            "domain": cookie.domain or domain,
+            "path": cookie.path or "/",
+            "secure": bool(cookie.secure),
+            "httpOnly": bool(cookie.has_nonstandard_attr("HttpOnly")),
+        }
+        if cookie.expires is not None:
+            item["expires"] = cookie.expires
+        cookies.append(item)
+
+    return cookies
 
 
 def _summarize_error_body(body: str) -> str:

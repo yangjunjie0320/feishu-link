@@ -11,7 +11,7 @@ The project is designed for personal or team link collection workflows: send a s
 - Multi-platform parsing for YouTube, Instagram, TikTok, Bilibili, X/Twitter, and normal web pages.
 - Video metrics when available: views, likes, comments, and reposts.
 - Optional short-video append. Videos up to 180 seconds are downloaded, converted to Feishu-friendly MP4, uploaded, and sent after the card.
-- **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube or Bilibili link to receive an AI-generated video summary via BibiGPT instead of downloading the video.
+- **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube or Bilibili link to receive an AI-generated video summary via BibiGPT web, browser, or OpenAPI mode.
 - Manual download command: mention the bot and send `下载 <link>` to force video download instead of summarization.
 - Optional title translation through DeepSeek. Non-Chinese titles are translated and shown together with the original title.
 - Unified Netscape cookie file for platforms that require login state (like Instagram, X, and BibiGPT).
@@ -78,6 +78,7 @@ The container mounts:
 - `./config.yaml` as read-only runtime config
 - `./cookies` as optional read-only platform cookie directory
 - `./logs` as writable log directory
+- `./browser-data` as writable Chromium profile storage for BibiGPT browser mode
 
 ### 4. Run locally for development
 
@@ -175,9 +176,12 @@ See `config.example.yaml` for the full reference. Common settings:
 | `max_video_file_mb` | Config example | Max uploaded video size |
 | `allowed_video_platforms` | Config example | Platforms allowed for video append |
 | `cookie_file` | `cookies/cookies.txt` | Unified Netscape cookie file path |
-| `bibigpt_access_mode` | `web` | `web` uses the normal BibiGPT web app quota via tRPC; `api` uses OpenAPI-style chat completions |
+| `bibigpt_access_mode` | `web` | `web` uses the normal BibiGPT web app quota via tRPC; `browser` sends the same request from persisted Chromium; `api` uses OpenAPI-style chat completions |
 | `bibigpt_base_url` | `https://bibigpt.co` | Base URL for BibiGPT. Use `https://aitodo.co/zh` for the international/overseas route. |
 | `bibigpt_timeout` | `120.0` | Timeout in seconds for BibiGPT summary requests |
+| `bibigpt_browser_profile_dir` | `/app/browser-data/bibigpt` | Chromium profile path for BibiGPT browser mode |
+| `bibigpt_browser_headless` | `true` | Run Chromium headless in browser mode |
+| `bibigpt_browser_timeout` | `120.0` | Timeout in seconds for browser startup, navigation, and summary fetch |
 | `bibigpt_default_prompt` | Default | Prompt to send to BibiGPT |
 | `deepseek_api_key` | Empty | Enables title translation when configured |
 | `deepseek_base_url` | DeepSeek API | Optional compatible API endpoint |
@@ -203,6 +207,19 @@ cookie_file: "/etc/feishu-link/cookies/cookies.txt"
 ```
 
 Only provide cookies for accounts you control. Cookie files are ignored by Git and should not be shared.
+
+## Dependency Mirrors
+
+The project config sets `uv` to TUNA PyPI:
+
+```toml
+[[tool.uv.index]]
+name = "tuna"
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"
+default = true
+```
+
+The Dockerfile also switches Debian apt sources to TUNA and installs `uv` from TUNA PyPI. TUNA currently documents its Docker mirror as a Docker CE package repository, not a Docker Hub registry mirror, so the base image pull still depends on Docker Hub or your local Docker daemon mirror. Deno and Playwright browser binaries are also downloaded from their upstream release hosts.
 
 ## Title Translation
 
@@ -274,7 +291,9 @@ Try providing platform cookies in Netscape format. Private, deleted, region-rest
 
 ### BibiGPT summary fails with a cookie error
 
-For the aitodo overseas route, set `bibigpt_access_mode: "web"` and `bibigpt_base_url: "https://aitodo.co/zh"`, then provide a complete Netscape cookie export for `aitodo.co`, for example `cookies/bibigpt.txt` or `platform_cookie_files.bibigpt`. If the bot says the local cookie file is incomplete or corrupted, export the cookies again from the browser and replace the whole file. Do not paste only part of split Supabase auth cookies like `*-auth-token.0` / `*-auth-token.1`.
+For the aitodo overseas route, set `bibigpt_base_url: "https://aitodo.co/zh"`. Start with `bibigpt_access_mode: "web"` when a complete Netscape cookie export works. If direct HTTP returns server errors, use `bibigpt_access_mode: "browser"` so the request is sent from a persisted Chromium profile in `browser-data/`.
+
+Browser mode can import valid cookies, but if the local cookie file is incomplete or corrupted it skips that file and relies on the Chromium profile. Do not paste only part of split Supabase auth cookies like `*-auth-token.0` / `*-auth-token.1`; export the whole `aitodo.co` cookie set again when seeding from a file.
 
 ### Feishu video preview shows the wrong duration
 

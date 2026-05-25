@@ -1,5 +1,6 @@
 logs/
 cookies/
+browser-data/
 config.yaml
 .env
 .DS_Store

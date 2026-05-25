@@ -73,12 +73,16 @@ platform_cookie_files: {}
 
 # Optional BibiGPT integration. Mention the bot with a YouTube or Bilibili URL
 # to send a summary instead of appending the video.
-# Use "web" to follow the normal BibiGPT web app billing/quota. Use "api" only
-# when your account has BibiGPT OpenAPI access.
+# Use "web" to call the normal BibiGPT web endpoint. Use "browser" to call the
+# same web endpoint from a persisted Chromium profile when direct HTTP fails.
+# Use "api" only when your account has BibiGPT OpenAPI access.
 bibigpt_access_mode: "web"
 # Use "https://aitodo.co/zh" for the international/overseas route.
 bibigpt_base_url: "https://bibigpt.co"
 bibigpt_timeout: 120.0
+bibigpt_browser_profile_dir: "/app/browser-data/bibigpt"
+bibigpt_browser_headless: true
+bibigpt_browser_timeout: 120.0
 bibigpt_default_prompt: |
   Please summarize this video comprehensively:
   1. One-sentence overview

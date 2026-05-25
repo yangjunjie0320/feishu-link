@@ -1,8 +1,22 @@
 FROM python:3.12-slim
 
 ARG DENO_VERSION=2.6.2
+ARG UV_VERSION=0.11.12
+ARG TUNA_DEBIAN_URL=http://mirrors.tuna.tsinghua.edu.cn/debian
+ARG TUNA_DEBIAN_SECURITY_URL=http://mirrors.tuna.tsinghua.edu.cn/debian-security
+ARG TUNA_PYPI_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ENV DEBIAN_FRONTEND=noninteractive \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PIP_INDEX_URL=${TUNA_PYPI_URL} \
+    UV_DEFAULT_INDEX=${TUNA_PYPI_URL}
+
+RUN sed -i \
+        -e "s|http://deb.debian.org/debian|${TUNA_DEBIAN_URL}|g" \
+        -e "s|http://deb.debian.org/debian-security|${TUNA_DEBIAN_SECURITY_URL}|g" \
+        -e "s|http://security.debian.org/debian-security|${TUNA_DEBIAN_SECURITY_URL}|g" \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         ffmpeg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -11,16 +25,17 @@ RUN python -c "import platform, urllib.request, zipfile; from pathlib import Pat
 
 RUN deno --version
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+RUN python -m pip install --no-cache-dir "uv==${UV_VERSION}"
 
 WORKDIR /app
 
 COPY pyproject.toml uv.lock* ./
 RUN uv sync --frozen --no-dev
+RUN uv run python -m playwright install --with-deps chromium
 
 COPY main.py ./
 COPY src/ src/
 
-RUN mkdir -p logs
+RUN mkdir -p logs /app/browser-data
 
 CMD ["uv", "run", "python", "main.py", "--config", "/etc/feishu-link/config.yaml"]
