@@ -56,7 +56,7 @@ Please summarize this video comprehensively:
     send_retry_attempts: int = 3
     video_append_enabled: bool = True
     max_video_duration_seconds: int = 180
-    max_video_file_mb: int = 50
+    max_video_file_mb: int = 30
     allowed_video_platforms: list[str] = ["bilibili", "instagram", "tiktok", "youtube", "x"]
     video_temp_dir: str = "/tmp/feishu-link"
 

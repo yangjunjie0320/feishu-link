@@ -174,7 +174,7 @@ See `config.example.yaml` for the full reference. Common settings:
 | `link_blacklist` | `[]` | Regex URL patterns to ignore |
 | `enable_video_send` | `true` | Whether to try appending short videos after cards |
 | `max_video_duration_seconds` | `180` | Max duration for automatic video append; manual downloads ignore this artificial cap |
-| `max_video_file_mb` | Config example | Max uploaded video size |
+| `max_video_file_mb` | `30` | Max uploaded video size; Feishu `im/v1/files` rejects files over 30 MB |
 | `allowed_video_platforms` | Config example | Platforms allowed for video append |
 | `cookie_file` | `cookies/cookies.txt` | Unified Netscape cookie file path |
 | `bibigpt_access_mode` | `web` | `web` uses the normal BibiGPT web app quota via tRPC; `browser` sends the same request from persisted Chromium; `api` uses OpenAPI-style chat completions |
@@ -245,7 +245,7 @@ The service always sends the card first. After that it tries video sending only 
 5. The downloaded and converted MP4 is within `max_video_file_mb`.
 6. Feishu upload and message send both succeed.
 
-Before upload, videos are converted to MP4 with H.264 video, AAC audio, `yuv420p`, and faststart metadata. The uploader probes the converted file duration with `ffprobe` and sends duration in milliseconds so Feishu can generate a correct preview.
+Before upload, the downloader prefers the lowest available video quality to stay within Feishu upload limits, then converts videos to MP4 with H.264 video, AAC audio, `yuv420p`, faststart metadata, and a bitrate budget derived from `max_video_file_mb` when duration is known. The uploader probes the converted file duration with `ffprobe` and sends duration in milliseconds so Feishu can generate a correct preview.
 
 If any video step fails, the service logs the reason and does not send an extra failure message to the chat.
 
@@ -257,7 +257,7 @@ Mention the bot and start the message with `下载` followed by a link to force 
 @bot 下载 https://youtu.be/example
 ```
 
-Manual downloads bypass BibiGPT summaries and the automatic short-video duration cap. If the link cannot be parsed as a downloadable video, has no downloadable candidate, has a known candidate file larger than `max_video_file_mb`, produces a final converted MP4 larger than `max_video_file_mb`, or fails Feishu upload/send, the bot replies with the failure reason.
+Manual downloads bypass BibiGPT summaries and the automatic short-video duration cap. They also use the lowest available video quality and size-targeted conversion to reduce upload failures. If the link cannot be parsed as a downloadable video, has no downloadable candidate, produces a final converted MP4 larger than `max_video_file_mb`, or fails Feishu upload/send, the bot replies with the failure reason.
 
 Supported video cards also include action buttons:
 

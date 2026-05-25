@@ -103,33 +103,35 @@ class Pipeline:
             event.message_id,
             event.operator_open_id,
         )
-        try:
-            meta = await self._dispatcher.parse(event.source_url)
-        except ParserError as e:
-            logger.error(
-                "card action parse failed: url=%s message_id=%s reason=%s",
-                event.source_url,
-                event.message_id,
-                e.reason,
-            )
-            await self._text_sender.send(
-                _download_failure_message(event.source_url, f"链接解析失败: {e.reason}"),
-                event.chat_id,
-                event.message_id,
-            )
-            return
+        async with self._typing_sender.hold(event.message_id, label="download"):
+            try:
+                meta = await self._dispatcher.parse(event.source_url)
+            except ParserError as e:
+                logger.error(
+                    "card action parse failed: url=%s message_id=%s reason=%s",
+                    event.source_url,
+                    event.message_id,
+                    e.reason,
+                )
+                await self._text_sender.send(
+                    _download_failure_message(event.source_url, f"链接解析失败: {e.reason}"),
+                    event.chat_id,
+                    event.message_id,
+                )
+                return
 
-        img_key: str | None = None
-        if meta.cover_url:
-            img_key = await upload_cover(meta.cover_url, self._lark_client, self._http)
+            img_key: str | None = None
+            if meta.cover_url:
+                img_key = await upload_cover(meta.cover_url, self._lark_client, self._http)
 
-        await self._try_send_video(
-            meta,
-            event,
-            img_key,
-            notify_user=True,
-            enforce_duration_limit=False,
-        )
+            await self._try_send_video(
+                meta,
+                event,
+                img_key,
+                notify_user=True,
+                enforce_duration_limit=False,
+                show_typing=False,
+            )
 
     async def _process_url(
         self,
@@ -207,70 +209,99 @@ class Pipeline:
         *,
         notify_user: bool = False,
         enforce_duration_limit: bool = True,
+        show_typing: bool = True,
+        typing_label: str = "video",
     ) -> None:
-        async with self._typing_sender.hold(event.message_id, label="video"):
-            try:
-                video = await download_video(
+        if show_typing:
+            async with self._typing_sender.hold(event.message_id, label=typing_label):
+                await self._download_and_send_video(
                     meta,
-                    self._settings,
+                    event,
+                    img_key,
+                    notify_user=notify_user,
                     enforce_duration_limit=enforce_duration_limit,
                 )
-            except VideoSkipReason as e:
-                logger.info(
-                    "skip video append: url=%s message_id=%s reason=%s",
-                    meta.source_url,
-                    event.message_id,
-                    e,
-                )
-                if notify_user:
-                    await self._text_sender.send(
-                        _download_failure_message(meta.source_url, str(e)),
-                        event.chat_id,
-                        event.message_id,
-                    )
-                return
-            except Exception as e:
-                logger.warning(
-                    "video download failed: url=%s message_id=%s error=%s",
-                    meta.source_url,
-                    event.message_id,
-                    e,
-                )
-                if notify_user:
-                    error = str(e) or e.__class__.__name__
-                    await self._text_sender.send(
-                        _download_failure_message(meta.source_url, error),
-                        event.chat_id,
-                        event.message_id,
-                    )
-                return
+            return
 
-            try:
-                await self._video_sender.send(
-                    video.path,
-                    video.file_name,
-                    video.duration_ms,
+        await self._download_and_send_video(
+            meta,
+            event,
+            img_key,
+            notify_user=notify_user,
+            enforce_duration_limit=enforce_duration_limit,
+        )
+
+    async def _download_and_send_video(
+        self,
+        meta: LinkMetadata,
+        event: MessageEvent | CardActionEvent,
+        img_key: str | None,
+        *,
+        notify_user: bool,
+        enforce_duration_limit: bool,
+    ) -> None:
+        try:
+            video = await download_video(
+                meta,
+                self._settings,
+                enforce_duration_limit=enforce_duration_limit,
+            )
+        except VideoSkipReason as e:
+            logger.info(
+                "skip video append: url=%s message_id=%s reason=%s",
+                meta.source_url,
+                event.message_id,
+                e,
+            )
+            if notify_user:
+                await self._text_sender.send(
+                    _download_failure_message(meta.source_url, str(e)),
                     event.chat_id,
                     event.message_id,
-                    img_key,
                 )
-            except Exception as e:
-                logger.warning(
-                    "video send failed: url=%s message_id=%s file_name=%s error=%s",
-                    meta.source_url,
+            return
+        except Exception as e:
+            logger.warning(
+                "video download failed: url=%s message_id=%s error=%s",
+                meta.source_url,
+                event.message_id,
+                e,
+            )
+            if notify_user:
+                error = str(e) or e.__class__.__name__
+                await self._text_sender.send(
+                    _download_failure_message(meta.source_url, error),
+                    event.chat_id,
                     event.message_id,
-                    video.file_name,
-                    e,
                 )
-                if notify_user:
-                    error = str(e) or e.__class__.__name__
-                    await self._text_sender.send(
-                        _download_failure_message(meta.source_url, f"发送失败: {error}"),
-                        event.chat_id,
-                        event.message_id,
-                    )
-            finally:
-                video.cleanup()
+            return
+
+        try:
+            await self._video_sender.send(
+                video.path,
+                video.file_name,
+                video.duration_ms,
+                event.chat_id,
+                event.message_id,
+                img_key,
+            )
+        except Exception as e:
+            logger.warning(
+                "video send failed: url=%s message_id=%s file_name=%s error=%s",
+                meta.source_url,
+                event.message_id,
+                video.file_name,
+                e,
+            )
+            if notify_user:
+                error = str(e) or e.__class__.__name__
+                await self._text_sender.send(
+                    _download_failure_message(meta.source_url, f"发送失败: {error}"),
+                    event.chat_id,
+                    event.message_id,
+                )
+        finally:
+            video.cleanup()
 
     async def _try_send_bibigpt_summary(
         self,

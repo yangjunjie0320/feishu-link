@@ -5,6 +5,7 @@ from src.media_downloader import (
     _YTDLP_VIDEO_FORMAT,
     _file_name,
     _strip_symbol_characters,
+    _target_transcode_bitrates,
     _transcode_timeout_seconds,
     explain_video_skip,
 )
@@ -59,21 +60,23 @@ def test_skip_without_download_candidate(settings: Settings) -> None:
     assert explain_video_skip(meta, settings) == "no download candidate"
 
 
-def test_skip_when_all_known_candidates_exceed_file_limit(settings: Settings) -> None:
+def test_large_known_candidates_can_still_be_attempted_for_transcoding(
+    settings: Settings,
+) -> None:
     meta = _video_meta(
         download_candidates=[
-            DownloadCandidate(url="https://cdn.example.com/large.mp4", filesize=51 * 1024 * 1024)
+            DownloadCandidate(url="https://cdn.example.com/large.mp4", filesize=31 * 1024 * 1024)
         ]
     )
 
-    assert "filesize exceeds limit" in (explain_video_skip(meta, settings) or "")
+    assert explain_video_skip(meta, settings) is None
 
 
 def test_does_not_skip_file_limit_when_smaller_candidate_known(settings: Settings) -> None:
     meta = _video_meta(
         download_candidates=[
             DownloadCandidate(url="https://cdn.example.com/small.mp4", filesize=10 * 1024 * 1024),
-            DownloadCandidate(url="https://cdn.example.com/large.mp4", filesize=51 * 1024 * 1024),
+            DownloadCandidate(url="https://cdn.example.com/large.mp4", filesize=31 * 1024 * 1024),
         ]
     )
 
@@ -84,10 +87,10 @@ def test_video_can_be_attempted(settings: Settings) -> None:
     assert explain_video_skip(_video_meta(), settings) is None
 
 
-def test_ytdlp_format_supports_split_audio_video() -> None:
-    assert "bestvideo" in _YTDLP_VIDEO_FORMAT
-    assert "bestaudio" in _YTDLP_VIDEO_FORMAT
-    assert "best[ext=mp4]" in _YTDLP_VIDEO_FORMAT
+def test_ytdlp_format_prefers_low_quality_video() -> None:
+    assert "worst[ext=mp4]" in _YTDLP_VIDEO_FORMAT
+    assert "worstvideo" in _YTDLP_VIDEO_FORMAT
+    assert "worstaudio" in _YTDLP_VIDEO_FORMAT
 
 
 def test_file_name_strips_symbol_characters() -> None:
@@ -101,3 +104,15 @@ def test_strip_symbol_characters() -> None:
 
 def test_transcode_timeout_scales_for_long_manual_downloads() -> None:
     assert _transcode_timeout_seconds(988) == 2036
+
+
+def test_target_transcode_bitrates_fit_long_video_limit() -> None:
+    assert _target_transcode_bitrates(988, 30) == (153, 64)
+
+
+def test_target_transcode_bitrates_cap_short_video_bitrate() -> None:
+    assert _target_transcode_bitrates(30, 30) == (1200, 64)
+
+
+def test_target_transcode_bitrates_need_duration() -> None:
+    assert _target_transcode_bitrates(None, 30) is None

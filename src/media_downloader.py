@@ -17,10 +17,10 @@ from .parsers.base import LinkMetadata, MediaType
 logger = logging.getLogger(__name__)
 
 _YTDLP_VIDEO_FORMAT = (
-    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
-    "bestvideo+bestaudio/"
-    "best[ext=mp4]/"
-    "best"
+    "worst[ext=mp4]/"
+    "worstvideo[ext=mp4]+worstaudio[ext=m4a]/"
+    "worstvideo+worstaudio/"
+    "worst"
 )
 
 
@@ -71,21 +71,6 @@ def explain_video_skip(
         return "platform requires auth"
     if not meta.download_candidates:
         return "no download candidate"
-    smallest_known_size = min(
-        (
-            candidate.filesize
-            for candidate in meta.download_candidates
-            if candidate.filesize is not None
-        ),
-        default=None,
-    )
-    max_bytes = settings.max_video_file_mb * 1024 * 1024
-    if smallest_known_size is not None and smallest_known_size > max_bytes:
-        return (
-            "video filesize exceeds limit: "
-            f"size_mb={smallest_known_size / (1024 * 1024):.2f} "
-            f"limit_mb={settings.max_video_file_mb}"
-        )
     return None
 
 
@@ -154,7 +139,12 @@ async def download_video(
         path = await loop.run_in_executor(None, _download)
         path = await loop.run_in_executor(
             None,
-            lambda: _make_feishu_mp4(path, temp_dir, meta.duration_seconds),
+            lambda: _make_feishu_mp4(
+                path,
+                temp_dir,
+                meta.duration_seconds,
+                settings.max_video_file_mb,
+            ),
         )
         size_mb = path.stat().st_size / (1024 * 1024)
         if size_mb > settings.max_video_file_mb:
@@ -186,8 +176,14 @@ def _strip_symbol_characters(value: str) -> str:
     return "".join(ch for ch in value if unicodedata.category(ch) != "So")
 
 
-def _make_feishu_mp4(path: Path, temp_dir: Path, duration_seconds: int | None = None) -> Path:
+def _make_feishu_mp4(
+    path: Path,
+    temp_dir: Path,
+    duration_seconds: int | None = None,
+    max_file_mb: int | None = None,
+) -> Path:
     output = temp_dir / f"{path.stem}.feishu.mp4"
+    target_bitrates = _target_transcode_bitrates(duration_seconds, max_file_mb)
     cmd = [
         "ffmpeg",
         "-y",
@@ -197,22 +193,34 @@ def _make_feishu_mp4(path: Path, temp_dir: Path, duration_seconds: int | None = 
         "0:v:0",
         "-map",
         "0:a:0?",
+        "-vf",
+        "scale=min(640\\,iw):-2",
         "-c:v",
         "libx264",
         "-preset",
         "veryfast",
-        "-crf",
-        "23",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
-        "-b:a",
-        "128k",
         "-movflags",
         "+faststart",
-        str(output),
     ]
+    if target_bitrates:
+        video_kbps, audio_kbps = target_bitrates
+        cmd.extend([
+            "-b:v",
+            f"{video_kbps}k",
+            "-maxrate",
+            f"{max(video_kbps, int(video_kbps * 1.2))}k",
+            "-bufsize",
+            f"{max(160, video_kbps * 2)}k",
+            "-b:a",
+            f"{audio_kbps}k",
+        ])
+    else:
+        cmd.extend(["-crf", "23", "-b:a", "128k"])
+    cmd.append(str(output))
     timeout = _transcode_timeout_seconds(duration_seconds)
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout)
@@ -222,6 +230,21 @@ def _make_feishu_mp4(path: Path, temp_dir: Path, duration_seconds: int | None = 
     if not output.exists() or output.stat().st_size == 0:
         raise VideoDownloadError("ffmpeg transcode produced empty output")
     return output
+
+
+def _target_transcode_bitrates(
+    duration_seconds: int | None,
+    max_file_mb: int | None,
+) -> tuple[int, int] | None:
+    if not duration_seconds or duration_seconds <= 0 or not max_file_mb or max_file_mb <= 0:
+        return None
+
+    target_total_kbps = int(max_file_mb * 1024 * 1024 * 8 * 0.9 / duration_seconds / 1000)
+    audio_kbps = 64 if target_total_kbps >= 220 else 48
+    if target_total_kbps < 120:
+        audio_kbps = 32
+    video_kbps = min(1200, max(64, target_total_kbps - audio_kbps - 12))
+    return video_kbps, audio_kbps
 
 
 def _transcode_timeout_seconds(duration_seconds: int | None) -> int:
