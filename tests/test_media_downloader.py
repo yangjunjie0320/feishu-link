@@ -5,6 +5,7 @@ from src.media_downloader import (
     _YTDLP_VIDEO_FORMAT,
     _file_name,
     _strip_symbol_characters,
+    _transcode_timeout_seconds,
     explain_video_skip,
 )
 from src.parsers.base import DownloadCandidate, LinkMetadata, MediaType
@@ -22,16 +23,28 @@ def _video_meta(**kwargs: object) -> LinkMetadata:
     return LinkMetadata(**data)
 
 
-def test_skip_unknown_duration(settings: Settings) -> None:
+def test_skip_unknown_duration_when_duration_limit_enforced(settings: Settings) -> None:
     meta = _video_meta(duration_seconds=None)
 
     assert explain_video_skip(meta, settings) == "video duration unknown"
 
 
-def test_skip_over_duration_limit(settings: Settings) -> None:
+def test_unknown_duration_can_be_attempted_without_duration_limit(settings: Settings) -> None:
+    meta = _video_meta(duration_seconds=None)
+
+    assert explain_video_skip(meta, settings, enforce_duration_limit=False) is None
+
+
+def test_skip_over_duration_limit_when_enforced(settings: Settings) -> None:
     meta = _video_meta(duration_seconds=181)
 
     assert "duration exceeds limit" in (explain_video_skip(meta, settings) or "")
+
+
+def test_over_duration_limit_can_be_attempted_without_duration_limit(settings: Settings) -> None:
+    meta = _video_meta(duration_seconds=988)
+
+    assert explain_video_skip(meta, settings, enforce_duration_limit=False) is None
 
 
 def test_video_at_duration_limit_can_be_attempted(settings: Settings) -> None:
@@ -84,3 +97,7 @@ def test_file_name_strips_symbol_characters() -> None:
 
 def test_strip_symbol_characters() -> None:
     assert _strip_symbol_characters("a" + chr(0x1F3C6) + "b") == "ab"
+
+
+def test_transcode_timeout_scales_for_long_manual_downloads() -> None:
+    assert _transcode_timeout_seconds(988) == 2036

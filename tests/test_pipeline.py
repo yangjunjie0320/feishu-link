@@ -5,7 +5,7 @@ from src.pipeline import _friendly_download_reason, _summary_failure_message
 def test_friendly_download_reason_for_duration_limit() -> None:
     assert (
         _friendly_download_reason("video duration exceeds limit: duration=181 limit=180")
-        == "视频时长 181 秒, 超过当前限制 180 秒。"
+        == "视频时长 181 秒, 超过自动追加限制 180 秒。"
     )
 
 

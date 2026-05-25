@@ -12,7 +12,7 @@ from .card import build_card, build_markdown_card
 from .config import Settings
 from .dispatch import Dispatcher
 from .image_uploader import upload_cover
-from .listener import MessageEvent
+from .listener import CardActionEvent, ListenerEvent, MessageEvent
 from .media_downloader import VideoSkipReason, download_video
 from .parsers.base import LinkMetadata, ParserError
 from .sender import CardSender, TextSender, TypingReactionSender, VideoSender
@@ -39,7 +39,11 @@ class Pipeline:
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._bot_open_id: str | None = None
 
-    async def handle(self, event: MessageEvent) -> None:
+    async def handle(self, event: ListenerEvent) -> None:
+        if isinstance(event, CardActionEvent):
+            await self._handle_card_action(event)
+            return
+
         if event.message_id in self._seen:
             logger.debug("skip duplicate message_id=%s", event.message_id)
             return
@@ -73,6 +77,49 @@ class Pipeline:
 
         for url in urls:
             await self._process_url(url, event, is_bot_mentioned, manual_download)
+
+    async def _handle_card_action(self, event: CardActionEvent) -> None:
+        if event.action != "download_video":
+            logger.info(
+                "ignore unsupported card action: action=%s message_id=%s",
+                event.action,
+                event.message_id,
+            )
+            return
+
+        logger.info(
+            "processing card download action: url=%s message_id=%s operator=%s",
+            event.source_url,
+            event.message_id,
+            event.operator_open_id,
+        )
+        try:
+            meta = await self._dispatcher.parse(event.source_url)
+        except ParserError as e:
+            logger.error(
+                "card action parse failed: url=%s message_id=%s reason=%s",
+                event.source_url,
+                event.message_id,
+                e.reason,
+            )
+            await self._text_sender.send(
+                _download_failure_message(event.source_url, f"链接解析失败: {e.reason}"),
+                event.chat_id,
+                event.message_id,
+            )
+            return
+
+        img_key: str | None = None
+        if meta.cover_url:
+            img_key = await upload_cover(meta.cover_url, self._lark_client, self._http)
+
+        await self._try_send_video(
+            meta,
+            event,
+            img_key,
+            notify_user=True,
+            enforce_duration_limit=False,
+        )
 
     async def _process_url(
         self,
@@ -130,7 +177,13 @@ class Pipeline:
             domain = "bilibili"
 
         if manual_download:
-            await self._try_send_video(meta, event, img_key, notify_user=True)
+            await self._try_send_video(
+                meta,
+                event,
+                img_key,
+                notify_user=True,
+                enforce_duration_limit=False,
+            )
         elif is_bot_mentioned and domain in ("youtube", "bilibili"):
             await self._try_send_bibigpt_summary(url, event)
         else:
@@ -139,14 +192,19 @@ class Pipeline:
     async def _try_send_video(
         self,
         meta: LinkMetadata,
-        event: MessageEvent,
+        event: MessageEvent | CardActionEvent,
         img_key: str | None,
         *,
         notify_user: bool = False,
+        enforce_duration_limit: bool = True,
     ) -> None:
         async with self._typing_sender.hold(event.message_id, label="video"):
             try:
-                video = await download_video(meta, self._settings)
+                video = await download_video(
+                    meta,
+                    self._settings,
+                    enforce_duration_limit=enforce_duration_limit,
+                )
             except VideoSkipReason as e:
                 logger.info(
                     "skip video append: url=%s message_id=%s reason=%s",
@@ -301,13 +359,13 @@ def _friendly_download_reason(reason: str) -> str:
     if reason.startswith("not a video:"):
         return "这个链接没有识别为可下载视频。"
     if reason == "video duration unknown":
-        return "无法提前确认视频时长, 已停止下载以避免超过飞书限制。"
+        return "无法提前确认视频时长, 自动追加已跳过。手动发送 下载 <链接> 可强制尝试。"
     if reason.startswith("video duration exceeds limit:"):
         duration = _reason_value(reason, "duration")
         limit = _reason_value(reason, "limit")
         if duration and limit:
-            return f"视频时长 {duration} 秒, 超过当前限制 {limit} 秒。"
-        return "视频时长超过当前限制。"
+            return f"视频时长 {duration} 秒, 超过自动追加限制 {limit} 秒。"
+        return "视频时长超过自动追加限制。"
     if reason == "platform requires auth":
         return "该平台需要登录态 cookie。"
     if reason == "no download candidate":

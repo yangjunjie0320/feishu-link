@@ -104,12 +104,19 @@ def test_card_with_youtube_metadata() -> None:
         title="Cool Video",
         site_name="YouTube",
         channel="Great Channel",
+        media_type=MediaType.VIDEO,
         duration_seconds=305,
         view_count=12345,
         like_count=678,
         comment_count=90,
     )
     card = json.loads(build_card(meta))
+    action_block = next(e for e in card["elements"] if e.get("tag") == "action")
+    assert action_block["actions"][1]["text"]["content"] == "下载视频"
+    assert action_block["actions"][1]["value"] == {
+        "action": "download_video",
+        "url": "https://youtu.be/abc123",
+    }
     body_text = next(
         e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
     )

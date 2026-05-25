@@ -12,7 +12,8 @@ The project is designed for personal or team link collection workflows: send a s
 - Video metrics when available: views, likes, comments, and reposts.
 - Optional short-video append. Videos up to 180 seconds are downloaded, converted to Feishu-friendly MP4, uploaded, and sent after the card.
 - **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube or Bilibili link to receive an AI-generated video summary via BibiGPT web, browser, or OpenAPI mode.
-- Manual download command: mention the bot and send `下载 <link>` to force video download instead of summarization.
+- Manual download command: mention the bot and send `下载 <link>` to force video download instead of summarization, without the automatic short-video duration cap.
+- Card download button: video cards include a `下载视频` action that triggers the same manual-download path.
 - Optional title translation through DeepSeek. Non-Chinese titles are translated and shown together with the original title.
 - Unified Netscape cookie file for platforms that require login state (like Instagram, X, and BibiGPT).
 - Explicit logging for parse, download, upload, and send failures. Card delivery is prioritized over video delivery.
@@ -37,7 +38,7 @@ Douyin is intentionally not parsed by default. If Feishu itself expands a Douyin
 Create a custom app in Feishu Open Platform, then configure:
 
 - App credentials: `app_id`, `app_secret`
-- Event subscription: `im.message.receive_v1`
+- Event subscription: `im.message.receive_v1` and card action callbacks (`p2.card.action.trigger`)
 - Message permissions for receiving and sending messages
 - The conversations where the app should be added
 
@@ -172,7 +173,7 @@ See `config.example.yaml` for the full reference. Common settings:
 | `youtube_api_key` | Empty | Optional YouTube Data API key for stable YouTube metadata |
 | `link_blacklist` | `[]` | Regex URL patterns to ignore |
 | `enable_video_send` | `true` | Whether to try appending short videos after cards |
-| `max_video_duration_seconds` | `180` | Max duration for downloadable videos |
+| `max_video_duration_seconds` | `180` | Max duration for automatic video append; manual downloads ignore this artificial cap |
 | `max_video_file_mb` | Config example | Max uploaded video size |
 | `allowed_video_platforms` | Config example | Platforms allowed for video append |
 | `cookie_file` | `cookies/cookies.txt` | Unified Netscape cookie file path |
@@ -233,7 +234,7 @@ deepseek_model: "deepseek-chat"
 
 Cards display both the Chinese translation and the original title. Translation failures are logged and do not block card sending.
 
-## Video Sending
+## Automatic Video Sending
 
 The service always sends the card first. After that it tries video sending only when all conditions are met:
 
@@ -256,7 +257,9 @@ Mention the bot and start the message with `下载` followed by a link to force 
 @bot 下载 https://youtu.be/example
 ```
 
-Manual downloads bypass BibiGPT summaries. If the link cannot be parsed as a downloadable video, exceeds the configured duration limit, has a known candidate file larger than `max_video_file_mb`, or the final converted MP4 is too large for upload, the bot replies with the failure reason.
+Manual downloads bypass BibiGPT summaries and the automatic short-video duration cap. If the link cannot be parsed as a downloadable video, has no downloadable candidate, has a known candidate file larger than `max_video_file_mb`, produces a final converted MP4 larger than `max_video_file_mb`, or fails Feishu upload/send, the bot replies with the failure reason.
+
+Video cards also include a `下载视频` button. Clicking it triggers the same manual-download path and sends the result as a reply to the card message.
 
 ## Development
 

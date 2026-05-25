@@ -47,6 +47,8 @@ send_retry_attempts: 3
 
 # Short video append behavior. Cards are always sent first; videos are best-effort.
 video_append_enabled: true
+# Applies only to automatic video append. Manual "下载 <link>" ignores this
+# artificial short-video threshold and is bounded by file size/upload results.
 max_video_duration_seconds: 180
 max_video_file_mb: 50
 allowed_video_platforms:

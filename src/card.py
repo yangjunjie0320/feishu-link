@@ -139,12 +139,7 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
 
     elements.append({
         "tag": "action",
-        "actions": [{
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": "打开链接"},
-            "url": meta.source_url,
-            "type": "primary",
-        }],
+        "actions": _build_actions(meta),
     })
 
     card: dict[str, object] = {
@@ -153,6 +148,30 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
     }
 
     return json.dumps(card, ensure_ascii=False)
+
+
+def _build_actions(meta: LinkMetadata) -> list[dict[str, object]]:
+    actions: list[dict[str, object]] = [
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "打开链接"},
+            "url": meta.source_url,
+            "type": "primary",
+        }
+    ]
+
+    if meta.media_type == MediaType.VIDEO:
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "下载视频"},
+            "type": "default",
+            "value": {
+                "action": "download_video",
+                "url": meta.source_url,
+            },
+        })
+
+    return actions
 
 
 def _description_should_be_primary(meta: LinkMetadata, description_block: str) -> bool:

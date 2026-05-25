@@ -43,16 +43,21 @@ class DownloadedVideo:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
 
-def explain_video_skip(meta: LinkMetadata, settings: Settings) -> str | None:
+def explain_video_skip(
+    meta: LinkMetadata,
+    settings: Settings,
+    *,
+    enforce_duration_limit: bool = True,
+) -> str | None:
     if not settings.video_append_enabled:
         return "video append disabled"
     if meta.platform not in settings.allowed_video_platforms:
         return f"platform not allowed: {meta.platform}"
     if meta.media_type != MediaType.VIDEO:
         return f"not a video: media_type={meta.media_type}"
-    if meta.duration_seconds is None:
+    if enforce_duration_limit and meta.duration_seconds is None:
         return "video duration unknown"
-    if meta.duration_seconds > settings.max_video_duration_seconds:
+    if enforce_duration_limit and meta.duration_seconds > settings.max_video_duration_seconds:
         return (
             "video duration exceeds limit: "
             f"duration={meta.duration_seconds} limit={settings.max_video_duration_seconds}"
@@ -84,8 +89,17 @@ def explain_video_skip(meta: LinkMetadata, settings: Settings) -> str | None:
     return None
 
 
-async def download_video(meta: LinkMetadata, settings: Settings) -> DownloadedVideo:
-    skip_reason = explain_video_skip(meta, settings)
+async def download_video(
+    meta: LinkMetadata,
+    settings: Settings,
+    *,
+    enforce_duration_limit: bool = True,
+) -> DownloadedVideo:
+    skip_reason = explain_video_skip(
+        meta,
+        settings,
+        enforce_duration_limit=enforce_duration_limit,
+    )
     if skip_reason:
         raise VideoSkipReason(skip_reason)
 
@@ -138,7 +152,10 @@ async def download_video(meta: LinkMetadata, settings: Settings) -> DownloadedVi
     loop = asyncio.get_running_loop()
     try:
         path = await loop.run_in_executor(None, _download)
-        path = await loop.run_in_executor(None, lambda: _make_feishu_mp4(path, temp_dir))
+        path = await loop.run_in_executor(
+            None,
+            lambda: _make_feishu_mp4(path, temp_dir, meta.duration_seconds),
+        )
         size_mb = path.stat().st_size / (1024 * 1024)
         if size_mb > settings.max_video_file_mb:
             raise VideoDownloadError(
@@ -169,7 +186,7 @@ def _strip_symbol_characters(value: str) -> str:
     return "".join(ch for ch in value if unicodedata.category(ch) != "So")
 
 
-def _make_feishu_mp4(path: Path, temp_dir: Path) -> Path:
+def _make_feishu_mp4(path: Path, temp_dir: Path, duration_seconds: int | None = None) -> Path:
     output = temp_dir / f"{path.stem}.feishu.mp4"
     cmd = [
         "ffmpeg",
@@ -196,14 +213,21 @@ def _make_feishu_mp4(path: Path, temp_dir: Path) -> Path:
         "+faststart",
         str(output),
     ]
+    timeout = _transcode_timeout_seconds(duration_seconds)
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=180)
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         stderr = getattr(e, "stderr", "") or str(e)
         raise VideoDownloadError(f"ffmpeg transcode failed: {stderr[:500]}") from e
     if not output.exists() or output.stat().st_size == 0:
         raise VideoDownloadError("ffmpeg transcode produced empty output")
     return output
+
+
+def _transcode_timeout_seconds(duration_seconds: int | None) -> int:
+    if duration_seconds is None or duration_seconds <= 0:
+        return 180
+    return max(180, min(7200, duration_seconds * 2 + 60))
 
 
 def _probe_duration_ms(path: Path) -> int:
