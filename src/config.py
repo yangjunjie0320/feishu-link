@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
     translation_timeout: float = 10.0
+    summary_rewrite_timeout: float = 120.0
     comment_analysis_max_comments: int = 500
     comment_analysis_prompt_comments: int = 200
     comment_analysis_timeout: float = 120.0

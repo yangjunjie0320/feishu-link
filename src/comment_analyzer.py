@@ -671,8 +671,18 @@ def parse_comment_insight(raw_content: str, *, top_comment_count: int) -> Commen
 
     try:
         data = json.loads(content)
-    except json.JSONDecodeError as e:
-        raise CommentAnalysisError("LLM returned invalid JSON.") from e
+    except json.JSONDecodeError:
+        # Reasoning models may wrap the JSON in surrounding text; extract the
+        # outermost {...} object as a fallback.
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end > start:
+            try:
+                data = json.loads(content[start : end + 1])
+            except json.JSONDecodeError as e:
+                raise CommentAnalysisError("LLM returned invalid JSON.") from e
+        else:
+            raise CommentAnalysisError("LLM returned invalid JSON.")
     if not isinstance(data, dict):
         raise CommentAnalysisError("LLM returned invalid JSON shape.")
 

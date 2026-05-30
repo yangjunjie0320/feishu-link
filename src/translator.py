@@ -88,6 +88,7 @@ class TitleTranslator:
             "按用户给定要求把 BibiGPT 原始返回重写为最终内容。"
             "只返回重写后的正文。"
         )
+        rewrite_timeout = self._settings.summary_rewrite_timeout
         try:
             result = await self._translate_text(
                 content,
@@ -100,6 +101,7 @@ class TitleTranslator:
                 ),
                 max_tokens=1200,
                 preserve_linebreaks=True,
+                timeout=rewrite_timeout,
             )
         except Exception as e:
             logger.warning("summary rewrite failed: url=%s error=%s", source_url, e)
@@ -124,6 +126,7 @@ class TitleTranslator:
                 ),
                 max_tokens=1200,
                 preserve_linebreaks=True,
+                timeout=rewrite_timeout,
             )
         except Exception as e:
             logger.warning("summary rewrite retry failed: url=%s error=%s", source_url, e)
@@ -138,6 +141,7 @@ class TitleTranslator:
         user_prompt: str,
         max_tokens: int,
         preserve_linebreaks: bool = False,
+        timeout: float | None = None,
     ) -> str:
         endpoint = self._settings.deepseek_base_url.rstrip("/") + "/chat/completions"
         response = await self._client.post(
@@ -161,7 +165,7 @@ class TitleTranslator:
                 "temperature": 0.2,
                 "max_tokens": max_tokens,
             },
-            timeout=self._settings.translation_timeout,
+            timeout=timeout if timeout is not None else self._settings.translation_timeout,
         )
         if response.status_code >= 400:
             raise RuntimeError(f"DeepSeek HTTP {response.status_code}: {response.text[:200]}")
