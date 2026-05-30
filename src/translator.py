@@ -12,6 +12,14 @@ from .parsers.base import LinkMetadata, MediaType
 logger = logging.getLogger(__name__)
 
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
+_SUMMARY_REWRITE_PROMPT = """\
+输出要求:
+- 必须用简体中文输出, 非中文内容要翻译成中文。不要使用 emoji。
+- 使用 Markdown，尽量保留原有结构。
+- Markdown 各级标题都改成无序列表+加粗。
+- 允许使用多级无序列表，用缩进表达层级。
+- 无序列表只能使用 "-", 不要使用 "*" 或 "+"。
+- 不要使用编号列表。"""
 
 
 def contains_chinese(text: str) -> bool:
@@ -57,6 +65,46 @@ class TitleTranslator:
             max_tokens=220,
         )
 
+    async def ensure_chinese_markdown_summary(
+        self,
+        markdown: str,
+        *,
+        source_url: str,
+        rewrite_prompt: str | None = None,
+    ) -> str:
+        content = markdown.strip()
+        if not content:
+            return markdown
+        if not self._settings.deepseek_api_key:
+            logger.warning("summary rewrite skipped because deepseek_api_key is empty")
+            return markdown
+
+        prompt = (rewrite_prompt or _SUMMARY_REWRITE_PROMPT).strip()
+        try:
+            return await self._translate_text(
+                content,
+                system_prompt=(
+                    "你是视频总结重写助手。不要信任输入的语言和排版。"
+                    "按用户给定要求把 BibiGPT 原始返回重写为最终内容。"
+                    "只返回重写后的正文。"
+                ),
+                user_prompt=(
+                    "重写要求:\n"
+                    f"{prompt}\n\n"
+                    "BibiGPT 原始返回:\n"
+                    f"{content}"
+                ),
+                max_tokens=1200,
+                preserve_linebreaks=True,
+            )
+        except Exception as e:
+            logger.warning(
+                "summary rewrite failed: url=%s error=%s",
+                source_url,
+                e,
+            )
+            return markdown
+
     async def _translate_text(
         self,
         text: str,
@@ -64,6 +112,7 @@ class TitleTranslator:
         system_prompt: str,
         user_prompt: str,
         max_tokens: int,
+        preserve_linebreaks: bool = False,
     ) -> str:
         endpoint = self._settings.deepseek_base_url.rstrip("/") + "/chat/completions"
         response = await self._client.post(
@@ -98,6 +147,8 @@ class TitleTranslator:
             raise RuntimeError("DeepSeek returned no choices")
         message = choices[0].get("message", {})
         content = str(message.get("content") or "").strip()
+        if preserve_linebreaks:
+            return _clean_markdown_translation(content)
         return _clean_translation(content)
 
     async def _translate_title_if_needed(self, meta: LinkMetadata) -> None:
@@ -151,6 +202,26 @@ def _clean_translation(text: str) -> str:
     cleaned = text.strip().strip("\"'")
     cleaned = cleaned.strip(chr(0x201C) + chr(0x201D) + chr(0x2018) + chr(0x2019))
     return " ".join(cleaned.split())
+
+
+def _clean_markdown_translation(text: str) -> str:
+    cleaned = text.strip().strip("\"'")
+    cleaned = cleaned.strip(chr(0x201C) + chr(0x201D) + chr(0x2018) + chr(0x2019))
+    lines = [_clean_markdown_translation_line(line) for line in cleaned.splitlines()]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines)
+
+
+def _clean_markdown_translation_line(line: str) -> str:
+    expanded = line.expandtabs(4).rstrip()
+    stripped = expanded.lstrip(" ")
+    if not stripped:
+        return ""
+    indent = len(expanded) - len(stripped)
+    return (" " * indent) + " ".join(stripped.split())
 
 
 def _is_generic_social_title(title: str, platform: str) -> bool:

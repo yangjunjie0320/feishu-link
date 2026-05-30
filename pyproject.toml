@@ -39,6 +39,8 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 中文项目：字符串/注释/文档里大量使用全角标点，RUF001/002/003 全是误报，整族关闭
+ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.pyright]
 include = ["src", "main.py"]

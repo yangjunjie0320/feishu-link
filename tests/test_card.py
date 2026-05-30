@@ -88,6 +88,47 @@ def test_markdown_card_uses_markdown_component_and_normalizes_bullets() -> None:
     assert link["content"] == "[打开视频](https://youtu.be/abc123)"
 
 
+def test_markdown_card_preserves_nested_bullet_levels() -> None:
+    card = json.loads(
+        build_markdown_card(
+            "BibiGPT 总结",
+            "- **问题**\n"
+            "  - **大学应如何调整课程？** ： 使用 AI 作为研究工具\n"
+            "    - 保持第一性原理",
+        )
+    )
+
+    content = card["body"]["elements"][0]["content"]
+    assert content == (
+        "- **问题**\n"
+        "    - **大学应如何调整课程？** ： 使用 AI 作为研究工具\n"
+        "        - 保持第一性原理"
+    )
+
+
+def test_markdown_card_can_collapse_content() -> None:
+    card = json.loads(
+        build_markdown_card(
+            "BibiGPT 总结",
+            "* 第一点\n+ 第二点",
+            source_url="https://youtu.be/abc123",
+            collapsed=True,
+            panel_title="总结正文",
+        )
+    )
+
+    panel = card["body"]["elements"][0]
+    content = panel["elements"][0]["content"]
+    assert panel["tag"] == "collapsible_panel"
+    assert panel["expanded"] is False
+    assert panel["header"]["title"]["content"] == "**总结正文**"
+    assert panel["elements"][0]["tag"] == "markdown"
+    assert "- 第一点" in content
+    assert "- 第二点" in content
+    link = card["body"]["elements"][1]
+    assert link["content"] == "[打开视频](https://youtu.be/abc123)"
+
+
 def test_card_no_cover() -> None:
     meta = LinkMetadata(
         source_url="https://example.com",
@@ -117,8 +158,13 @@ def test_card_with_youtube_metadata() -> None:
         "action": "summarize_video",
         "url": "https://youtu.be/abc123",
     }
-    assert action_block["actions"][2]["text"]["content"] == "下载视频"
+    assert action_block["actions"][2]["text"]["content"] == "分析评论"
     assert action_block["actions"][2]["value"] == {
+        "action": "analyze_comments",
+        "url": "https://youtu.be/abc123",
+    }
+    assert action_block["actions"][3]["text"]["content"] == "下载视频"
+    assert action_block["actions"][3]["value"] == {
         "action": "download_video",
         "url": "https://youtu.be/abc123",
     }
@@ -131,6 +177,25 @@ def test_card_with_youtube_metadata() -> None:
     assert "播放 1.2万" in body_text
     assert "点赞 678" in body_text
     assert "评论 90" in body_text
+
+
+def test_card_actions_prefer_canonical_url() -> None:
+    meta = LinkMetadata(
+        source_url="https://b23.tv/abc123",
+        canonical_url="https://www.bilibili.com/video/BV1BCGB66E8P/",
+        title="Bilibili Video",
+        site_name="Bilibili",
+        platform="bilibili",
+        media_type=MediaType.VIDEO,
+    )
+
+    card = json.loads(build_card(meta))
+    action_block = next(e for e in card["elements"] if e.get("tag") == "action")
+
+    assert action_block["actions"][0]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
+    assert action_block["actions"][1]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
+    assert action_block["actions"][2]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
+    assert action_block["actions"][3]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
 
 
 def test_video_card_omits_summary_button_for_unsupported_platform() -> None:
@@ -146,6 +211,26 @@ def test_video_card_omits_summary_button_for_unsupported_platform() -> None:
     labels = [action["text"]["content"] for action in action_block["actions"]]
 
     assert labels == ["打开链接", "下载视频"]
+
+
+def test_instagram_article_card_includes_comment_analysis_button() -> None:
+    meta = LinkMetadata(
+        source_url="https://www.instagram.com/p/DYfWbunGlNg/",
+        title="Post by beccu.studio",
+        site_name="Instagram",
+        platform="instagram",
+        media_type=MediaType.ARTICLE,
+    )
+
+    card = json.loads(build_card(meta))
+    action_block = next(e for e in card["elements"] if e.get("tag") == "action")
+    labels = [action["text"]["content"] for action in action_block["actions"]]
+
+    assert labels == ["打开链接", "分析评论"]
+    assert action_block["actions"][1]["value"] == {
+        "action": "analyze_comments",
+        "url": "https://www.instagram.com/p/DYfWbunGlNg/",
+    }
 
 
 def test_video_card_omits_description_even_if_translated() -> None:

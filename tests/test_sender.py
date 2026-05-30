@@ -1,7 +1,12 @@
 import json
+from json import JSONDecodeError
 from types import SimpleNamespace
 
-from src.sender import TypingReactionSender, build_media_content
+import httpx
+import respx
+
+from src.config import Settings
+from src.sender import TypingReactionSender, VideoSender, build_media_content
 
 
 class _FakeResponse:
@@ -37,6 +42,18 @@ class _FakeClient:
         self.im = SimpleNamespace(
             v1=SimpleNamespace(message_reaction=self.message_reaction)
         )
+
+
+class _BrokenFileService:
+    def create(self, request):
+        raise JSONDecodeError("Expecting value", "", 0)
+
+
+class _FakeUploadClient:
+    config = SimpleNamespace(domain="https://open.feishu.cn")
+
+    def __init__(self) -> None:
+        self.im = SimpleNamespace(v1=SimpleNamespace(file=_BrokenFileService()))
 
 
 def test_build_media_content_without_cover() -> None:
@@ -107,3 +124,39 @@ async def test_typing_reaction_sender_uses_independent_reactions() -> None:
         "reaction_1",
         "reaction_2",
     ]
+
+
+@respx.mock
+async def test_video_upload_falls_back_to_raw_http_when_sdk_parse_fails(tmp_path) -> None:
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"fake mp4")
+    respx.post(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={"code": 0, "msg": "ok", "tenant_access_token": "tenant-token"},
+        )
+    )
+    upload_route = respx.post("https://open.feishu.cn/open-apis/im/v1/files").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "msg": "success",
+                "data": {"file_key": "file_v3_xxx"},
+            },
+        )
+    )
+    sender = VideoSender(
+        Settings(app_id="cli_xxx", app_secret="secret", request_timeout=1),
+        _FakeUploadClient(),
+    )
+
+    file_key = await sender._upload(video_path, "video.mp4", 1234)
+
+    assert file_key == "file_v3_xxx"
+    assert upload_route.called
+    assert upload_route.calls.last.request.headers["Authorization"] == (
+        "Bearer tenant-token"
+    )

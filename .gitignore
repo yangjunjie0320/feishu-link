@@ -11,6 +11,8 @@ config.yaml
 .vscode/
 .cursor/
 .windsurf/
+.antigravitycli/
+.claude/
 AGENTS.md
 CLAUDE.md
 DESIGN.md

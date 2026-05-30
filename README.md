@@ -11,9 +11,9 @@ The project is designed for personal or team link collection workflows: send a s
 - Multi-platform parsing for YouTube, Instagram, TikTok, Bilibili, X/Twitter, and normal web pages.
 - Video metrics when available: views, likes, comments, and reposts.
 - Optional short-video append. Videos up to 180 seconds are downloaded, converted to Feishu-friendly MP4, uploaded, and sent after the card.
-- **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube or Bilibili link to receive an AI-generated video summary via BibiGPT web, browser, or OpenAPI mode.
+- **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube or Bilibili link to receive an AI-generated video summary via BibiGPT web or browser mode.
 - Manual download command: mention the bot and send `下载 <link>` to force video download instead of summarization, without the automatic short-video duration cap.
-- Card action buttons: supported video cards include `总结视频` and `下载视频` actions for one-click summary or manual download.
+- Card action buttons: supported video cards include `总结视频`, `分析评论`, and `下载视频` actions.
 - Optional title translation through DeepSeek. Non-Chinese titles are translated and shown together with the original title.
 - Unified Netscape cookie file for platforms that require login state (like Instagram, X, and BibiGPT).
 - Explicit logging for parse, download, upload, and send failures. Card delivery is prioritized over video delivery.
@@ -177,16 +177,19 @@ See `config.example.yaml` for the full reference. Common settings:
 | `max_video_file_mb` | `30` | Max uploaded video size; Feishu `im/v1/files` rejects files over 30 MB |
 | `allowed_video_platforms` | Config example | Platforms allowed for video append |
 | `cookie_file` | `cookies/cookies.txt` | Unified Netscape cookie file path |
-| `bibigpt_access_mode` | `web` | `web` uses the normal BibiGPT web app quota via tRPC; `browser` sends the same request from persisted Chromium; `api` uses OpenAPI-style chat completions |
+| `bibigpt_access_mode` | `web` | `web` uses the normal BibiGPT web app quota via tRPC; `browser` sends the same request from persisted Chromium |
 | `bibigpt_base_url` | `https://bibigpt.co` | Base URL for BibiGPT. Use `https://aitodo.co/zh` for the international/overseas route. |
 | `bibigpt_timeout` | `120.0` | Timeout in seconds for BibiGPT summary requests |
 | `bibigpt_browser_profile_dir` | `/app/browser-data/bibigpt` | Chromium profile path for BibiGPT browser mode |
 | `bibigpt_browser_headless` | `true` | Run Chromium headless in browser mode |
 | `bibigpt_browser_timeout` | `120.0` | Timeout in seconds for browser startup, navigation, and summary fetch |
-| `bibigpt_default_prompt` | Default | Prompt to send to BibiGPT |
-| `deepseek_api_key` | Empty | Enables title translation when configured |
+| `bibigpt_default_prompt` | Empty | Optional default custom prompt. Leave empty to use BibiGPT's built-in prompt |
+| `deepseek_api_key` | Empty | Enables title translation and final BibiGPT summary rewriting when configured |
 | `deepseek_base_url` | DeepSeek API | Optional compatible API endpoint |
 | `enable_title_translation` | `false` | Translate non-Chinese titles when true |
+| `comment_analysis_max_comments` | `200` | Max comments to collect per on-demand comment analysis action; runtime is hard-capped at 200 |
+| `comment_analysis_prompt_comments` | `120` | Max collected comments included in the LLM prompt |
+| `comment_analysis_timeout` | `120.0` | Timeout in seconds for the comment analysis LLM call |
 
 All settings can also be provided through environment variables prefixed with `FEISHU_LINK_`.
 
@@ -262,7 +265,10 @@ Manual downloads bypass BibiGPT summaries and the automatic short-video duration
 Supported video cards also include action buttons:
 
 - `总结视频` triggers the same BibiGPT summary path as mentioning the bot with a YouTube or Bilibili URL.
+- `分析评论` fetches up to 200 comments, ranks comments by likes and replies, translates the top 3, and sends a fixed-template comment analysis card with total-comment and sample counts.
 - `下载视频` triggers the same manual-download path and sends the result as a reply to the card message.
+
+BibiGPT summary output is treated as draft material. When `deepseek_api_key` is configured, the bot sends that output through DeepSeek with fixed Chinese Markdown output requirements before rendering the Feishu card, so language and formatting stay consistent while BibiGPT can keep its built-in prompt.
 
 ## Development
 

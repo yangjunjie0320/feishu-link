@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 import lark_oapi as lark
 import tenacity
 from lark_oapi.api.im.v1 import (
@@ -263,6 +264,7 @@ class VideoSender:
 
     async def _upload(self, path: Path, file_name: str, duration_ms: int) -> str:
         def _upload_sync() -> str:
+            size_mb = path.stat().st_size / (1024 * 1024)
             try:
                 with path.open("rb") as f:
                     request = (
@@ -279,16 +281,101 @@ class VideoSender:
                     )
                     response = self._client.im.v1.file.create(request)
             except Exception as e:
-                raise SendError(f"video upload failed: {e}") from e
+                logger.warning(
+                    "video upload via SDK failed, trying raw HTTP fallback: "
+                    "file_name=%s size_mb=%.2f duration_ms=%d error_type=%s error=%s",
+                    file_name,
+                    size_mb,
+                    duration_ms,
+                    e.__class__.__name__,
+                    e,
+                )
+                return self._upload_raw_sync(path, file_name, duration_ms)
 
             if not response.success():
                 raise SendError(
                     f"video upload failed: code={response.code} msg={response.msg}"
                 )
-            return response.data.file_key
+            file_key = getattr(response.data, "file_key", "")
+            if not file_key:
+                raise SendError("video upload failed: response missing file_key")
+            logger.info(
+                "video upload via SDK succeeded: file_name=%s size_mb=%.2f duration_ms=%d",
+                file_name,
+                size_mb,
+                duration_ms,
+            )
+            return file_key
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _upload_sync)
+
+    def _upload_raw_sync(self, path: Path, file_name: str, duration_ms: int) -> str:
+        domain = _lark_domain(self._client)
+        timeout = httpx.Timeout(max(180.0, float(self._settings.request_timeout)), connect=10.0)
+        size_mb = path.stat().st_size / (1024 * 1024)
+
+        with httpx.Client(timeout=timeout) as client:
+            token_response = client.post(
+                f"{domain}/open-apis/auth/v3/tenant_access_token/internal",
+                json={
+                    "app_id": self._settings.app_id,
+                    "app_secret": self._settings.app_secret,
+                },
+            )
+            token_data = _response_json(
+                token_response,
+                context="tenant_access_token",
+            )
+            if token_response.status_code >= 400 or token_data.get("code") != 0:
+                raise SendError(
+                    "video upload token request failed: "
+                    f"status={token_response.status_code} "
+                    f"code={token_data.get('code')} msg={token_data.get('msg')} "
+                    f"body={_response_body_prefix(token_response)}"
+                )
+
+            token = str(token_data.get("tenant_access_token") or "")
+            if not token:
+                raise SendError("video upload token request failed: missing token")
+
+            with path.open("rb") as f:
+                upload_response = client.post(
+                    f"{domain}/open-apis/im/v1/files",
+                    headers={"Authorization": f"Bearer {token}"},
+                    data={
+                        "file_type": "mp4",
+                        "file_name": file_name,
+                        "duration": str(duration_ms),
+                    },
+                    files={"file": (file_name, f, "video/mp4")},
+                )
+
+            upload_data = _response_json(upload_response, context="video upload")
+            if upload_response.status_code >= 400 or upload_data.get("code") != 0:
+                raise SendError(
+                    "video upload failed: "
+                    f"status={upload_response.status_code} "
+                    f"content_type={upload_response.headers.get('content-type', '')} "
+                    f"code={upload_data.get('code')} msg={upload_data.get('msg')} "
+                    f"body={_response_body_prefix(upload_response)}"
+                )
+
+            data = upload_data.get("data")
+            file_key = str(data.get("file_key") or "") if isinstance(data, dict) else ""
+            if not file_key:
+                raise SendError(
+                    "video upload failed: missing file_key "
+                    f"body={_response_body_prefix(upload_response)}"
+                )
+
+        logger.info(
+            "video upload via raw HTTP succeeded: file_name=%s size_mb=%.2f duration_ms=%d",
+            file_name,
+            size_mb,
+            duration_ms,
+        )
+        return file_key
 
     async def _reply_media(self, content: str, message_id: str) -> None:
         request = (
@@ -337,6 +424,34 @@ def build_media_content(file_key: str, image_key: str | None = None) -> str:
     if image_key:
         content["image_key"] = image_key
     return json.dumps(content, ensure_ascii=False)
+
+
+def _lark_domain(client: lark.Client) -> str:
+    config = getattr(client, "config", None)
+    domain = str(getattr(config, "domain", "") or "https://open.feishu.cn")
+    return domain.rstrip("/")
+
+
+def _response_json(response: httpx.Response, *, context: str) -> dict[str, object]:
+    try:
+        data = response.json()
+    except ValueError as e:
+        raise SendError(
+            f"{context} returned non-json response: "
+            f"status={response.status_code} "
+            f"content_type={response.headers.get('content-type', '')} "
+            f"body={_response_body_prefix(response)}"
+        ) from e
+    if not isinstance(data, dict):
+        raise SendError(
+            f"{context} returned invalid response shape: "
+            f"status={response.status_code} body={_response_body_prefix(response)}"
+        )
+    return data
+
+
+def _response_body_prefix(response: httpx.Response, *, limit: int = 300) -> str:
+    return " ".join(response.text[:limit].split())
 
 
 class TextSender:

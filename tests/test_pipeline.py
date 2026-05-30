@@ -1,5 +1,10 @@
-from src.bibi_client import AuthenticationError, BibiAPIError
-from src.pipeline import _friendly_download_reason, _summary_failure_message
+from src.bibi_client import AuthenticationError, BibiAPIError, TranscriptUnavailableError
+from src.comment_analyzer import CommentAnalysisError
+from src.pipeline import (
+    _comment_analysis_failure_message,
+    _friendly_download_reason,
+    _summary_failure_message,
+)
 
 
 def test_friendly_download_reason_for_duration_limit() -> None:
@@ -29,6 +34,12 @@ def test_friendly_download_reason_for_non_video() -> None:
     )
 
 
+def test_comment_analysis_failure_message() -> None:
+    assert _comment_analysis_failure_message(CommentAnalysisError("没有获取到评论内容。")) == (
+        "评论区分析失败: 没有获取到评论内容。"
+    )
+
+
 def test_summary_failure_message_for_corrupt_bibigpt_cookie() -> None:
     message = _summary_failure_message(
         AuthenticationError(
@@ -51,4 +62,15 @@ def test_summary_failure_message_for_html_error_page() -> None:
     assert message == (
         "BibiGPT 总结失败: 服务返回了 HTML 错误页 (HTTP 500), "
         "通常是登录态异常或 BibiGPT 服务端临时异常。"
+    )
+
+
+def test_summary_failure_message_for_missing_transcript() -> None:
+    message = _summary_failure_message(
+        TranscriptUnavailableError(200, "BibiGPT did not receive a transcript.")
+    )
+
+    assert message == (
+        "BibiGPT 总结失败: BibiGPT 没有拿到这个视频的字幕或转录文本, "
+        "可能是视频没有字幕、字幕被限制, 或 YouTube 转录抓取临时失败。"
     )

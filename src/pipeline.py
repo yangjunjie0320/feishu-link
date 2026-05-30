@@ -7,8 +7,14 @@ from collections import OrderedDict
 import httpx
 import lark_oapi as lark
 
-from .bibi_client import AuthenticationError, BibiAPIError, BibiClient
+from .bibi_client import (
+    AuthenticationError,
+    BibiAPIError,
+    BibiClient,
+    TranscriptUnavailableError,
+)
 from .card import build_card, build_markdown_card
+from .comment_analyzer import CommentAnalysisError, CommentAnalyzer
 from .config import Settings
 from .dispatch import Dispatcher
 from .image_uploader import upload_cover
@@ -35,6 +41,7 @@ class Pipeline:
         self._video_sender = VideoSender(settings, lark_client)
         self._typing_sender = TypingReactionSender(lark_client)
         self._bibi_client = BibiClient(settings)
+        self._comment_analyzer = CommentAnalyzer(settings, self._http)
         self._lark_client = lark_client
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._bot_open_id: str | None = None
@@ -87,6 +94,16 @@ class Pipeline:
                 event.operator_open_id,
             )
             await self._try_send_bibigpt_summary(event.source_url, event)
+            return
+
+        if event.action == "analyze_comments":
+            logger.info(
+                "processing card comment analysis action: url=%s message_id=%s operator=%s",
+                event.source_url,
+                event.message_id,
+                event.operator_open_id,
+            )
+            await self._try_send_comment_analysis(event.source_url, event)
             return
 
         if event.action != "download_video":
@@ -323,6 +340,10 @@ class Pipeline:
 
             try:
                 result = await self._bibi_client.summarize(url, prompt=prompt)
+                summary_content = await self._translator.ensure_chinese_markdown_summary(
+                    result.content,
+                    source_url=url,
+                )
             except Exception as e:
                 error = str(e) or e.__class__.__name__
                 logger.error(
@@ -341,8 +362,10 @@ class Pipeline:
             try:
                 card_json = build_markdown_card(
                     "BibiGPT 总结",
-                    result.content,
+                    summary_content,
                     source_url=url,
+                    collapsed=True,
+                    panel_title="总结正文",
                 )
                 card_sent = await self._sender.send(
                     card_json, event.chat_id, event.message_id
@@ -364,6 +387,66 @@ class Pipeline:
             except Exception as e:
                 logger.error(
                     "reply failed: url=%s message_id=%s error=%s",
+                    url,
+                    event.message_id,
+                    e,
+                )
+
+    async def _try_send_comment_analysis(
+        self,
+        url: str,
+        event: MessageEvent | CardActionEvent,
+    ) -> None:
+        async with self._typing_sender.hold(event.message_id, label="comments"):
+            try:
+                result = await self._comment_analyzer.analyze(url)
+            except Exception as e:
+                error = str(e) or e.__class__.__name__
+                logger.error(
+                    "comment analysis failed: url=%s message_id=%s error=%s",
+                    url,
+                    event.message_id,
+                    error,
+                )
+                await self._text_sender.send(
+                    _comment_analysis_failure_message(e),
+                    event.chat_id,
+                    event.message_id,
+                )
+                return
+
+            try:
+                card_json = build_markdown_card(
+                    "评论区分析",
+                    result.markdown,
+                    source_url=url,
+                    collapsed=True,
+                    panel_title="评论区分析",
+                )
+                card_sent = await self._sender.send(
+                    card_json, event.chat_id, event.message_id
+                )
+                if not card_sent:
+                    logger.error(
+                        "comment analysis card send failed: url=%s message_id=%s",
+                        url,
+                        event.message_id,
+                    )
+                    return
+                logger.info(
+                    "comment analysis done: url=%s total_comments=%s comments=%d "
+                    "prompt_comments=%d message_id=%s",
+                    url,
+                    result.total_comment_count
+                    if result.total_comment_count is not None
+                    else "unknown",
+                    result.fetched_count,
+                    result.prompt_count,
+                    event.message_id,
+                )
+            except Exception as e:
+                logger.error(
+                    "comment analysis reply failed: url=%s message_id=%s error=%s",
                     url,
                     event.message_id,
                     e,
@@ -393,6 +476,12 @@ class Pipeline:
 
 def _download_failure_message(url: str, reason: str) -> str:
     return f"下载失败: {_friendly_download_reason(reason)}\n{url}"
+
+
+def _comment_analysis_failure_message(exc: Exception) -> str:
+    if isinstance(exc, CommentAnalysisError):
+        return f"评论区分析失败: {exc!s}"
+    return f"评论区分析失败: {str(exc) or exc.__class__.__name__}"
 
 
 def _friendly_download_reason(reason: str) -> str:
@@ -440,6 +529,11 @@ def _summary_failure_message(exc: Exception) -> str:
         return "BibiGPT 总结失败: BibiGPT 登录态已失效, 请重新导出 aitodo.co cookies。"
 
     if isinstance(exc, BibiAPIError):
+        if isinstance(exc, TranscriptUnavailableError):
+            return (
+                "BibiGPT 总结失败: BibiGPT 没有拿到这个视频的字幕或转录文本, "
+                "可能是视频没有字幕、字幕被限制, 或 YouTube 转录抓取临时失败。"
+            )
         detail = str(exc)
         if "service returned an HTML error page" in detail:
             return (

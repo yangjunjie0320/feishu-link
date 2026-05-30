@@ -65,19 +65,48 @@ def build_markdown_card(
     markdown: str,
     *,
     source_url: str | None = None,
+    collapsed: bool = False,
+    panel_title: str = "正文",
 ) -> str:
     safe_title = _strip_emoji_symbols(title).strip() or "Summary"
     content = _normalize_summary_markdown(markdown)
-    elements: list[dict[str, object]] = [{
-        "tag": "markdown",
-        "content": content,
-    }]
+    if collapsed:
+        safe_panel_title = _strip_emoji_symbols(panel_title).strip() or "正文"
+        elements: list[dict[str, object]] = [
+            {
+                "tag": "collapsible_panel",
+                "expanded": False,
+                "header": {
+                    "title": {
+                        "tag": "markdown",
+                        "content": f"**{safe_panel_title}**",
+                    },
+                    "vertical_align": "center",
+                    "padding": "4px 0px 4px 8px",
+                },
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": content,
+                    }
+                ],
+            }
+        ]
+    else:
+        elements = [
+            {
+                "tag": "markdown",
+                "content": content,
+            }
+        ]
 
     if source_url:
-        elements.append({
-            "tag": "markdown",
-            "content": f"[打开视频]({source_url})",
-        })
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": f"[打开视频]({source_url})",
+            }
+        )
 
     card: dict[str, object] = {
         "schema": "2.0",
@@ -137,10 +166,12 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
     else:
         elements.append(text_element)
 
-    elements.append({
-        "tag": "action",
-        "actions": _build_actions(meta),
-    })
+    elements.append(
+        {
+            "tag": "action",
+            "actions": _build_actions(meta),
+        }
+    )
 
     card: dict[str, object] = {
         "config": {"wide_screen_mode": True},
@@ -151,38 +182,60 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
 
 
 def _build_actions(meta: LinkMetadata) -> list[dict[str, object]]:
+    action_url = _action_url(meta)
     actions: list[dict[str, object]] = [
         {
             "tag": "button",
             "text": {"tag": "plain_text", "content": "打开链接"},
-            "url": meta.source_url,
+            "url": action_url,
             "type": "primary",
         }
     ]
 
-    if meta.media_type == MediaType.VIDEO:
-        if _supports_summary_action(meta):
-            actions.append({
+    if meta.media_type == MediaType.VIDEO and _supports_summary_action(meta):
+        actions.append(
+            {
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": "总结视频"},
                 "type": "default",
                 "value": {
                     "action": "summarize_video",
-                    "url": meta.source_url,
+                    "url": action_url,
                 },
-            })
+            }
+        )
 
-        actions.append({
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": "下载视频"},
-            "type": "default",
-            "value": {
-                "action": "download_video",
-                "url": meta.source_url,
-            },
-        })
+    if _supports_comment_analysis_action(meta):
+        actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "分析评论"},
+                "type": "default",
+                "value": {
+                    "action": "analyze_comments",
+                    "url": action_url,
+                },
+            }
+        )
+
+    if meta.media_type == MediaType.VIDEO:
+        actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "下载视频"},
+                "type": "default",
+                "value": {
+                    "action": "download_video",
+                    "url": action_url,
+                },
+            }
+        )
 
     return actions
+
+
+def _action_url(meta: LinkMetadata) -> str:
+    return meta.canonical_url or meta.source_url
 
 
 def _supports_summary_action(meta: LinkMetadata) -> bool:
@@ -191,17 +244,33 @@ def _supports_summary_action(meta: LinkMetadata) -> bool:
         return True
 
     url = meta.source_url.lower()
+    return any(domain in url for domain in ("bilibili.com", "b23.tv", "youtube.com", "youtu.be"))
+
+
+def _supports_comment_analysis_action(meta: LinkMetadata) -> bool:
+    platform = meta.platform.strip().lower()
+    if platform in {"bilibili", "instagram", "tiktok", "youtube", "x"}:
+        return True
+
+    url = meta.source_url.lower()
     return any(
         domain in url
-        for domain in ("bilibili.com", "b23.tv", "youtube.com", "youtu.be")
+        for domain in (
+            "bilibili.com",
+            "b23.tv",
+            "instagram.com",
+            "tiktok.com",
+            "youtube.com",
+            "youtu.be",
+            "x.com",
+            "twitter.com",
+        )
     )
 
 
 def _description_should_be_primary(meta: LinkMetadata, description_block: str) -> bool:
     return bool(
-        description_block
-        and meta.media_type == MediaType.ARTICLE
-        and meta.platform != "web"
+        description_block and meta.media_type == MediaType.ARTICLE and meta.platform != "web"
     )
 
 
@@ -230,33 +299,49 @@ def _normalize_summary_markdown(markdown: str) -> str:
     if not content:
         return "No summary content."
 
+    indent_unit = _detect_markdown_indent_unit(content)
     lines: list[str] = []
     for line in content.splitlines():
-        lines.append(_normalize_summary_markdown_line(line))
+        lines.append(_normalize_summary_markdown_line(line, indent_unit=indent_unit))
     return "\n".join(lines).strip()
 
 
-def _normalize_summary_markdown_line(line: str) -> str:
+def _normalize_summary_markdown_line(line: str, *, indent_unit: int) -> str:
     stripped = line.lstrip(" ")
     if not stripped:
         return ""
 
     indent = len(line) - len(stripped)
+    bullet_indent = _normalize_bullet_indent(indent, indent_unit=indent_unit)
     heading_match = re.match(r"#{1,6}\s+(.+?)\s*#*\s*$", stripped)
     if heading_match:
-        return f"{_normalize_bullet_indent(indent)}- {heading_match.group(1).strip()}"
+        return f"{bullet_indent}- {heading_match.group(1).strip()}"
 
     bullet_match = re.match(r"[*+-]\s+(.+)$", stripped)
     if bullet_match:
-        return f"{_normalize_bullet_indent(indent)}- {bullet_match.group(1)}"
+        return f"{bullet_indent}- {bullet_match.group(1)}"
 
     return line
 
 
-def _normalize_bullet_indent(indent: int) -> str:
+def _detect_markdown_indent_unit(markdown: str) -> int:
+    indents: list[int] = []
+    for line in markdown.splitlines():
+        stripped = line.lstrip(" ")
+        if not stripped:
+            continue
+        if not re.match(r"(?:#{1,6}\s+|[*+-]\s+)", stripped):
+            continue
+        indent = len(line) - len(stripped)
+        if indent > 0:
+            indents.append(indent)
+    return min(indents) if indents else 2
+
+
+def _normalize_bullet_indent(indent: int, *, indent_unit: int) -> str:
     if indent <= 0:
         return ""
-    level = indent // 4 if indent % 4 == 0 else max(1, indent // 2)
+    level = max(1, round(indent / max(1, indent_unit)))
     return " " * (level * 4)
 
 
@@ -287,14 +372,16 @@ def _build_compact_media_row(
                 "width": "weighted",
                 "weight": 1,
                 "vertical_align": "top",
-                "elements": [{
-                    "tag": "img",
-                    "img_key": img_key,
-                    "alt": {"tag": "plain_text", "content": ""},
-                    "mode": "crop_center",
-                    "preview": True,
-                    "compact_width": True,
-                }],
+                "elements": [
+                    {
+                        "tag": "img",
+                        "img_key": img_key,
+                        "alt": {"tag": "plain_text", "content": ""},
+                        "mode": "crop_center",
+                        "preview": True,
+                        "compact_width": True,
+                    }
+                ],
             },
             {
                 "tag": "column",
