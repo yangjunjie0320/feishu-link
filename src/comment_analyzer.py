@@ -78,9 +78,11 @@ class FetchedComments:
 @dataclass(frozen=True)
 class CommentInsight:
     summary: str
+    sentiment: str
     consensus: list[str]
     controversy: list[str]
     notable_points: list[str]
+    best_comment: str
     top_comment_translations: list[str]
 
 
@@ -651,9 +653,11 @@ def build_comment_analysis_prompt(
         "JSON 模版:\n"
         "{\n"
         '  "summary": "一句话总结评论区主要观点",\n'
+        '  "sentiment": "整体情绪基调，例如：以正面称赞为主 / 两极分化 / 普遍质疑",\n'
         '  "consensus": ["共识 1", "共识 2"],\n'
         '  "controversy": ["争议 1"],\n'
         '  "notable_points": ["有价值的信息 1"],\n'
+        '  "best_comment": "信息密度最高的一条评论原文（不一定是点赞最多的，选包含独家信息、补充背景或纠正错误的）",\n'
         f'  "top_comment_translations": [{translation_placeholders}]\n'
         "}\n\n"
         f"排名最靠前的 {n} 条评论:\n"
@@ -688,9 +692,11 @@ def parse_comment_insight(raw_content: str, *, top_comment_count: int) -> Commen
 
     return CommentInsight(
         summary=_clean_insight_text(data.get("summary")) or "评论区观点较分散。",
+        sentiment=_clean_insight_text(data.get("sentiment")) or "",
         consensus=_clean_insight_list(data.get("consensus"), limit=3),
         controversy=_clean_insight_list(data.get("controversy"), limit=2),
         notable_points=_clean_insight_list(data.get("notable_points"), limit=2),
+        best_comment=_clean_insight_text(data.get("best_comment")) or "",
         top_comment_translations=_clean_insight_list(
             data.get("top_comment_translations"),
             limit=max(1, top_comment_count),
@@ -711,10 +717,19 @@ def render_comment_analysis_markdown(
         "- **分析概览**",
         f"    评论总数: {_format_total_count(total_comment_count)} · 样本 {len(comments)} 条",
         f"    - {_clean_card_text(insight.summary)}",
+    ]
+    if insight.sentiment:
+        overview.append(f"    - 情绪基调: {_clean_card_text(insight.sentiment)}")
+    overview += [
         f"    - 共识: {_join_points(insight.consensus)}",
         f"    - 争议: {_join_points(insight.controversy)}",
         f"    - 信息增量: {_join_points(insight.notable_points)}",
     ]
+    if insight.best_comment:
+        overview += [
+            "- **最具信息量**",
+            f"    > {_clean_card_text(insight.best_comment)}",
+        ]
 
     hot = ["- **热门评论**"]
     for index, (comment, translation) in enumerate(

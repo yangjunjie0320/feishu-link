@@ -288,7 +288,8 @@ def test_build_comment_analysis_prompt_requests_fixed_json_template() -> None:
     assert "保持简洁" in prompt
     assert "避免多层 bullet" in prompt
     assert '"top_comment_translations"' in prompt
-    assert '"sentiment"' not in prompt
+    assert '"sentiment"' in prompt
+    assert '"best_comment"' in prompt
     assert "严格 JSON" in prompt
     assert "Great breakdown" in prompt
 
@@ -319,9 +320,11 @@ def test_render_comment_analysis_markdown_uses_fixed_template() -> None:
     ]
     insight = CommentInsight(
         summary="评论区整体认可视频观点。",
+        sentiment="以正面称赞为主",
         consensus=["观点清晰", "例子有用"],
         controversy=["仍有人不同意结论"],
         notable_points=["补充了背景信息"],
+        best_comment="这条评论包含独家信息。",
         top_comment_translations=["很有帮助", "我不同意"],
     )
 
@@ -335,8 +338,10 @@ def test_render_comment_analysis_markdown_uses_fixed_template() -> None:
 
     assert "评论总数: 56 条" in markdown
     assert "样本 2 条" in markdown
-    assert "情绪" not in markdown
+    assert "情绪基调: 以正面称赞为主" in markdown
     assert "- **分析概览**" in markdown
+    assert "- **最具信息量**" in markdown
+    assert "这条评论包含独家信息" in markdown
     assert "- **热门评论**" in markdown
     assert "**Alice**" in markdown
     assert "> 很有帮助" in markdown
