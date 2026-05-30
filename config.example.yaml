@@ -99,6 +99,6 @@ deepseek_model: "deepseek-chat"
 translation_timeout: 10.0
 
 # Comment analysis action. Uses the DeepSeek-compatible chat completions config above.
-comment_analysis_max_comments: 200
-comment_analysis_prompt_comments: 120
+comment_analysis_max_comments: 500
+comment_analysis_prompt_comments: 200
 comment_analysis_timeout: 120.0

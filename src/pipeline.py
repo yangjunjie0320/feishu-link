@@ -423,6 +423,7 @@ class Pipeline:
                     source_url=url,
                     collapsed=True,
                     panel_title="评论区分析",
+                    sectioned=True,
                 )
                 card_sent = await self._sender.send(
                     card_json, event.chat_id, event.message_id

@@ -23,7 +23,7 @@ from .platforms import detect_platform
 
 logger = logging.getLogger(__name__)
 
-_MAX_COMMENT_FETCH_LIMIT = 200
+_MAX_COMMENT_FETCH_LIMIT = 500
 _BILIBILI_BVID_RE = re.compile(r"(?:bilibili\.com/video/|b23\.tv/)?(BV[A-Za-z0-9]+)")
 _BILIBILI_WBI_KEY_TTL_SECONDS = 30
 _BILIBILI_MIXIN_KEY_ENC_TAB = [
@@ -52,6 +52,7 @@ class VideoComment:
     text: str
     author: str = ""
     author_url: str = ""
+    comment_url: str = ""
     like_count: int = 0
     reply_count: int = 0
     comment_id: str = ""
@@ -404,7 +405,20 @@ class CommentAnalyzer:
             if not isinstance(info, dict):
                 raise CommentAnalysisError("评论抓取返回了无效数据。")
 
-            raw_comments = info.get("comments") or []
+            video_id = str(info.get("id") or "")
+            extractor = str(info.get("extractor_key") or info.get("extractor") or "").lower()
+            is_youtube = "youtube" in extractor
+
+            raw_comments: list[object] = []
+            for raw in (info.get("comments") or []):
+                if is_youtube and video_id and isinstance(raw, dict):
+                    cid = str(raw.get("id") or "")
+                    comment_url = (
+                        f"https://www.youtube.com/watch?v={video_id}&lc={cid}" if cid else ""
+                    )
+                    raw = {**raw, "comment_url": comment_url}
+                raw_comments.append(raw)
+
             return FetchedComments(
                 comments=comments_from_raw(raw_comments, max_comments=max_comments),
                 total_count=_as_optional_int(info.get("comment_count")),
@@ -506,6 +520,7 @@ def comments_from_raw(
             text=comment.text,
             author=comment.author,
             author_url=comment.author_url,
+            comment_url=comment.comment_url,
             like_count=comment.like_count,
             reply_count=max(comment.reply_count, reply_counts.get(comment.comment_id, 0)),
             comment_id=comment.comment_id,
@@ -662,17 +677,16 @@ def render_comment_analysis_markdown(
     prompt_count: int,
     total_comment_count: int | None = None,
 ) -> str:
-    lines = [
-        f"评论总数: {_format_total_count(total_comment_count)}",
-        f"样本: 按热度抓取 {len(comments)} 条, 用于总结 {prompt_count} 条",
-        f"- {_clean_card_text(insight.summary)}",
-        f"- 共识: {_join_points(insight.consensus)}",
-        f"- 争议: {_join_points(insight.controversy)}",
-        f"- 信息增量: {_join_points(insight.notable_points)}",
-        "",
-        "**热门评论**",
+    overview = [
+        "- **分析概览**",
+        f"    评论总数: {_format_total_count(total_comment_count)} · 样本 {len(comments)} 条",
+        f"    - {_clean_card_text(insight.summary)}",
+        f"    - 共识: {_join_points(insight.consensus)}",
+        f"    - 争议: {_join_points(insight.controversy)}",
+        f"    - 信息增量: {_join_points(insight.notable_points)}",
     ]
 
+    hot = ["- **热门评论**"]
     translations = insight.top_comment_translations
     for index, comment in enumerate(top_comments, start=1):
         translation = translations[index - 1] if index - 1 < len(translations) else ""
@@ -680,13 +694,14 @@ def render_comment_analysis_markdown(
 
         author = _clean_card_text(comment.author or "unknown")
         author_md = f"[{author}]({comment.author_url})" if comment.author_url else f"**{author}**"
-        lines.extend([
-            f"{index}. {author_md} · 点赞 {comment.like_count} · 子评论 {comment.reply_count}",
-            f"> {_clean_card_text(display_text)}",
-            "",
-        ])
+        meta = f"    {index}. {author_md} · 点赞 {comment.like_count} · 子评论 {comment.reply_count}"
+        if comment.comment_url:
+            meta += f" · [查看原评论]({comment.comment_url})"
+        hot.append(meta)
+        hot.append(f"    > {_clean_card_text(display_text)}")
+        hot.append("")
 
-    return "\n".join(lines).strip()
+    return "\n".join(overview + [""] + hot).strip()
 
 
 def _pick_display_text(original: str, translation: str) -> str:
@@ -812,6 +827,7 @@ def _comment_from_raw(raw: dict[str, Any]) -> VideoComment | None:
         text=text,
         author=author,
         author_url=author_url,
+        comment_url=str(raw.get("comment_url") or ""),
         like_count=_as_int(
             raw.get("like_count")
             or raw.get("likes")

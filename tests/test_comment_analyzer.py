@@ -263,8 +263,8 @@ def test_sort_comments_by_heat_orders_all_comments() -> None:
     assert [comment.text for comment in sorted_comments] == ["hot", "warm", "cold"]
 
 
-def test_comment_fetch_limit_caps_config_at_200() -> None:
-    assert _comment_fetch_limit(Settings(comment_analysis_max_comments=500)) == 200
+def test_comment_fetch_limit_caps_config_at_max() -> None:
+    assert _comment_fetch_limit(Settings(comment_analysis_max_comments=600)) == 500
     assert _comment_fetch_limit(Settings(comment_analysis_max_comments=80)) == 80
 
 
@@ -334,12 +334,10 @@ def test_render_comment_analysis_markdown_uses_fixed_template() -> None:
     )
 
     assert "评论总数: 56 条" in markdown
-    assert "样本: 按热度抓取 2 条, 用于总结 2 条" in markdown
-    assert "**评论区概览**" not in markdown
-    assert "**简短结论**" not in markdown
-    assert "**主要观察**" not in markdown
+    assert "样本 2 条" in markdown
     assert "情绪" not in markdown
-    assert "\n\n**热门评论**\n" in markdown
-    assert "1. **Alice** · 点赞 10 · 子评论 0" in markdown
+    assert "- **分析概览**" in markdown
+    assert "- **热门评论**" in markdown
+    assert "**Alice**" in markdown
     assert "> 很有帮助" in markdown
     assert "原文:" not in markdown
