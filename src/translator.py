@@ -83,14 +83,15 @@ class TitleTranslator:
             return markdown
 
         prompt = (rewrite_prompt or _SUMMARY_REWRITE_PROMPT).strip()
+        system_prompt = (
+            "你是视频总结重写助手。不要信任输入的语言和排版。"
+            "按用户给定要求把 BibiGPT 原始返回重写为最终内容。"
+            "只返回重写后的正文。"
+        )
         try:
-            return await self._translate_text(
+            result = await self._translate_text(
                 content,
-                system_prompt=(
-                    "你是视频总结重写助手。不要信任输入的语言和排版。"
-                    "按用户给定要求把 BibiGPT 原始返回重写为最终内容。"
-                    "只返回重写后的正文。"
-                ),
+                system_prompt=system_prompt,
                 user_prompt=(
                     "重写要求:\n"
                     f"{prompt}\n\n"
@@ -101,12 +102,33 @@ class TitleTranslator:
                 preserve_linebreaks=True,
             )
         except Exception as e:
-            logger.warning(
-                "summary rewrite failed: url=%s error=%s",
-                source_url,
-                e,
-            )
+            logger.warning("summary rewrite failed: url=%s error=%s", source_url, e)
             return markdown
+
+        if _has_section_titles(result):
+            return result
+
+        logger.warning(
+            "summary rewrite produced no section titles, retrying: url=%s", source_url
+        )
+        try:
+            result = await self._translate_text(
+                content,
+                system_prompt=system_prompt,
+                user_prompt=(
+                    "重写要求:\n"
+                    f"{prompt}\n\n"
+                    "注意：每个章节标题必须格式为 \"- **标题**\"，不要用纯文字标题。\n\n"
+                    "BibiGPT 原始返回:\n"
+                    f"{content}"
+                ),
+                max_tokens=1200,
+                preserve_linebreaks=True,
+            )
+        except Exception as e:
+            logger.warning("summary rewrite retry failed: url=%s error=%s", source_url, e)
+
+        return result
 
     async def _translate_text(
         self,
@@ -237,3 +259,10 @@ def _is_generic_social_title(title: str, platform: str) -> bool:
         "youtube": {"youtube", "youtube video"},
     }
     return normalized in generic_titles.get(platform.strip().lower(), set())
+
+
+_SECTION_TITLE_RE = re.compile(r"^- \*\*.+\*\*", re.MULTILINE)
+
+
+def _has_section_titles(markdown: str) -> bool:
+    return len(_SECTION_TITLE_RE.findall(markdown)) >= 2
