@@ -9,6 +9,7 @@ from src.bibi_client import (
     BibiAPIError,
     BibiClient,
     TranscriptUnavailableError,
+    _resolve_routes,
 )
 from src.config import Settings
 
@@ -121,6 +122,24 @@ async def test_bibi_client_uses_web_summary_by_default(tmp_path) -> None:
     assert prompt_config["showEmoji"] is False
     assert prompt_config["detailLevel"] == 1500
     assert prompt_config["isRefresh"] is False
+
+
+def test_resolve_routes_locale_path_appends_desktop_for_browser() -> None:
+    routes = _resolve_routes("https://aitodo.co/zh")
+
+    assert routes.api_base_url == "https://aitodo.co"
+    assert routes.referer == "https://aitodo.co/zh/"
+    assert routes.browser_page_url == "https://aitodo.co/zh/desktop"
+    assert routes.origin == "https://aitodo.co"
+    assert routes.cookie_domain == "aitodo.co"
+
+
+def test_resolve_routes_root_base_url() -> None:
+    routes = _resolve_routes("https://bibigpt.co")
+
+    assert routes.api_base_url == "https://bibigpt.co"
+    assert routes.referer == "https://bibigpt.co/"
+    assert routes.browser_page_url == "https://bibigpt.co"
 
 
 def test_bibi_api_error_summarizes_html_body() -> None:

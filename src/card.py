@@ -78,7 +78,9 @@ def build_markdown_card(
             if preamble:
                 elements.append({"tag": "markdown", "content": preamble})
             elements.extend(
-                _build_section_panel(sec_title, sec_body) for sec_title, sec_body in sections
+                _build_section_panel(sec_title, sec_body)
+                for sec_title, sec_body in sections
+                if _strip_emoji_symbols(sec_title).strip()
             )
         else:
             safe_panel_title = _strip_emoji_symbols(panel_title).strip() or "正文"
