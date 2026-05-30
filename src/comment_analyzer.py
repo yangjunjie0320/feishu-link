@@ -295,7 +295,7 @@ class CommentAnalyzer:
             replies = payload.get("replies") if isinstance(payload.get("replies"), list) else []
             if not replies:
                 break
-            raw_comments.extend(_normalize_bilibili_reply(reply) for reply in replies)
+            raw_comments.extend(_normalize_bilibili_reply(reply, bvid) for reply in replies)
             if len(raw_comments) >= max_comments:
                 break
 
@@ -541,7 +541,7 @@ def _bilibili_wbi_image_key(value: object) -> str:
     return str(value).rsplit("/", 1)[-1].split(".", 1)[0]
 
 
-def _normalize_bilibili_reply(reply: object) -> object:
+def _normalize_bilibili_reply(reply: object, bvid: str = "") -> object:
     if not isinstance(reply, dict):
         return reply
 
@@ -550,15 +550,24 @@ def _normalize_bilibili_reply(reply: object) -> object:
     child_replies = reply.get("replies") if isinstance(reply.get("replies"), list) else []
     mid = member.get("mid")
     author_url = f"https://space.bilibili.com/{mid}" if mid else ""
+    rpid = reply.get("rpid")
+    parent = reply.get("parent") or 0
+    comment_url = ""
+    if bvid and rpid and not parent:
+        comment_url = (
+            f"https://www.bilibili.com/video/{bvid}"
+            f"?comment_on=1&comment_root_id={rpid}#reply{rpid}"
+        )
     return {
-        "id": reply.get("rpid"),
+        "id": rpid,
         "text": content.get("message"),
         "author": member.get("uname") or member.get("name") or member.get("mid"),
         "author_url": author_url,
+        "comment_url": comment_url,
         "like_count": reply.get("like"),
         "reply_count": reply.get("rcount") or reply.get("count") or len(child_replies),
-        "parent": reply.get("parent") or "",
-        "replies": [_normalize_bilibili_reply(child) for child in child_replies],
+        "parent": parent or "",
+        "replies": [_normalize_bilibili_reply(child, bvid) for child in child_replies],
     }
 
 
