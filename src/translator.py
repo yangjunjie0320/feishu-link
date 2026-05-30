@@ -145,7 +145,10 @@ class TitleTranslator:
             "temperature": 0.2,
             "max_tokens": max_tokens,
         }
-        if self._settings.deepseek_reasoning_effort is not None:
+        if not self._settings.deepseek_thinking_enabled:
+            payload["thinking"] = {"type": "disabled"}
+        elif self._settings.deepseek_reasoning_effort is not None:
+            payload["thinking"] = {"type": "enabled"}
             payload["reasoning_effort"] = self._settings.deepseek_reasoning_effort
         return payload
 
@@ -177,7 +180,7 @@ class TitleTranslator:
         if not choices:
             raise RuntimeError("DeepSeek returned no choices")
         message = choices[0].get("message", {})
-        content = str(message.get("content") or message.get("reasoning_content") or "").strip()
+        content = str(message.get("content") or "").strip()
         if preserve_linebreaks:
             return _clean_markdown_translation(content)
         return _clean_translation(content)

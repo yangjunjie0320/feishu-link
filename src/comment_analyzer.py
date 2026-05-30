@@ -472,7 +472,10 @@ class CommentAnalyzer:
             "temperature": 0.2,
             "max_tokens": 900,
         }
-        if self._settings.deepseek_reasoning_effort is not None:
+        if not self._settings.deepseek_thinking_enabled:
+            payload["thinking"] = {"type": "disabled"}
+        elif self._settings.deepseek_reasoning_effort is not None:
+            payload["thinking"] = {"type": "enabled"}
             payload["reasoning_effort"] = self._settings.deepseek_reasoning_effort
         return payload
 
@@ -510,7 +513,7 @@ class CommentAnalyzer:
         if not choices:
             raise CommentAnalysisError("LLM returned no choices.")
         message = choices[0].get("message", {})
-        content = str(message.get("content") or message.get("reasoning_content") or "").strip()
+        content = str(message.get("content") or "").strip()
         if not content:
             raise CommentAnalysisError("LLM returned empty content.")
         return parse_comment_insight(content, top_comment_count=len(top_comments))

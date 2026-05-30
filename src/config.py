@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
+    deepseek_thinking_enabled: bool = True
     deepseek_reasoning_effort: str | None = None
     translation_timeout: float = 10.0
     summary_rewrite_timeout: float = 120.0
