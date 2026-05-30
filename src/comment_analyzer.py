@@ -38,10 +38,20 @@ class CommentAnalysisError(Exception):
     pass
 
 
+_CJK_RE = re.compile(r"[㐀-鿿]")
+
+_TOP_COMMENT_COUNT = 8
+
+
+def _is_chinese(text: str) -> bool:
+    return bool(_CJK_RE.search(text))
+
+
 @dataclass(frozen=True)
 class VideoComment:
     text: str
     author: str = ""
+    author_url: str = ""
     like_count: int = 0
     reply_count: int = 0
     comment_id: str = ""
@@ -84,7 +94,7 @@ class CommentAnalyzer:
         if not comments:
             raise CommentAnalysisError("没有获取到评论内容。")
 
-        top_comments = select_top_comments(comments, count=3)
+        top_comments = select_top_comments(comments, count=_TOP_COMMENT_COUNT)
         prompt_comments = comments[: max(1, self._settings.comment_analysis_prompt_comments)]
         insight = await self._summarize_with_llm(
             url,
@@ -495,6 +505,7 @@ def comments_from_raw(
         VideoComment(
             text=comment.text,
             author=comment.author,
+            author_url=comment.author_url,
             like_count=comment.like_count,
             reply_count=max(comment.reply_count, reply_counts.get(comment.comment_id, 0)),
             comment_id=comment.comment_id,
@@ -522,10 +533,13 @@ def _normalize_bilibili_reply(reply: object) -> object:
     content = reply.get("content") if isinstance(reply.get("content"), dict) else {}
     member = reply.get("member") if isinstance(reply.get("member"), dict) else {}
     child_replies = reply.get("replies") if isinstance(reply.get("replies"), list) else []
+    mid = member.get("mid")
+    author_url = f"https://space.bilibili.com/{mid}" if mid else ""
     return {
         "id": reply.get("rpid"),
         "text": content.get("message"),
         "author": member.get("uname") or member.get("name") or member.get("mid"),
+        "author_url": author_url,
         "like_count": reply.get("like"),
         "reply_count": reply.get("rcount") or reply.get("count") or len(child_replies),
         "parent": reply.get("parent") or "",
@@ -580,13 +594,17 @@ def build_comment_analysis_prompt(
     *,
     total_comment_count: int | None = None,
 ) -> str:
+    n = len(top_comments)
     top_lines = "\n".join(
-        f"{index}. {_format_comment_for_prompt(comment, max_chars=420)}"
+        f"{index}. {_format_comment_for_prompt(comment, max_chars=300)}"
         for index, comment in enumerate(top_comments, start=1)
     )
     comment_lines = "\n".join(
         f"- {_format_comment_for_prompt(comment, max_chars=180)}"
         for comment in prompt_comments
+    )
+    translation_placeholders = ", ".join(
+        f'"第 {i} 条评论中文翻译（若已是中文则原样返回）"' for i in range(1, n + 1)
     )
     return (
         f"视频链接: {url}\n"
@@ -601,10 +619,9 @@ def build_comment_analysis_prompt(
         '  "consensus": ["共识 1", "共识 2"],\n'
         '  "controversy": ["争议 1"],\n'
         '  "notable_points": ["有价值的信息 1"],\n'
-        '  "top_comment_translations": ["第 1 条 Top 评论中文翻译", '
-        '"第 2 条 Top 评论中文翻译", "第 3 条 Top 评论中文翻译"]\n'
+        f'  "top_comment_translations": [{translation_placeholders}]\n'
         "}\n\n"
-        "排名最靠前的 3 条评论:\n"
+        f"排名最靠前的 {n} 条评论:\n"
         f"{top_lines}\n\n"
         "可用于整体总结的评论集合:\n"
         f"{comment_lines}"
@@ -632,6 +649,7 @@ def parse_comment_insight(raw_content: str, *, top_comment_count: int) -> Commen
         top_comment_translations=_clean_insight_list(
             data.get("top_comment_translations"),
             limit=max(1, top_comment_count),
+            strip_bullets=False,
         ),
     )
 
@@ -652,28 +670,29 @@ def render_comment_analysis_markdown(
         f"- 争议: {_join_points(insight.controversy)}",
         f"- 信息增量: {_join_points(insight.notable_points)}",
         "",
-        "**评论翻译**",
+        "**热门评论**",
     ]
 
     translations = insight.top_comment_translations
     for index, comment in enumerate(top_comments, start=1):
-        translated = (
-            translations[index - 1]
-            if index - 1 < len(translations)
-            else comment.text
-        )
-        author = comment.author or "unknown"
+        translation = translations[index - 1] if index - 1 < len(translations) else ""
+        display_text = _pick_display_text(comment.text, translation)
+
+        author = _clean_card_text(comment.author or "unknown")
+        author_md = f"[{author}]({comment.author_url})" if comment.author_url else f"**{author}**"
         lines.extend([
-            (
-                f"{index}. **{_clean_card_text(author)}** · "
-                f"点赞 {comment.like_count} · 子评论 {comment.reply_count}"
-            ),
-            f"> {_clean_card_text(translated)}",
-            f"原文: {_clean_card_text(_truncate(comment.text, 160))}",
+            f"{index}. {author_md} · 点赞 {comment.like_count} · 子评论 {comment.reply_count}",
+            f"> {_clean_card_text(display_text)}",
             "",
         ])
 
     return "\n".join(lines).strip()
+
+
+def _pick_display_text(original: str, translation: str) -> str:
+    if _is_chinese(original):
+        return original
+    return translation if translation else original
 
 
 def _clean_insight_text(value: object) -> str:
@@ -682,7 +701,12 @@ def _clean_insight_text(value: object) -> str:
     return _clean_card_text(str(value or ""))
 
 
-def _clean_insight_list(value: object, *, limit: int) -> list[str]:
+def _clean_insight_list(
+    value: object,
+    *,
+    limit: int,
+    strip_bullets: bool = True,
+) -> list[str]:
     if isinstance(value, list):
         items = value
     elif value:
@@ -692,7 +716,7 @@ def _clean_insight_list(value: object, *, limit: int) -> list[str]:
 
     cleaned: list[str] = []
     for item in items:
-        text = _clean_card_text(str(item))
+        text = _clean_card_text(str(item)) if strip_bullets else str(item).strip()
         if text:
             cleaned.append(text)
         if len(cleaned) >= limit:
@@ -774,15 +798,20 @@ def _comment_from_raw(raw: dict[str, Any]) -> VideoComment | None:
         or (len(replies) if isinstance(replies, list) else None)
         or len(_raw_child_comments(raw))
     )
+    author = str(
+        raw.get("author")
+        or user.get("username")
+        or raw.get("author_id")
+        or user.get("pk")
+        or ""
+    )
+    author_url = str(raw.get("author_url") or "")
+    if not author_url and user.get("username"):
+        author_url = f"https://www.instagram.com/{user['username']}/"
     return VideoComment(
         text=text,
-        author=str(
-            raw.get("author")
-            or user.get("username")
-            or raw.get("author_id")
-            or user.get("pk")
-            or ""
-        ),
+        author=author,
+        author_url=author_url,
         like_count=_as_int(
             raw.get("like_count")
             or raw.get("likes")

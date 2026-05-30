@@ -339,6 +339,7 @@ def test_render_comment_analysis_markdown_uses_fixed_template() -> None:
     assert "**简短结论**" not in markdown
     assert "**主要观察**" not in markdown
     assert "情绪" not in markdown
-    assert "\n\n**评论翻译**\n" in markdown
+    assert "\n\n**热门评论**\n" in markdown
     assert "1. **Alice** · 点赞 10 · 子评论 0" in markdown
     assert "> 很有帮助" in markdown
+    assert "原文:" not in markdown
