@@ -510,7 +510,7 @@ class CommentAnalyzer:
         if not choices:
             raise CommentAnalysisError("LLM returned no choices.")
         message = choices[0].get("message", {})
-        content = str(message.get("content") or "").strip()
+        content = str(message.get("content") or message.get("reasoning_content") or "").strip()
         if not content:
             raise CommentAnalysisError("LLM returned empty content.")
         return parse_comment_insight(content, top_comment_count=len(top_comments))

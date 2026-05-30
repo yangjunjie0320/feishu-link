@@ -177,7 +177,7 @@ class TitleTranslator:
         if not choices:
             raise RuntimeError("DeepSeek returned no choices")
         message = choices[0].get("message", {})
-        content = str(message.get("content") or "").strip()
+        content = str(message.get("content") or message.get("reasoning_content") or "").strip()
         if preserve_linebreaks:
             return _clean_markdown_translation(content)
         return _clean_translation(content)
