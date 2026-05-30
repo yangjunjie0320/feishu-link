@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import itertools
 import json
 import logging
 import re
@@ -220,12 +221,22 @@ class CommentAnalyzer:
             total_count=total_count,
         )
 
+    async def _resolve_bilibili_url(self, url: str) -> str:
+        if "b23.tv" not in url:
+            return url
+        try:
+            response = await self._client.head(url, follow_redirects=True)
+            return str(response.url)
+        except httpx.HTTPError:
+            return url
+
     async def _fetch_bilibili_comments(
         self,
         url: str,
         max_comments: int,
     ) -> FetchedComments:
-        bvid = _bilibili_bvid_from_url(url)
+        resolved_url = await self._resolve_bilibili_url(url)
+        bvid = _bilibili_bvid_from_url(resolved_url)
         if not bvid:
             raise CommentAnalysisError("Bilibili bvid not found.")
 
@@ -416,7 +427,7 @@ class CommentAnalyzer:
                     comment_url = (
                         f"https://www.youtube.com/watch?v={video_id}&lc={cid}" if cid else ""
                     )
-                    raw = {**raw, "comment_url": comment_url}
+                    raw["comment_url"] = comment_url
                 raw_comments.append(raw)
 
             return FetchedComments(
@@ -696,9 +707,10 @@ def render_comment_analysis_markdown(
     ]
 
     hot = ["- **热门评论**"]
-    translations = insight.top_comment_translations
-    for index, comment in enumerate(top_comments, start=1):
-        translation = translations[index - 1] if index - 1 < len(translations) else ""
+    for index, (comment, translation) in enumerate(
+        itertools.zip_longest(top_comments, insight.top_comment_translations, fillvalue=""),
+        start=1,
+    ):
         display_text = _pick_display_text(comment.text, translation)
 
         author = _clean_card_text(comment.author or "unknown")

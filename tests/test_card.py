@@ -4,7 +4,6 @@ from src.card import (
     _fmt_count,
     _fmt_duration,
     _format_source_tag,
-    _split_into_sections,
     _split_markdown,
     build_card,
     build_markdown_card,
@@ -113,9 +112,9 @@ def test_build_markdown_card_sectioned_renders_preamble_inline() -> None:
     assert len(panels) == 2
 
 
-def test_split_into_sections_returns_sections() -> None:
+def test_split_markdown_returns_sections() -> None:
     markdown = "- **总结**\n    - 点1\n    - 点2\n- **亮点**\n    - 亮1\n- **问题**\n    - Q1"
-    sections = _split_into_sections(markdown)
+    _, sections = _split_markdown(markdown)
 
     assert len(sections) == 3
     assert sections[0][0] == "总结"

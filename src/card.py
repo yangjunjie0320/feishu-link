@@ -380,12 +380,6 @@ def _split_markdown(markdown: str) -> tuple[str, list[tuple[str, str]]]:
     return "\n".join(preamble_lines).strip(), sections
 
 
-def _split_into_sections(markdown: str) -> list[tuple[str, str]]:
-    """Split normalized markdown into (title, body) pairs on top-level bullets."""
-    _, sections = _split_markdown(markdown)
-    return sections
-
-
 def _build_section_panel(title: str, body: str) -> dict[str, object]:
     safe_title = _strip_emoji_symbols(title).strip() or "内容"
     return {
