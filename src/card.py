@@ -80,7 +80,7 @@ def build_markdown_card(
             elements.extend(
                 _build_section_panel(sec_title, sec_body)
                 for sec_title, sec_body in sections
-                if _strip_emoji_symbols(sec_title).strip()
+                if _strip_emoji_symbols(sec_title).strip() and _section_has_content(sec_body)
             )
         else:
             safe_panel_title = _strip_emoji_symbols(panel_title).strip() or "正文"
@@ -378,6 +378,13 @@ def _split_markdown(markdown: str) -> tuple[str, list[tuple[str, str]]]:
         sections.append((current_title, "\n".join(current_body).strip()))
 
     return "\n".join(preamble_lines).strip(), sections
+
+
+_PLACEHOLDER_BODIES = {"无", "无内容", "n/a", "none", ""}
+
+
+def _section_has_content(body: str) -> bool:
+    return body.strip().lower() not in _PLACEHOLDER_BODIES
 
 
 def _build_section_panel(title: str, body: str) -> dict[str, object]:
