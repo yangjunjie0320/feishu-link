@@ -470,7 +470,7 @@ class CommentAnalyzer:
                 },
             ],
             "temperature": 0.2,
-            "max_tokens": 900,
+            "max_tokens": 1500,
         }
         if not self._settings.deepseek_thinking_enabled:
             payload["thinking"] = {"type": "disabled"}
@@ -703,6 +703,7 @@ def parse_comment_insight(raw_content: str, *, top_comment_count: int) -> Commen
             except json.JSONDecodeError as e:
                 raise CommentAnalysisError("LLM returned invalid JSON.") from e
         else:
+            logger.warning("comment insight parse failed, raw content: %s", content[:300])
             raise CommentAnalysisError("LLM returned invalid JSON.")
     if not isinstance(data, dict):
         raise CommentAnalysisError("LLM returned invalid JSON shape.")
