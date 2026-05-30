@@ -67,38 +67,36 @@ def build_markdown_card(
     source_url: str | None = None,
     collapsed: bool = False,
     panel_title: str = "正文",
+    sectioned: bool = False,
 ) -> str:
     safe_title = _strip_emoji_symbols(title).strip() or "Summary"
     content = _normalize_summary_markdown(markdown)
     if collapsed:
-        safe_panel_title = _strip_emoji_symbols(panel_title).strip() or "正文"
-        elements: list[dict[str, object]] = [
-            {
-                "tag": "collapsible_panel",
-                "expanded": False,
-                "header": {
-                    "title": {
-                        "tag": "markdown",
-                        "content": f"**{safe_panel_title}**",
+        sections = _split_into_sections(content) if sectioned else []
+        if len(sections) >= 2:
+            elements: list[dict[str, object]] = [
+                _build_section_panel(sec_title, sec_body)
+                for sec_title, sec_body in sections
+            ]
+        else:
+            safe_panel_title = _strip_emoji_symbols(panel_title).strip() or "正文"
+            elements = [
+                {
+                    "tag": "collapsible_panel",
+                    "expanded": False,
+                    "header": {
+                        "title": {
+                            "tag": "markdown",
+                            "content": f"**{safe_panel_title}**",
+                        },
+                        "vertical_align": "center",
+                        "padding": "4px 0px 4px 8px",
                     },
-                    "vertical_align": "center",
-                    "padding": "4px 0px 4px 8px",
-                },
-                "elements": [
-                    {
-                        "tag": "markdown",
-                        "content": content,
-                    }
-                ],
-            }
-        ]
+                    "elements": [{"tag": "markdown", "content": content}],
+                }
+            ]
     else:
-        elements = [
-            {
-                "tag": "markdown",
-                "content": content,
-            }
-        ]
+        elements = [{"tag": "markdown", "content": content}]
 
     if source_url:
         elements.append(
@@ -347,6 +345,42 @@ def _normalize_bullet_indent(indent: int, *, indent_unit: int) -> str:
 
 def _strip_emoji_symbols(text: str) -> str:
     return "".join(ch for ch in text if not _is_emoji_or_modifier(ch))
+
+
+def _split_into_sections(markdown: str) -> list[tuple[str, str]]:
+    """Split normalized markdown into (title, body) pairs on top-level bullets."""
+    sections: list[tuple[str, str]] = []
+    current_title: str | None = None
+    current_body: list[str] = []
+
+    for line in markdown.splitlines():
+        if line and not line.startswith(" ") and line.startswith("- "):
+            if current_title is not None:
+                sections.append((current_title, "\n".join(current_body).strip()))
+            current_title = re.sub(r"\*\*(.+?)\*\*", r"\1", line[2:]).strip()
+            current_body = []
+        elif current_title is not None:
+            stripped = line[4:] if line.startswith("    ") else line
+            current_body.append(stripped)
+
+    if current_title is not None:
+        sections.append((current_title, "\n".join(current_body).strip()))
+
+    return sections
+
+
+def _build_section_panel(title: str, body: str) -> dict[str, object]:
+    safe_title = _strip_emoji_symbols(title).strip() or "内容"
+    return {
+        "tag": "collapsible_panel",
+        "expanded": False,
+        "header": {
+            "title": {"tag": "markdown", "content": f"**{safe_title}**"},
+            "vertical_align": "center",
+            "padding": "4px 0px 4px 8px",
+        },
+        "elements": [{"tag": "markdown", "content": body or "(无内容)"}],
+    }
 
 
 def _is_emoji_or_modifier(ch: str) -> bool:

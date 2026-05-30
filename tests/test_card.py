@@ -4,6 +4,7 @@ from src.card import (
     _fmt_count,
     _fmt_duration,
     _format_source_tag,
+    _split_into_sections,
     build_card,
     build_markdown_card,
 )
@@ -86,6 +87,56 @@ def test_markdown_card_uses_markdown_component_and_normalizes_bullets() -> None:
     link = card["body"]["elements"][1]
     assert link["tag"] == "markdown"
     assert link["content"] == "[打开视频](https://youtu.be/abc123)"
+
+
+def test_split_into_sections_returns_sections() -> None:
+    markdown = "- **总结**\n    - 点1\n    - 点2\n- **亮点**\n    - 亮1\n- **问题**\n    - Q1"
+    sections = _split_into_sections(markdown)
+
+    assert len(sections) == 3
+    assert sections[0][0] == "总结"
+    assert "点1" in sections[0][1]
+    assert "点2" in sections[0][1]
+    assert sections[1][0] == "亮点"
+    assert sections[2][0] == "问题"
+
+
+def test_build_markdown_card_sectioned_creates_per_section_panels() -> None:
+    markdown = "- **总结**\n    - 一句话\n- **亮点**\n    - 亮点1\n- **问题**\n    - 问题1"
+    card = json.loads(
+        build_markdown_card(
+            "BibiGPT 总结",
+            markdown,
+            source_url="https://youtu.be/abc",
+            collapsed=True,
+            sectioned=True,
+        )
+    )
+    elements = card["body"]["elements"]
+    panels = [el for el in elements if el.get("tag") == "collapsible_panel"]
+
+    assert len(panels) == 3
+    assert panels[0]["header"]["title"]["content"] == "**总结**"
+    assert panels[1]["header"]["title"]["content"] == "**亮点**"
+    assert panels[2]["header"]["title"]["content"] == "**问题**"
+    assert all(panel["expanded"] is False for panel in panels)
+
+
+def test_build_markdown_card_sectioned_falls_back_when_single_section() -> None:
+    markdown = "- 只有一节\n    - 内容"
+    card = json.loads(
+        build_markdown_card(
+            "Title",
+            markdown,
+            collapsed=True,
+            panel_title="正文",
+            sectioned=True,
+        )
+    )
+    panels = [el for el in card["body"]["elements"] if el.get("tag") == "collapsible_panel"]
+
+    assert len(panels) == 1
+    assert panels[0]["header"]["title"]["content"] == "**正文**"
 
 
 def test_markdown_card_preserves_nested_bullet_levels() -> None:
