@@ -4,59 +4,17 @@ import httpx
 import pytest
 import respx
 
-from src.bibi_client import AuthenticationError, BibiAPIError, BibiClient
+from src.bibi_client import (
+    AuthenticationError,
+    BibiAPIError,
+    BibiClient,
+    TranscriptUnavailableError,
+)
 from src.config import Settings
 
 
 @respx.mock
-async def test_bibi_client_appends_fixed_markdown_bullet_prompt() -> None:
-    route = respx.post("https://bibigpt.test/api/v1/chat/completions").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": "## Summary\n- Point"}}],
-                "model": "bibigpt",
-                "usage": {
-                    "prompt_tokens": 1,
-                    "completion_tokens": 2,
-                    "total_tokens": 3,
-                },
-            },
-        )
-    )
-    settings = Settings(
-        bibigpt_base_url="https://bibigpt.test",
-        bibigpt_access_mode="api",
-        cookie_file="",
-    )
-
-    result = await BibiClient(settings).summarize(
-        "https://youtu.be/abc123",
-        prompt="Focus on the business implications.",
-    )
-
-    request = route.calls.last.request
-    body = json.loads(request.content)
-    text_parts = [
-        part["text"]
-        for part in body["messages"][0]["content"]
-        if part["type"] == "text"
-    ]
-    prompt = text_parts[0]
-
-    assert result.content == "## Summary\n- Point"
-    assert "Focus on the business implications." in prompt
-    assert "Do not use any emoji." in prompt
-    assert "Use Markdown formatting." in prompt
-    assert "Do not use Markdown headings" in prompt
-    assert "Use nested bullet points only" in prompt
-    assert 'Use "-" as the only unordered bullet marker' in prompt
-    assert "Use four spaces for each nested bullet level" in prompt
-    assert "Do not use numbered lists." in prompt
-
-
-@respx.mock
-async def test_bibi_client_routes_locale_base_url_to_origin_api(tmp_path) -> None:
+async def test_bibi_client_routes_locale_base_url_to_origin_web(tmp_path) -> None:
     cookie_file = tmp_path / "cookies.txt"
     cookie_file.write_text(
         "\n".join([
@@ -66,34 +24,43 @@ async def test_bibi_client_routes_locale_base_url_to_origin_api(tmp_path) -> Non
         ]),
         encoding="utf-8",
     )
-    route = respx.post("https://aitodo.co/api/v1/chat/completions").mock(
+    route = respx.post(
+        "https://aitodo.co/api/trpc/video.summaryBySetting?batch=1"
+    ).mock(
         return_value=httpx.Response(
             200,
-            json={
-                "choices": [{"message": {"content": "- Point"}}],
-                "model": "bibigpt",
-                "usage": {
-                    "prompt_tokens": 1,
-                    "completion_tokens": 2,
-                    "total_tokens": 3,
-                },
-            },
+            json=[
+                {
+                    "result": {
+                        "data": {
+                            "json": {
+                                "summary": "- Point",
+                                "fromCache": False,
+                            }
+                        }
+                    }
+                }
+            ],
         )
     )
     settings = Settings(
         bibigpt_base_url="https://aitodo.co/zh",
-        bibigpt_access_mode="api",
         cookie_file=str(cookie_file),
     )
 
     result = await BibiClient(settings).summarize("https://youtu.be/abc123")
 
     request = route.calls.last.request
+    body = json.loads(request.content)
+    prompt_config = body["0"]["json"]["promptConfig"]
+
     assert result.content == "- Point"
-    assert str(request.url) == "https://aitodo.co/api/v1/chat/completions"
+    assert str(request.url) == "https://aitodo.co/api/trpc/video.summaryBySetting?batch=1"
     assert request.headers["Origin"] == "https://aitodo.co"
     assert request.headers["Referer"] == "https://aitodo.co/zh/"
     assert request.headers["Cookie"] == "session=abc123"
+    assert prompt_config["customPrompt"] == ""
+    assert "输出要求" not in prompt_config["customPrompt"]
 
 
 @respx.mock
@@ -140,11 +107,20 @@ async def test_bibi_client_uses_web_summary_by_default(tmp_path) -> None:
     assert request.headers["Referer"] == "https://aitodo.co/zh/"
     assert body["0"]["json"]["url"] == "https://youtu.be/abc123"
     assert prompt_config["customPrompt"].startswith("Focus on the business implications.")
-    assert "Do not use any emoji." in prompt_config["customPrompt"]
-    assert "Do not use Markdown headings" in prompt_config["customPrompt"]
+    assert "必须用简体中文输出" in prompt_config["customPrompt"]
+    assert "不要使用 emoji" in prompt_config["customPrompt"]
+    assert "使用 Markdown，尽量保留原有结构" in prompt_config["customPrompt"]
+    assert "Markdown 各级标题都改成无序列表+加粗" in prompt_config["customPrompt"]
+    assert "允许使用多级无序列表，用缩进表达层级" in prompt_config["customPrompt"]
+    assert '无序列表只能使用 "-"' in prompt_config["customPrompt"]
+    assert "不要使用编号列表" in prompt_config["customPrompt"]
+    assert "保持简洁, 只保留最重要的信息。" not in prompt_config["customPrompt"]
+    assert "避免多层 bullet, 尽量只使用单层列表。" not in prompt_config["customPrompt"]
     assert prompt_config["outputLanguage"] == "中文"
+    assert prompt_config["autoTranslateLanguage"] == "中文"
     assert prompt_config["showEmoji"] is False
     assert prompt_config["detailLevel"] == 1500
+    assert prompt_config["isRefresh"] is False
 
 
 def test_bibi_api_error_summarizes_html_body() -> None:
@@ -157,6 +133,38 @@ def test_bibi_api_error_summarizes_html_body() -> None:
     assert "BibiGPT API error (HTTP 500)" in message
     assert "service returned an HTML error page" in message
     assert "<!DOCTYPE html>" not in message
+
+
+@respx.mock
+async def test_bibi_client_rejects_missing_transcript_response(tmp_path) -> None:
+    respx.post("https://aitodo.co/api/trpc/video.summaryBySetting?batch=1").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "result": {
+                        "data": {
+                            "json": {
+                                "summary": (
+                                    "Please provide the transcript you would like me "
+                                    "to summarize!"
+                                ),
+                                "fromCache": False,
+                            }
+                        }
+                    }
+                }
+            ],
+        )
+    )
+    settings = Settings(
+        bibigpt_base_url="https://aitodo.co/zh",
+        cookie_file="",
+        platform_cookie_files={"bibigpt": str(tmp_path / "missing.txt")},
+    )
+
+    with pytest.raises(TranscriptUnavailableError, match="did not receive a transcript"):
+        await BibiClient(settings).summarize("https://youtu.be/cBBZrjwqWZc")
 
 
 async def test_bibi_client_rejects_corrupt_supabase_auth_cookie(tmp_path) -> None:
@@ -242,7 +250,59 @@ async def test_bibi_client_browser_mode_uses_web_endpoint_with_profile(
     assert captured["method"] == "POST"
     assert body["0"]["json"]["url"] == "https://youtu.be/abc123"  # type: ignore[index]
     assert prompt_config["customPrompt"].startswith("Use the web page.")
-    assert "Do not use any emoji." in prompt_config["customPrompt"]
+    assert "必须用简体中文输出" in prompt_config["customPrompt"]
+    assert "Markdown 各级标题都改成无序列表+加粗" in prompt_config["customPrompt"]
+    assert "允许使用多级无序列表，用缩进表达层级" in prompt_config["customPrompt"]
+    assert prompt_config["isRefresh"] is True
+
+
+@respx.mock
+async def test_bibi_client_passes_model_to_promptconfig(tmp_path) -> None:
+    route = respx.post(
+        "https://aitodo.co/api/trpc/video.summaryBySetting?batch=1"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json=[{"result": {"data": {"json": {"summary": "- Point", "fromCache": False}}}}],
+        )
+    )
+    settings = Settings(
+        bibigpt_base_url="https://aitodo.co/zh",
+        bibigpt_model="anthropic/claude-sonnet-4-6",
+        cookie_file="",
+        platform_cookie_files={"bibigpt": str(tmp_path / "missing.txt")},
+    )
+
+    await BibiClient(settings).summarize("https://youtu.be/abc123")
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["0"]["json"]["promptConfig"]["model"] == "anthropic/claude-sonnet-4-6"
+
+
+async def test_bibi_client_browser_passes_model_to_promptconfig(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = Settings(
+        bibigpt_base_url="https://aitodo.co/zh",
+        bibigpt_model="deepseek-v4-pro",
+        bibigpt_access_mode="browser",
+        cookie_file="",
+        bibigpt_browser_profile_dir=str(tmp_path / "profile"),
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_browser_fetch(self, url, body, *, method="POST"):
+        captured["body"] = body
+        return [{"result": {"data": {"json": {"summary": "- Point", "fromCache": False}}}}]
+
+    monkeypatch.setattr(BibiClient, "_browser_fetch_json", fake_browser_fetch)
+
+    await BibiClient(settings).summarize("https://youtu.be/abc123")
+
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["0"]["json"]["promptConfig"]["model"] == "deepseek-v4-pro"  # type: ignore[index]
 
 
 async def test_bibi_client_browser_user_probe_reports_missing_login(

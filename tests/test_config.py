@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from src.bibi_client import BibiClient
 from src.config import Settings
 
@@ -32,7 +35,7 @@ def test_bibi_client_uses_bibigpt_platform_cookie_file(tmp_path: Path) -> None:
     cookie_file.write_text(
         "\n".join([
             "# Netscape HTTP Cookie File",
-            ".bibigpt.co\tTRUE\t/\tTRUE\t1800000000\tsession\tabc",
+            ".aitodo.co\tTRUE\t/\tTRUE\t1800000000\tsession\tabc",
         ]),
         encoding="utf-8",
     )
@@ -44,3 +47,15 @@ def test_bibi_client_uses_bibigpt_platform_cookie_file(tmp_path: Path) -> None:
     client = BibiClient(settings)
 
     assert client._headers["Cookie"] == "session=abc"
+
+
+def test_bibigpt_access_mode_rejects_api() -> None:
+    with pytest.raises(ValidationError, match="must be 'web' or 'browser'"):
+        Settings(bibigpt_access_mode="api")
+
+
+def test_bibigpt_defaults() -> None:
+    settings = Settings()
+
+    assert settings.bibigpt_base_url == "https://aitodo.co/zh"
+    assert settings.bibigpt_model == "openai/gpt-5.5"

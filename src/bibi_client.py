@@ -25,14 +25,13 @@ _USER_AGENT = (
 )
 _OUTPUT_INSTRUCTIONS = """\
 
-Output requirements:
-- Do not use any emoji.
-- Use Markdown formatting.
-- Do not use Markdown headings or standalone section titles.
-- Use nested bullet points only to separate sections and show hierarchy.
-- Use "-" as the only unordered bullet marker; do not use "*" or "+" for lists.
-- Use four spaces for each nested bullet level.
-- Do not use numbered lists."""
+输出要求:
+- 必须用简体中文输出, 非中文内容要翻译成中文。不要使用 emoji。
+- 使用 Markdown，尽量保留原有结构。
+- Markdown 各级标题都改成无序列表+加粗。
+- 允许使用多级无序列表，用缩进表达层级。
+- 无序列表只能使用 "-", 不要使用 "*" 或 "+"。
+- 不要使用编号列表。"""
 
 
 class BibiAPIError(Exception):
@@ -46,6 +45,10 @@ class BibiAPIError(Exception):
 
 class AuthenticationError(BibiAPIError):
     """Raised when cookie authentication fails (401/403)."""
+
+
+class TranscriptUnavailableError(BibiAPIError):
+    """Raised when BibiGPT asks for a transcript instead of returning a summary."""
 
 
 @dataclass(frozen=True)
@@ -92,7 +95,7 @@ class BibiClient:
         video_url: str,
         prompt: str | None = None,
     ) -> SummaryResult:
-        """Summarize a video using the chat/completions endpoint.
+        """Summarize a video using the BibiGPT web endpoint.
 
         Args:
             video_url: URL of the video to summarize.
@@ -104,54 +107,23 @@ class BibiClient:
         if self._cookie_error and self._settings.bibigpt_access_mode != "browser":
             raise AuthenticationError(0, self._cookie_error)
 
-        effective_prompt = _with_output_instructions(
-            prompt or self._settings.bibigpt_default_prompt
-        )
+        base_prompt = (prompt or self._settings.bibigpt_default_prompt).strip()
+        effective_prompt = _with_output_instructions(base_prompt) if base_prompt else ""
 
-        if self._settings.bibigpt_access_mode == "api":
-            return await self._summarize_api(video_url, effective_prompt)
         if self._settings.bibigpt_access_mode == "browser":
             return await self._summarize_browser(video_url, effective_prompt)
         return await self._summarize_web(video_url, effective_prompt)
-
-    async def _summarize_api(self, video_url: str, prompt: str) -> SummaryResult:
-        body: dict[str, Any] = {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "video_url", "video_url": {"url": video_url}},
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-            "stream": False,
-        }
-
-        url = f"{self._routes.api_base_url}/api/v1/chat/completions"
-        logger.info("Requesting summary for %s", video_url)
-
-        async with httpx.AsyncClient(timeout=self._settings.bibigpt_timeout) as client:
-            response = await client.post(url, json=body, headers=self._headers)
-
-        self._check_response(response)
-        data = response.json()
-
-        result = SummaryResult.from_response(data, video_url=video_url)
-        logger.info(
-            "Summary complete (model=%s, tokens=%d, cached=%s)",
-            result.model,
-            result.usage.total_tokens,
-            result.from_cache,
-        )
-        return result
 
     async def _summarize_browser(self, video_url: str, prompt: str) -> SummaryResult:
         body: dict[str, Any] = {
             "0": {
                 "json": {
                     "url": video_url,
-                    "promptConfig": _web_prompt_config(prompt),
+                    "promptConfig": _web_prompt_config(
+                        prompt,
+                        model=self._settings.bibigpt_model,
+                        refresh=True,
+                    ),
                 }
             }
         }
@@ -162,7 +134,9 @@ class BibiClient:
         raw_data = await self._browser_fetch_json(url, body)
         data = _extract_trpc_data(raw_data)
 
-        result = SummaryResult.from_web_response(data, video_url=video_url)
+        result = _validate_summary_result(
+            SummaryResult.from_web_response(data, video_url=video_url)
+        )
         logger.info(
             "Browser-backed web summary complete (model=%s, cached=%s)",
             result.model,
@@ -175,7 +149,10 @@ class BibiClient:
             "0": {
                 "json": {
                     "url": video_url,
-                    "promptConfig": _web_prompt_config(prompt),
+                    "promptConfig": _web_prompt_config(
+                        prompt,
+                        model=self._settings.bibigpt_model,
+                    ),
                 }
             }
         }
@@ -189,7 +166,9 @@ class BibiClient:
         self._check_response(response)
         data = _extract_trpc_data(response.json())
 
-        result = SummaryResult.from_web_response(data, video_url=video_url)
+        result = _validate_summary_result(
+            SummaryResult.from_web_response(data, video_url=video_url)
+        )
         logger.info(
             "Web summary complete (model=%s, cached=%s)",
             result.model,
@@ -362,20 +341,50 @@ def _with_output_instructions(prompt: str) -> str:
     return f"{prompt.strip()}\n\n{_OUTPUT_INSTRUCTIONS.strip()}"
 
 
-def _web_prompt_config(prompt: str) -> dict[str, Any]:
+def _validate_summary_result(result: SummaryResult) -> SummaryResult:
+    if _looks_like_missing_transcript_response(result.content):
+        raise TranscriptUnavailableError(
+            200,
+            (
+                "BibiGPT did not receive a transcript for this video. "
+                "The video may have no captions, blocked captions, or a temporary "
+                "YouTube transcript fetch issue."
+            ),
+        )
+    return result
+
+
+def _looks_like_missing_transcript_response(content: str) -> bool:
+    normalized = " ".join(content.strip().lower().split())
+    if not normalized:
+        return False
+    return any(
+        phrase in normalized
+        for phrase in (
+            "please provide the transcript",
+            "paste the text",
+            "once you paste",
+            "请提供",
+            "转录文本",
+            "粘贴文本",
+        )
+    )
+
+
+def _web_prompt_config(prompt: str, *, model: str = "", refresh: bool = False) -> dict[str, Any]:
     return {
-        "model": "",
+        "model": model,
         "customPrompt": prompt,
         "customPromptTitle": "Feishu Link",
         "outputLanguage": "中文",
         "audioLanguage": "auto",
         "whisperPrompt": "",
-        "autoTranslateLanguage": "",
+        "autoTranslateLanguage": "中文",
         "transcribeProvider": "auto",
         "showEmoji": False,
         "detailLevel": 1500,
         "sentenceNumber": 5,
-        "isRefresh": False,
+        "isRefresh": refresh,
         "showTimestamp": True,
     }
 

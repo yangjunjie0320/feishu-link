@@ -77,20 +77,19 @@ platform_cookie_files: {}
 # to send a summary instead of appending the video.
 # Use "web" to call the normal BibiGPT web endpoint. Use "browser" to call the
 # same web endpoint from a persisted Chromium profile when direct HTTP fails.
-# Use "api" only when your account has BibiGPT OpenAPI access.
 bibigpt_access_mode: "web"
-# Use "https://aitodo.co/zh" for the international/overseas route.
-bibigpt_base_url: "https://bibigpt.co"
+bibigpt_base_url: "https://aitodo.co/zh"
+# Model ID passed to BibiGPT's promptConfig.model field. Empty string uses BibiGPT's default.
+# Available options include: openai/gpt-5.5, anthropic/claude-sonnet-4-6, gemini-3.5-flash,
+# deepseek-v4-pro, and others visible in the aitodo.co settings page model selector.
+bibigpt_model: "openai/gpt-5.5"
 bibigpt_timeout: 120.0
 bibigpt_browser_profile_dir: "/app/browser-data/bibigpt"
 bibigpt_browser_headless: true
 bibigpt_browser_timeout: 120.0
-bibigpt_default_prompt: |
-  Please summarize this video comprehensively:
-  1. One-sentence overview
-  2. Key points
-  3. Important details and highlights
-  4. Conclusion and evaluation
+# Leave empty to use BibiGPT's built-in prompt. Set this only when you want a
+# default custom prompt for all summaries.
+bibigpt_default_prompt: ""
 
 # Optional title translation. Only non-Chinese titles are translated.
 title_translation_enabled: false
@@ -98,3 +97,8 @@ deepseek_api_key: ""
 deepseek_base_url: "https://api.deepseek.com"
 deepseek_model: "deepseek-chat"
 translation_timeout: 10.0
+
+# Comment analysis action. Uses the DeepSeek-compatible chat completions config above.
+comment_analysis_max_comments: 200
+comment_analysis_prompt_comments: 120
+comment_analysis_timeout: 120.0

@@ -33,17 +33,13 @@ class Settings(BaseSettings):
 
     # BibiGPT integration
     bibigpt_access_mode: str = "web"
-    bibigpt_base_url: str = "https://bibigpt.co"
+    bibigpt_base_url: str = "https://aitodo.co/zh"
+    bibigpt_model: str = "openai/gpt-5.5"
     bibigpt_timeout: float = 120.0
     bibigpt_browser_profile_dir: str = "/app/browser-data/bibigpt"
     bibigpt_browser_headless: bool = True
     bibigpt_browser_timeout: float = 120.0
-    bibigpt_default_prompt: str = """\
-Please summarize this video comprehensively:
-1. One-sentence overview
-2. Key points
-3. Important details and highlights
-4. Conclusion and evaluation"""
+    bibigpt_default_prompt: str = ""
 
     youtube_api_key: str = ""
     link_allowlist: list[str] = []
@@ -65,6 +61,9 @@ Please summarize this video comprehensively:
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
     translation_timeout: float = 10.0
+    comment_analysis_max_comments: int = 200
+    comment_analysis_prompt_comments: int = 120
+    comment_analysis_timeout: float = 120.0
 
     _allowlist_patterns: list[re.Pattern[str]] = []
     _blacklist_patterns: list[re.Pattern[str]] = []
@@ -94,8 +93,8 @@ Please summarize this video comprehensively:
     @classmethod
     def _parse_bibigpt_access_mode(cls, v: Any) -> str:
         mode = str(v or "web").strip().lower()
-        if mode not in {"web", "api", "browser"}:
-            raise ValueError("bibigpt_access_mode must be 'web', 'api', or 'browser'")
+        if mode not in {"web", "browser"}:
+            raise ValueError("bibigpt_access_mode must be 'web' or 'browser'")
         return mode
 
     @model_validator(mode="after")
