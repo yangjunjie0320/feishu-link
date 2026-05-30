@@ -5,6 +5,7 @@ from src.card import (
     _fmt_duration,
     _format_source_tag,
     _split_into_sections,
+    _split_markdown,
     build_card,
     build_markdown_card,
 )
@@ -87,6 +88,29 @@ def test_markdown_card_uses_markdown_component_and_normalizes_bullets() -> None:
     link = card["body"]["elements"][1]
     assert link["tag"] == "markdown"
     assert link["content"] == "[打开视频](https://youtu.be/abc123)"
+
+
+def test_split_markdown_extracts_preamble() -> None:
+    markdown = "`#AI` `#技术`\n\n- **总结**\n    - 一句话\n- **亮点**\n    - 亮点1"
+    preamble, sections = _split_markdown(markdown)
+
+    assert "`#AI`" in preamble
+    assert "`#技术`" in preamble
+    assert len(sections) == 2
+    assert sections[0][0] == "总结"
+
+
+def test_build_markdown_card_sectioned_renders_preamble_inline() -> None:
+    markdown = "`#AI` `#技术`\n\n- **总结**\n    - 内容\n- **亮点**\n    - 亮点1"
+    card = json.loads(
+        build_markdown_card("Title", markdown, collapsed=True, sectioned=True)
+    )
+    elements = card["body"]["elements"]
+
+    assert elements[0]["tag"] == "markdown"
+    assert "`#AI`" in elements[0]["content"]
+    panels = [el for el in elements if el.get("tag") == "collapsible_panel"]
+    assert len(panels) == 2
 
 
 def test_split_into_sections_returns_sections() -> None:

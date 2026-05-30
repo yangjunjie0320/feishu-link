@@ -72,12 +72,14 @@ def build_markdown_card(
     safe_title = _strip_emoji_symbols(title).strip() or "Summary"
     content = _normalize_summary_markdown(markdown)
     if collapsed:
-        sections = _split_into_sections(content) if sectioned else []
+        preamble, sections = _split_markdown(content) if sectioned else ("", [])
         if len(sections) >= 2:
-            elements: list[dict[str, object]] = [
-                _build_section_panel(sec_title, sec_body)
-                for sec_title, sec_body in sections
-            ]
+            elements: list[dict[str, object]] = []
+            if preamble:
+                elements.append({"tag": "markdown", "content": preamble})
+            elements.extend(
+                _build_section_panel(sec_title, sec_body) for sec_title, sec_body in sections
+            )
         else:
             safe_panel_title = _strip_emoji_symbols(panel_title).strip() or "正文"
             elements = [
@@ -347,8 +349,13 @@ def _strip_emoji_symbols(text: str) -> str:
     return "".join(ch for ch in text if not _is_emoji_or_modifier(ch))
 
 
-def _split_into_sections(markdown: str) -> list[tuple[str, str]]:
-    """Split normalized markdown into (title, body) pairs on top-level bullets."""
+def _split_markdown(markdown: str) -> tuple[str, list[tuple[str, str]]]:
+    """Split normalized markdown into (preamble, sections).
+
+    Preamble is any content before the first top-level bullet; sections are
+    (title, body) pairs split on top-level '- ' lines.
+    """
+    preamble_lines: list[str] = []
     sections: list[tuple[str, str]] = []
     current_title: str | None = None
     current_body: list[str] = []
@@ -362,10 +369,18 @@ def _split_into_sections(markdown: str) -> list[tuple[str, str]]:
         elif current_title is not None:
             stripped = line[4:] if line.startswith("    ") else line
             current_body.append(stripped)
+        else:
+            preamble_lines.append(line)
 
     if current_title is not None:
         sections.append((current_title, "\n".join(current_body).strip()))
 
+    return "\n".join(preamble_lines).strip(), sections
+
+
+def _split_into_sections(markdown: str) -> list[tuple[str, str]]:
+    """Split normalized markdown into (title, body) pairs on top-level bullets."""
+    _, sections = _split_markdown(markdown)
     return sections
 
 
