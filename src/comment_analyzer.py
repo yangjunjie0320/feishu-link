@@ -440,6 +440,42 @@ class CommentAnalyzer:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _extract)
 
+    def _build_comment_llm_payload(
+        self,
+        url: str,
+        comments: list[VideoComment],
+        top_comments: list[VideoComment],
+        prompt_comments: list[VideoComment],
+        total_comment_count: int | None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "model": self._settings.deepseek_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是社交媒体评论区分析助手。只输出严格 JSON, 不要输出 Markdown。"
+                        "所有字段必须使用简体中文。保持简洁, 不要使用 emoji, 不要编造评论。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": build_comment_analysis_prompt(
+                        url,
+                        comments,
+                        top_comments,
+                        prompt_comments,
+                        total_comment_count=total_comment_count,
+                    ),
+                },
+            ],
+            "temperature": 0.2,
+            "max_tokens": 900,
+        }
+        if self._settings.deepseek_reasoning_effort is not None:
+            payload["reasoning_effort"] = self._settings.deepseek_reasoning_effort
+        return payload
+
     async def _summarize_with_llm(
         self,
         url: str,
@@ -459,31 +495,9 @@ class CommentAnalyzer:
                 "Authorization": f"Bearer {self._settings.deepseek_api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": self._settings.deepseek_model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "你是社交媒体评论区分析助手。只输出严格 JSON, 不要输出 Markdown。"
-                            "所有字段必须使用简体中文。保持简洁, 不要使用 emoji, 不要编造评论。"
-                            "不要输出情绪字段。"
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": build_comment_analysis_prompt(
-                            url,
-                            comments,
-                            top_comments,
-                            prompt_comments,
-                            total_comment_count=total_comment_count,
-                        ),
-                    },
-                ],
-                "temperature": 0.2,
-                "max_tokens": 900,
-            },
+            json=self._build_comment_llm_payload(
+                url, comments, top_comments, prompt_comments, total_comment_count
+            ),
             timeout=self._settings.comment_analysis_timeout,
         )
         if response.status_code >= 400:

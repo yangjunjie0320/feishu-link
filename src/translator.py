@@ -133,6 +133,22 @@ class TitleTranslator:
 
         return result
 
+    def _build_chat_payload(
+        self, system_prompt: str, user_prompt: str, max_tokens: int
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "model": self._settings.deepseek_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": max_tokens,
+        }
+        if self._settings.deepseek_reasoning_effort is not None:
+            payload["reasoning_effort"] = self._settings.deepseek_reasoning_effort
+        return payload
+
     async def _translate_text(
         self,
         text: str,
@@ -150,21 +166,7 @@ class TitleTranslator:
                 "Authorization": f"Bearer {self._settings.deepseek_api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": self._settings.deepseek_model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt,
-                    },
-                    {
-                        "role": "user",
-                        "content": user_prompt,
-                    },
-                ],
-                "temperature": 0.2,
-                "max_tokens": max_tokens,
-            },
+            json=self._build_chat_payload(system_prompt, user_prompt, max_tokens),
             timeout=timeout if timeout is not None else self._settings.translation_timeout,
         )
         if response.status_code >= 400:
