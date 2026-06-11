@@ -90,6 +90,23 @@ bibigpt_browser_timeout: 120.0
 # Leave empty to use BibiGPT's built-in prompt. Set this only when you want a
 # default custom prompt for all summaries.
 bibigpt_default_prompt: ""
+# After a successful browser-mode request, write the live context cookies back to
+# the BibiGPT cookie file so the HTTP path stays fresh as supabase tokens rotate.
+bibigpt_cookie_writeback: true
+
+# Optional cookie auto-refresh for platforms whose exported cookies expire
+# (e.g. Bilibili SESSDATA). Disabled by default. When enabled, each listed
+# platform keeps a persistent logged-in Chromium profile; before a yt-dlp call,
+# if its cookie is missing/near expiry, fresh cookies are exported from the live
+# browser context and written back to the platform cookie file. Log in once with
+# `python main.py --browser-login <platform>` before enabling.
+cookie_refresh_enabled: false
+cookie_refresh_platforms: []        # e.g. ["bilibili", "x"]
+cookie_refresh_profile_dir: "/app/browser-data/cookies"   # per-platform subdir
+cookie_refresh_browser_headless: true
+cookie_refresh_browser_timeout: 60.0
+cookie_refresh_stale_before_seconds: 86400   # refresh if expiring within 1 day
+cookie_refresh_min_interval_seconds: 600     # in-process throttle per platform
 
 # Optional title translation. Only non-Chinese titles are translated.
 title_translation_enabled: false
