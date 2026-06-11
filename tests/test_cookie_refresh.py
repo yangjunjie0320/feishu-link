@@ -7,6 +7,7 @@ import pytest
 import src.cookie_refresh as cookie_refresh
 from src.config import Settings
 from src.cookie_refresh import (
+    browser_login,
     cookie_is_stale,
     ensure_fresh_cookies,
     refresh_cookies,
@@ -178,3 +179,37 @@ async def test_ensure_fresh_cookies_refreshes_when_stale(monkeypatch, tmp_path) 
 
     assert called_with["platform"] == "bilibili"
     assert called_with["target"] == str(target)
+
+
+@pytest.mark.asyncio
+async def test_browser_login_rejects_unknown_platform() -> None:
+    assert await browser_login("youtube", Settings()) is False
+
+
+@pytest.mark.asyncio
+async def test_browser_login_saves_cookies_when_logged_in(monkeypatch, tmp_path) -> None:
+    target = tmp_path / "bilibili.txt"
+    far_future = time.time() + 30 * 86400
+
+    class FakePage:
+        async def goto(self, *args, **kwargs):
+            return None
+
+    class FakeContext:
+        pages: ClassVar = [FakePage()]
+
+        async def cookies(self):
+            return [_playwright_cookie("SESSDATA", "logged-in", far_future)]
+
+    @asynccontextmanager
+    async def fake_pc(*args, **kwargs):
+        assert kwargs.get("headless") is False
+        yield FakeContext()
+
+    monkeypatch.setattr(cookie_refresh, "persistent_context", fake_pc)
+
+    settings = Settings(platform_cookie_files={"bilibili": str(target)})
+    ok = await browser_login("bilibili", settings)
+
+    assert ok is True
+    assert "SESSDATA=logged-in" in get_cookie_header(str(target), "bilibili.com")

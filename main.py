@@ -37,11 +37,22 @@ async def _run(settings: Settings) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Feishu link secretary")
     parser.add_argument("--config", metavar="PATH", help="YAML config file path")
+    parser.add_argument(
+        "--browser-login",
+        metavar="PLATFORM",
+        help="Open a headed browser to log in once and seed a cookie-refresh profile",
+    )
     args = parser.parse_args()
 
     settings = Settings.from_yaml(args.config) if args.config else Settings()
 
     log.setup(level=settings.log_level, log_dir=settings.log_dir)
+
+    if args.browser_login:
+        from src.cookie_refresh import browser_login
+
+        ok = asyncio.run(browser_login(args.browser_login, settings))
+        sys.exit(0 if ok else 1)
 
     try:
         asyncio.run(_run(settings))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -43,6 +44,10 @@ _PROFILES: dict[str, RefreshProfile] = {
 # Per-process throttle so a burst of stale-cookie requests does not launch the
 # browser repeatedly. Keyed by platform, monotonic timestamps.
 _last_refresh: dict[str, float] = {}
+
+# How long --browser-login waits for the human to finish logging in.
+_LOGIN_WAIT_SECONDS = 300
+_LOGIN_POLL_SECONDS = 2
 
 
 def _domain_matches(cookie_domain: str, want: str) -> bool:
@@ -218,3 +223,64 @@ async def ensure_fresh_cookies(platform: str, settings: Settings) -> None:
     _last_refresh[platform] = now
 
     await refresh_cookies(platform, settings, target=target)
+
+
+async def _wait_for_login(context: Any, profile: RefreshProfile) -> list[dict[str, Any]]:
+    deadline = time.monotonic() + _LOGIN_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        raw = await context.cookies()
+        cookies = [
+            c for c in raw if _domain_matches(str(c.get("domain", "")), profile.cookie_domain)
+        ]
+        if profile.required_names <= {str(c.get("name", "")) for c in cookies}:
+            return cookies
+        await asyncio.sleep(_LOGIN_POLL_SECONDS)
+    return []
+
+
+async def browser_login(platform: str, settings: Settings) -> bool:
+    """Open a headed persistent profile so the user can log in once.
+
+    Waits for the platform's session cookies to appear, then exports them to the
+    per-platform cookie file. The logged-in profile persists for later refreshes.
+    """
+    profile = _PROFILES.get(platform)
+    if profile is None:
+        logger.error("No cookie-refresh profile for platform %s", platform)
+        return False
+
+    target = _resolve_target(platform, settings)
+    profile_dir = str(Path(settings.cookie_refresh_profile_dir) / platform)
+    timeout_ms = int(settings.cookie_refresh_browser_timeout * 1000)
+    try:
+        async with persistent_context(
+            profile_dir, headless=False, timeout_ms=timeout_ms
+        ) as context:
+            page = context.pages[0] if context.pages else await context.new_page()
+            await page.goto(profile.site_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            logger.info(
+                "Log in to %s in the opened window; waiting up to %ds for session cookies",
+                platform,
+                _LOGIN_WAIT_SECONDS,
+            )
+            cookies = await _wait_for_login(context, profile)
+    except BrowserUnavailableError as exc:
+        logger.error("Cannot open browser for login: %s", exc)
+        return False
+    except Exception as exc:
+        logger.error("Browser login for %s failed: %s", platform, exc)
+        return False
+
+    if not cookies:
+        logger.warning("No %s session cookies detected before timeout", platform)
+        return False
+    if target:
+        write_netscape(cookies, target)
+        logger.info("Saved %d %s cookies to %s", len(cookies), platform, target)
+    else:
+        logger.info(
+            "%s profile is logged in; set platform_cookie_files[%s] to export its cookies",
+            platform,
+            platform,
+        )
+    return True
