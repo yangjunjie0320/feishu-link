@@ -19,6 +19,7 @@ RUN sed -i \
     && apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         ffmpeg \
+        tini \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN python -c "import platform, urllib.request, zipfile; from pathlib import Path; version='${DENO_VERSION}'; machine=platform.machine().lower(); target='aarch64-unknown-linux-gnu' if machine in ('aarch64', 'arm64') else 'x86_64-unknown-linux-gnu'; url='https://github.com/denoland/deno/releases/download/v{}/deno-{}.zip'.format(version, target); archive=Path('/tmp/deno.zip'); urllib.request.urlretrieve(url, archive); zipfile.ZipFile(archive).extractall('/usr/local/bin'); Path('/usr/local/bin/deno').chmod(0o755); archive.unlink()"
@@ -36,6 +37,10 @@ RUN uv run python -m playwright install --with-deps chromium
 COPY main.py ./
 COPY src/ src/
 
-RUN mkdir -p logs /app/browser-data
+RUN mkdir -p logs /app/browser-data /app/browser-data/cookies
 
+# tini as PID 1 reaps zombie Chromium subprocesses left by browser sessions and
+# forwards SIGTERM so the browser tree shuts down cleanly. Stale per-profile
+# Singleton locks are cleared in-process before each launch (browser_session).
+ENTRYPOINT ["tini", "--"]
 CMD ["uv", "run", "python", "main.py", "--config", "/etc/feishu-link/config.yaml"]
