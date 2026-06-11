@@ -21,6 +21,7 @@ from .image_uploader import upload_cover
 from .listener import CardActionEvent, ListenerEvent, MessageEvent
 from .media_downloader import VideoSkipReason, download_video
 from .parsers.base import LinkMetadata, ParserError
+from .platforms import is_short_video_platform
 from .sender import CardSender, TextSender, TypingReactionSender, VideoSender
 from .translator import TitleTranslator
 from .url_extract import extract_prompt, extract_urls, is_manual_download_command
@@ -157,6 +158,9 @@ class Pipeline:
         is_bot_mentioned: bool,
         manual_download: bool,
     ) -> None:
+        if not is_short_video_platform(url):
+            logger.debug("skip unsupported platform url=%s", url)
+            return
         logger.debug("parsing url=%s", url)
         async with self._typing_sender.hold(event.message_id, label="card"):
             try:

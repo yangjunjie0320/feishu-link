@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .config import Settings
-from .parsers.base import LinkMetadata, MediaType, Parser, ParserError
+from .parsers.base import LinkMetadata, MediaType, ParserError
 from .parsers.fallback import FallbackParser
 from .parsers.instagram_media_info import InstagramMediaInfoParser
 from .parsers.og_meta import OGMetaParser
@@ -15,7 +15,7 @@ from .parsers.x_graphql import XGraphQLParser
 from .parsers.x_oembed import XOEmbedParser
 from .parsers.youtube import YouTubeParser, is_youtube_url
 from .parsers.ytdlp import YtDlpMetadataParser
-from .platforms import detect_platform, is_short_video_platform
+from .platforms import detect_platform
 
 logger = logging.getLogger(__name__)
 
@@ -36,41 +36,35 @@ class Dispatcher:
         if _is_instagram_post_url(url):
             return await self._parse_instagram_post(url)
 
-        parser: Parser
-        parser = self._ytdlp if is_short_video_platform(url) else self._og
-
         try:
-            meta = await parser.parse(url)
-            if parser is self._ytdlp:
-                _normalize_short_platform_meta(meta)
+            meta = await self._ytdlp.parse(url)
+            _normalize_short_platform_meta(meta)
             return meta
         except ParserError as e:
-            if parser is self._ytdlp:
-                if detect_platform(url) == "x":
-                    try:
-                        meta = await self._x_oembed.parse(url)
-                    except ParserError:
-                        meta = await self._parse_og_or_fallback(url)
-                    if not meta.cover_url:
-                        try:
-                            graphql_meta = await self._x_graphql.parse(url)
-                        except ParserError:
-                            graphql_meta = None
-                        if graphql_meta:
-                            _merge_missing_social_fields(meta, graphql_meta)
-                else:
+            if detect_platform(url) == "x":
+                try:
+                    meta = await self._x_oembed.parse(url)
+                except ParserError:
                     meta = await self._parse_og_or_fallback(url)
-                meta.platform = meta.platform or "web"
-                meta.media_type = _fallback_media_type(url, meta.platform, e.reason)
-                if meta.media_type == MediaType.ARTICLE:
-                    _normalize_image_post_meta(meta)
-                warning = _friendly_parse_warning(url, meta.platform, e.reason)
-                if warning:
-                    meta.parse_warnings.append(warning)
-                if _is_generic_title(meta.title, meta.platform):
-                    meta.title = _fallback_title(url, meta.platform, meta.media_type)
-                return meta
-            return await self._fallback.parse(url)
+                if not meta.cover_url:
+                    try:
+                        graphql_meta = await self._x_graphql.parse(url)
+                    except ParserError:
+                        graphql_meta = None
+                    if graphql_meta:
+                        _merge_missing_social_fields(meta, graphql_meta)
+            else:
+                meta = await self._parse_og_or_fallback(url)
+            meta.platform = meta.platform or "web"
+            meta.media_type = _fallback_media_type(url, meta.platform, e.reason)
+            if meta.media_type == MediaType.ARTICLE:
+                _normalize_image_post_meta(meta)
+            warning = _friendly_parse_warning(url, meta.platform, e.reason)
+            if warning:
+                meta.parse_warnings.append(warning)
+            if _is_generic_title(meta.title, meta.platform):
+                meta.title = _fallback_title(url, meta.platform, meta.media_type)
+            return meta
 
     async def _parse_og_or_fallback(self, url: str) -> LinkMetadata:
         try:

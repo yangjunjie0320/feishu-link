@@ -1,6 +1,12 @@
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from src.bibi_client import AuthenticationError, BibiAPIError, TranscriptUnavailableError
 from src.comment_analyzer import CommentAnalysisError
+from src.config import Settings
 from src.pipeline import (
+    Pipeline,
     _comment_analysis_failure_message,
     _friendly_download_reason,
     _summary_failure_message,
@@ -74,3 +80,32 @@ def test_summary_failure_message_for_missing_transcript() -> None:
         "BibiGPT 总结失败: BibiGPT 没有拿到这个视频的字幕或转录文本, "
         "可能是视频没有字幕、字幕被限制, 或 YouTube 转录抓取临时失败。"
     )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_silently_ignores_unsupported_platform_url() -> None:
+    lark_client = MagicMock()
+    pipeline = Pipeline(Settings(), lark_client)
+
+    dispatcher_parse = AsyncMock()
+    pipeline._dispatcher.parse = dispatcher_parse  # type: ignore[method-assign]
+
+    sender_send = AsyncMock(return_value=True)
+    pipeline._sender.send = sender_send  # type: ignore[method-assign]
+
+    from src.listener import MessageEvent
+
+    event = MessageEvent(
+        message_id="msg_001",
+        chat_id="chat_001",
+        sender_id="u_001",
+        chat_type="group",
+        timestamp_utc=0,
+        message_type="text",
+        content='{"text":"https://www.example.com/some-article"}',
+        mentions=[],
+    )
+    await pipeline._process_url("https://www.example.com/some-article", event, False, False)
+
+    dispatcher_parse.assert_not_called()
+    sender_send.assert_not_called()

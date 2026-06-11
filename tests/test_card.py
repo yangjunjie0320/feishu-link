@@ -469,17 +469,18 @@ def test_web_article_card_keeps_title_primary() -> None:
     assert "一段短文章摘要。" in body_text
 
 
-def test_zhihu_article_card_uses_description_as_primary() -> None:
+def test_instagram_article_card_uses_description_as_primary() -> None:
     meta = LinkMetadata(
-        source_url="https://www.zhihu.com/question/123/answer/456",
-        title="知乎回答标题",
-        description="这是知乎回答摘要。",
-        site_name="知乎",
-        platform="zhihu",
+        source_url="https://www.instagram.com/p/abc123/",
+        title="Post by someuser",
+        description="这是 Instagram 图文帖正文。",
+        site_name="Instagram",
+        platform="instagram",
+        media_type=MediaType.ARTICLE,
     )
     card = json.loads(build_card(meta))
     body_text = next(
         e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
     )
-    assert body_text.startswith("<font color='grey'>这是知乎回答摘要。</font>")
-    assert "知乎回答标题" not in body_text
+    assert body_text.startswith("<font color='grey'>这是 Instagram 图文帖正文。</font>")
+    assert "Post by someuser" not in body_text
