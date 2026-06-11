@@ -1,9 +1,14 @@
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+import src.media_downloader as media_downloader
 from src.config import Settings
 from src.media_downloader import (
     _YTDLP_VIDEO_FORMAT,
     _file_name,
+    _format_for_platform,
     _strip_symbol_characters,
     _target_transcode_bitrates,
     _transcode_timeout_seconds,
@@ -91,6 +96,69 @@ def test_ytdlp_format_prefers_low_quality_video() -> None:
     assert "worst[ext=mp4]" in _YTDLP_VIDEO_FORMAT
     assert "worstvideo" in _YTDLP_VIDEO_FORMAT
     assert "worstaudio" in _YTDLP_VIDEO_FORMAT
+
+
+def test_tiktok_format_skips_watermarked_download_formats() -> None:
+    format_selector = _format_for_platform("tiktok")
+
+    assert "[format_id!=download]" in format_selector
+    assert "[format_id!=download_addr]" in format_selector
+    assert format_selector.endswith(_YTDLP_VIDEO_FORMAT)
+    assert _format_for_platform("youtube") == _YTDLP_VIDEO_FORMAT
+
+
+@pytest.mark.asyncio
+async def test_download_video_passes_ytdlp_runtime_and_bilibili_headers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured_options = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            captured_options.update(options)
+            self._options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def download(self, urls):
+            output = Path(self._options["outtmpl"]).parent / "video.mp4"
+            output.write_bytes(b"fake mp4")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "yt_dlp",
+        SimpleNamespace(YoutubeDL=FakeYoutubeDL),
+    )
+    monkeypatch.setattr(
+        "src.ytdlp_options.shutil.which",
+        lambda name: "/usr/local/bin/deno" if name == "deno" else None,
+    )
+    monkeypatch.setattr(
+        media_downloader,
+        "_make_feishu_mp4",
+        lambda path, temp_dir, duration_seconds, max_file_mb: path,
+    )
+    monkeypatch.setattr(media_downloader, "_probe_duration_ms", lambda path: 1234)
+
+    meta = _video_meta(
+        source_url="https://www.bilibili.com/video/BV123",
+        platform="bilibili",
+    )
+    settings = Settings(cookie_file="", video_temp_dir=str(tmp_path))
+
+    video = await media_downloader.download_video(meta, settings)
+
+    try:
+        assert video.duration_ms == 1234
+        assert captured_options["http_headers"]["Referer"] == "https://www.bilibili.com/"
+        assert captured_options["js_runtimes"] == {"deno": {"path": "/usr/local/bin/deno"}}
+    finally:
+        video.cleanup()
 
 
 def test_file_name_strips_symbol_characters() -> None:

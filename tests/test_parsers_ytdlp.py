@@ -94,9 +94,57 @@ async def test_ytdlp_parser_uses_unified_cookie_file(
         "yt_dlp",
         SimpleNamespace(YoutubeDL=FakeYoutubeDL),
     )
+    monkeypatch.setattr(
+        "src.ytdlp_options.shutil.which",
+        lambda name: "/usr/local/bin/deno" if name == "deno" else None,
+    )
 
     parser = YtDlpMetadataParser(Settings(cookie_file=str(cookie_file)))
     meta = await parser.parse("https://www.bilibili.com/video/BV123")
 
     assert meta.title == "Video"
     assert captured_options["cookiefile"].endswith("cookies.txt")
+    assert captured_options["http_headers"]["Referer"] == "https://www.bilibili.com/"
+    assert "Chrome/" in captured_options["http_headers"]["User-Agent"]
+    assert captured_options["js_runtimes"] == {"deno": {"path": "/usr/local/bin/deno"}}
+
+
+@pytest.mark.asyncio
+async def test_ytdlp_parser_omits_browser_headers_for_other_platforms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_options = {}
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            captured_options.update(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=False):
+            return {
+                "title": "Video",
+                "duration": 12,
+                "webpage_url": url,
+                "formats": [{"url": "https://cdn.example.com/v.mp4"}],
+            }
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "yt_dlp",
+        SimpleNamespace(YoutubeDL=FakeYoutubeDL),
+    )
+    monkeypatch.setattr(
+        "src.ytdlp_options.shutil.which",
+        lambda name: "/usr/local/bin/deno" if name == "deno" else None,
+    )
+
+    parser = YtDlpMetadataParser(Settings())
+    await parser.parse("https://www.tiktok.com/@u/video/123")
+
+    assert "http_headers" not in captured_options
+    assert captured_options["js_runtimes"] == {"deno": {"path": "/usr/local/bin/deno"}}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import lark_oapi as lark
@@ -16,6 +17,10 @@ async def upload_cover(
     lark_client: lark.Client,
     http_client: httpx.AsyncClient,
 ) -> str | None:
+    url = _normalize_cover_url(url)
+    if not url:
+        return None
+
     try:
         resp = await http_client.get(url, follow_redirects=True, timeout=10)
         resp.raise_for_status()
@@ -47,3 +52,14 @@ async def upload_cover(
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _upload)
+
+
+def _normalize_cover_url(url: str) -> str:
+    normalized = url.strip()
+    if not normalized:
+        return ""
+
+    parsed = urlsplit(normalized)
+    if not parsed.scheme and parsed.netloc:
+        return urlunsplit(("https", parsed.netloc, parsed.path, parsed.query, parsed.fragment))
+    return normalized

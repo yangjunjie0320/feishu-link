@@ -7,6 +7,7 @@ from typing import Any
 from ..config import Settings
 from ..cookie_utils import temporary_cookie_file
 from ..platforms import detect_platform
+from ..ytdlp_options import apply_ytdlp_runtime
 from .base import DownloadCandidate, LinkMetadata, MediaType, ParserError
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class YtDlpMetadataParser:
                 "socket_timeout": 15,
                 "source_address": "0.0.0.0",
             }
+            apply_ytdlp_runtime(options, platform)
 
             cookie_file = self._settings.cookie_file_for_platform(platform)
             with temporary_cookie_file(cookie_file) as temp_cookie_file:

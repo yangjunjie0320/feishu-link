@@ -13,6 +13,7 @@ from typing import Any
 from .config import Settings
 from .cookie_utils import temporary_cookie_file
 from .parsers.base import LinkMetadata, MediaType
+from .ytdlp_options import apply_ytdlp_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,10 @@ _YTDLP_VIDEO_FORMAT = (
     "worstvideo[ext=mp4]+worstaudio[ext=m4a]/"
     "worstvideo+worstaudio/"
     "worst"
+)
+_TIKTOK_YTDLP_VIDEO_FORMAT = (
+    "worst[ext=mp4][format_id!=download][format_id!=download_addr]/"
+    f"{_YTDLP_VIDEO_FORMAT}"
 )
 
 
@@ -74,6 +79,12 @@ def explain_video_skip(
     return None
 
 
+def _format_for_platform(platform: str) -> str:
+    if platform == "tiktok":
+        return _TIKTOK_YTDLP_VIDEO_FORMAT
+    return _YTDLP_VIDEO_FORMAT
+
+
 async def download_video(
     meta: LinkMetadata,
     settings: Settings,
@@ -100,7 +111,7 @@ async def download_video(
             raise VideoDownloadError("yt-dlp is not installed") from e
 
         options: dict[str, Any] = {
-            "format": _YTDLP_VIDEO_FORMAT,
+            "format": _format_for_platform(meta.platform),
             "merge_output_format": "mp4",
             "noplaylist": True,
             "outtmpl": str(temp_dir / "%(title).80s-%(id)s.%(ext)s"),
@@ -110,6 +121,7 @@ async def download_video(
             "socket_timeout": 30,
             "logger": _YtDlpLogger(),
         }
+        apply_ytdlp_runtime(options, meta.platform)
 
         def do_download(opts: dict[str, Any]) -> set[Path]:
             before = set(temp_dir.iterdir())
