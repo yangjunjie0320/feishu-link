@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     bibigpt_browser_headless: bool = True
     bibigpt_browser_timeout: float = 120.0
     bibigpt_default_prompt: str = ""
+    bibigpt_cookie_writeback: bool = True
+
+    # Container-internal cookie auto-refresh via persistent Chromium profiles.
+    cookie_refresh_enabled: bool = False
+    cookie_refresh_platforms: list[str] = []
+    cookie_refresh_profile_dir: str = "/app/browser-data/cookies"
+    cookie_refresh_browser_headless: bool = True
+    cookie_refresh_browser_timeout: float = 60.0
+    cookie_refresh_stale_before_seconds: int = 86400
+    cookie_refresh_min_interval_seconds: int = 600
 
     youtube_api_key: str = ""
     link_allowlist: list[str] = []
@@ -85,7 +95,7 @@ class Settings(BaseSettings):
             return [s.strip() for s in v.split(",") if s.strip()]
         return v  # type: ignore[return-value]
 
-    @field_validator("allowed_video_platforms", mode="before")
+    @field_validator("allowed_video_platforms", "cookie_refresh_platforms", mode="before")
     @classmethod
     def _parse_allowed_video_platforms(cls, v: Any) -> list[str]:
         if isinstance(v, str):
@@ -107,6 +117,11 @@ class Settings(BaseSettings):
         self.allowed_video_platforms = [
             platform.strip().lower()
             for platform in self.allowed_video_platforms
+            if platform.strip()
+        ]
+        self.cookie_refresh_platforms = [
+            platform.strip().lower()
+            for platform in self.cookie_refresh_platforms
             if platform.strip()
         ]
         return self
