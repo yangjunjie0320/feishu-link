@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
@@ -14,6 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from .bibi_models import SummaryResult
+from .browser_session import BrowserUnavailableError, persistent_context
 from .config import Settings
 from .cookie_utils import get_cookie_header
 
@@ -72,7 +72,6 @@ class BibiClient:
             self._routes.cookie_domain,
         )
         self._cookie_error = _validate_supabase_auth_cookie(cookie_header)
-        self._browser_lock = asyncio.Lock()
 
         self._headers = {
             "User-Agent": _USER_AGENT,
@@ -234,74 +233,61 @@ class BibiClient:
             from playwright.async_api import (
                 TimeoutError as PlaywrightTimeoutError,
             )
-            from playwright.async_api import (
-                async_playwright,
-            )
         except ImportError as exc:
             raise BibiAPIError(
                 0,
                 "Playwright is not installed; rebuild the Docker image or run uv sync.",
             ) from exc
 
-        profile_dir = Path(self._settings.bibigpt_browser_profile_dir)
-        profile_dir.mkdir(parents=True, exist_ok=True)
         timeout_ms = int(self._settings.bibigpt_browser_timeout * 1000)
 
-        async with self._browser_lock:
-            try:
-                async with async_playwright() as playwright:
-                    context = await playwright.chromium.launch_persistent_context(
-                        user_data_dir=str(profile_dir),
-                        headless=self._settings.bibigpt_browser_headless,
-                        user_agent=_USER_AGENT,
-                        viewport={"width": 1280, "height": 900},
-                        args=[
-                            "--disable-dev-shm-usage",
-                            "--disable-gpu",
-                            "--no-sandbox",
-                        ],
-                        timeout=timeout_ms,
-                    )
-                    try:
-                        await self._seed_browser_cookies(context)
-                        page = context.pages[0] if context.pages else await context.new_page()
-                        await page.goto(
-                            self._routes.browser_page_url,
-                            wait_until="domcontentloaded",
-                            timeout=timeout_ms,
-                        )
-                        result = await page.evaluate(
-                            """async ({url, method, body}) => {
-                                const init = {
-                                    method,
-                                    credentials: "include",
-                                    headers: {
-                                        "accept": "application/json",
-                                        "content-type": "application/json"
-                                    }
-                                };
-                                if (body !== null) {
-                                    init.body = JSON.stringify(body);
-                                }
-                                const response = await fetch(url, init);
-                                return {
-                                    status: response.status,
-                                    ok: response.ok,
-                                    text: await response.text()
-                                };
-                            }""",
-                            {"url": url, "method": method, "body": body},
-                        )
-                    finally:
-                        await context.close()
-            except PlaywrightTimeoutError as exc:
-                raise BibiAPIError(
-                    0,
-                    f"BibiGPT browser request timed out after "
-                    f"{self._settings.bibigpt_browser_timeout:g} seconds.",
-                ) from exc
-            except PlaywrightError as exc:
-                raise BibiAPIError(0, f"BibiGPT browser request failed: {exc}") from exc
+        try:
+            async with persistent_context(
+                self._settings.bibigpt_browser_profile_dir,
+                headless=self._settings.bibigpt_browser_headless,
+                user_agent=_USER_AGENT,
+                timeout_ms=timeout_ms,
+                viewport={"width": 1280, "height": 900},
+            ) as context:
+                await self._seed_browser_cookies(context)
+                page = context.pages[0] if context.pages else await context.new_page()
+                await page.goto(
+                    self._routes.browser_page_url,
+                    wait_until="domcontentloaded",
+                    timeout=timeout_ms,
+                )
+                result = await page.evaluate(
+                    """async ({url, method, body}) => {
+                        const init = {
+                            method,
+                            credentials: "include",
+                            headers: {
+                                "accept": "application/json",
+                                "content-type": "application/json"
+                            }
+                        };
+                        if (body !== null) {
+                            init.body = JSON.stringify(body);
+                        }
+                        const response = await fetch(url, init);
+                        return {
+                            status: response.status,
+                            ok: response.ok,
+                            text: await response.text()
+                        };
+                    }""",
+                    {"url": url, "method": method, "body": body},
+                )
+        except BrowserUnavailableError as exc:
+            raise BibiAPIError(0, str(exc)) from exc
+        except PlaywrightTimeoutError as exc:
+            raise BibiAPIError(
+                0,
+                f"BibiGPT browser request timed out after "
+                f"{self._settings.bibigpt_browser_timeout:g} seconds.",
+            ) from exc
+        except PlaywrightError as exc:
+            raise BibiAPIError(0, f"BibiGPT browser request failed: {exc}") from exc
 
         if not isinstance(result, dict):
             raise BibiAPIError(0, "BibiGPT browser request returned an unexpected result.")
