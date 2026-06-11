@@ -105,7 +105,7 @@ def cookie_is_stale(cookie_file: str, platform: str, stale_before_seconds: int) 
     return any(exp is not None and exp <= threshold for exp in expiries.values())
 
 
-def _write_netscape(cookies: list[dict[str, Any]], path: str) -> None:
+def write_netscape(cookies: list[dict[str, Any]], path: str) -> None:
     """Atomically write Playwright cookies as a Netscape cookie file."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -189,7 +189,7 @@ async def refresh_cookies(
         )
         return False
 
-    _write_netscape(cookies, target)
+    write_netscape(cookies, target)
     logger.info("Refreshed %d cookies for %s -> %s", len(cookies), platform, target)
     return True
 

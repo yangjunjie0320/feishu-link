@@ -33,7 +33,7 @@ def test_cookie_is_stale_when_file_missing(tmp_path) -> None:
 def test_cookie_is_stale_false_for_fresh_cookie(tmp_path) -> None:
     target = tmp_path / "bilibili.txt"
     far_future = time.time() + 30 * 86400
-    cookie_refresh._write_netscape(
+    cookie_refresh.write_netscape(
         [_playwright_cookie("SESSDATA", "fresh", far_future)], str(target)
     )
 
@@ -43,7 +43,7 @@ def test_cookie_is_stale_false_for_fresh_cookie(tmp_path) -> None:
 def test_cookie_is_stale_true_when_expiring_soon(tmp_path) -> None:
     target = tmp_path / "bilibili.txt"
     soon = time.time() + 3600
-    cookie_refresh._write_netscape(
+    cookie_refresh.write_netscape(
         [_playwright_cookie("SESSDATA", "stale", soon)], str(target)
     )
 
@@ -53,7 +53,7 @@ def test_cookie_is_stale_true_when_expiring_soon(tmp_path) -> None:
 def test_cookie_is_stale_true_when_required_missing(tmp_path) -> None:
     target = tmp_path / "bilibili.txt"
     far_future = time.time() + 30 * 86400
-    cookie_refresh._write_netscape(
+    cookie_refresh.write_netscape(
         [_playwright_cookie("buvid3", "x", far_future)], str(target)
     )
 
@@ -63,7 +63,7 @@ def test_cookie_is_stale_true_when_required_missing(tmp_path) -> None:
 def test_write_netscape_roundtrips_through_reader(tmp_path) -> None:
     target = tmp_path / "bilibili.txt"
     far_future = time.time() + 30 * 86400
-    cookie_refresh._write_netscape(
+    cookie_refresh.write_netscape(
         [
             _playwright_cookie("SESSDATA", "abc", far_future),
             _playwright_cookie("bili_jct", "def", far_future),

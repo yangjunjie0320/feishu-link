@@ -1,4 +1,5 @@
 import json
+import time
 
 import httpx
 import pytest
@@ -12,6 +13,7 @@ from src.bibi_client import (
     _resolve_routes,
 )
 from src.config import Settings
+from src.cookie_utils import get_cookie_header
 
 
 @respx.mock
@@ -348,3 +350,35 @@ async def test_bibi_client_browser_user_probe_reports_missing_login(
 
     with pytest.raises(AuthenticationError, match="browser profile is not logged in"):
         await BibiClient(settings).get_user_info()
+
+
+async def test_bibi_client_writes_back_cookies(tmp_path) -> None:
+    target = tmp_path / "bibigpt.txt"
+    client = BibiClient(
+        Settings(
+            bibigpt_base_url="https://aitodo.co/zh",
+            cookie_file="",
+            platform_cookie_files={"bibigpt": str(target)},
+        )
+    )
+
+    class FakeContext:
+        async def cookies(self):
+            return [
+                {
+                    "name": "sb-aitodo-auth-token.0",
+                    "value": "fresh",
+                    "domain": "aitodo.co",
+                    "path": "/",
+                    "expires": time.time() + 86400,
+                    "secure": True,
+                    "httpOnly": True,
+                },
+                {"name": "noise", "value": "n", "domain": ".other.com", "path": "/", "expires": -1},
+            ]
+
+    await client._writeback_cookies(FakeContext())
+
+    header = get_cookie_header(str(target), "aitodo.co")
+    assert "sb-aitodo-auth-token.0=fresh" in header
+    assert "noise" not in header

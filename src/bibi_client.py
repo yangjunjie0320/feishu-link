@@ -15,6 +15,7 @@ import httpx
 from .bibi_models import SummaryResult
 from .browser_session import BrowserUnavailableError, persistent_context
 from .config import Settings
+from .cookie_refresh import write_netscape
 from .cookie_utils import get_cookie_header
 
 logger = logging.getLogger(__name__)
@@ -278,6 +279,8 @@ class BibiClient:
                     }""",
                     {"url": url, "method": method, "body": body},
                 )
+                if self._settings.bibigpt_cookie_writeback:
+                    await self._writeback_cookies(context)
         except BrowserUnavailableError as exc:
             raise BibiAPIError(0, str(exc)) from exc
         except PlaywrightTimeoutError as exc:
@@ -322,6 +325,33 @@ class BibiClient:
 
         await context.add_cookies(cookies)
         logger.debug("Seeded %d BibiGPT cookies into browser context", len(cookies))
+
+    async def _writeback_cookies(self, context: Any) -> None:
+        """Persist the live context's cookies so the HTTP path stays fresh."""
+        if not self._cookie_file:
+            return
+        try:
+            raw = await context.cookies()
+        except Exception as exc:
+            logger.warning("Failed to read BibiGPT cookies for writeback: %s", exc)
+            return
+
+        domain = self._routes.cookie_domain
+        cookies = [
+            cookie
+            for cookie in raw
+            if _domain_matches_writeback(str(cookie.get("domain", "")), domain)
+        ]
+        if not cookies:
+            return
+
+        write_netscape(cookies, self._cookie_file)
+        logger.debug("Wrote back %d BibiGPT cookies to %s", len(cookies), self._cookie_file)
+
+
+def _domain_matches_writeback(cookie_domain: str, want: str) -> bool:
+    d = cookie_domain.lstrip(".")
+    return d == want or want.endswith(f".{d}")
 
 
 def _with_output_instructions(prompt: str) -> str:
