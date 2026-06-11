@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .cookie_refresh import ensure_fresh_cookies
 from .cookie_utils import temporary_cookie_file
 from .parsers.base import LinkMetadata, MediaType
 from .ytdlp_options import apply_ytdlp_runtime
@@ -98,6 +99,8 @@ async def download_video(
     )
     if skip_reason:
         raise VideoSkipReason(skip_reason)
+
+    await ensure_fresh_cookies(meta.platform, settings)
 
     source_url = meta.canonical_url or meta.source_url
     temp_root = Path(settings.video_temp_dir)

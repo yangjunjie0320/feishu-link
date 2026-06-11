@@ -148,3 +148,48 @@ async def test_ytdlp_parser_omits_browser_headers_for_other_platforms(
 
     assert "http_headers" not in captured_options
     assert captured_options["js_runtimes"] == {"deno": {"path": "/usr/local/bin/deno"}}
+
+
+@pytest.mark.asyncio
+async def test_ytdlp_parser_ensures_fresh_cookies_before_extract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refreshed: list[str] = []
+
+    async def fake_ensure(platform, settings):
+        refreshed.append(platform)
+
+    monkeypatch.setattr("src.parsers.ytdlp.ensure_fresh_cookies", fake_ensure)
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=False):
+            return {
+                "title": "Video",
+                "duration": 12,
+                "webpage_url": url,
+                "formats": [{"url": "https://cdn.example.com/v.mp4"}],
+            }
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "yt_dlp",
+        SimpleNamespace(YoutubeDL=FakeYoutubeDL),
+    )
+    monkeypatch.setattr(
+        "src.ytdlp_options.shutil.which",
+        lambda name: "/usr/local/bin/deno" if name == "deno" else None,
+    )
+
+    parser = YtDlpMetadataParser(Settings())
+    await parser.parse("https://www.bilibili.com/video/BV123")
+
+    assert refreshed == ["bilibili"]

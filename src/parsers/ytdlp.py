@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from ..config import Settings
+from ..cookie_refresh import ensure_fresh_cookies
 from ..cookie_utils import temporary_cookie_file
 from ..platforms import detect_platform
 from ..ytdlp_options import apply_ytdlp_runtime
@@ -19,6 +20,7 @@ class YtDlpMetadataParser:
 
     async def parse(self, url: str) -> LinkMetadata:
         platform = detect_platform(url)
+        await ensure_fresh_cookies(platform, self._settings)
 
         def _extract() -> dict[str, Any]:
             try:
