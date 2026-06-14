@@ -57,19 +57,19 @@ allowed_video_platforms:
   - x
 video_temp_dir: "/tmp/feishu-link"
 
-# Optional unified Netscape cookie file mounted read-only in Docker.
+# Optional unified Netscape cookie file (relative to the working directory).
 # It may contain cookies for multiple domains, including BibiGPT, YouTube, X,
 # Instagram, TikTok, and Bilibili.
-cookie_file: "/etc/feishu-link/cookies/cookies.txt"
+cookie_file: "cookies/cookies.txt"
 
 # Optional per-platform cookie files. These override cookie_file for a platform
-# and preserve the older cookies/{platform}.txt layout.
+# and use the cookies/{platform}.txt layout.
 platform_cookie_files: {}
 # Example:
 # platform_cookie_files:
-#   bibigpt: "/etc/feishu-link/cookies/bibigpt.txt"
-#   instagram: "/etc/feishu-link/cookies/instagram.txt"
-#   x: "/etc/feishu-link/cookies/x.txt"
+#   bibigpt: "cookies/bibigpt.txt"
+#   instagram: "cookies/instagram.txt"
+#   x: "cookies/x.txt"
 
 # Optional BibiGPT integration. Mention the bot with a YouTube or Bilibili URL
 # to send a summary instead of appending the video.
@@ -82,7 +82,7 @@ bibigpt_base_url: "https://aitodo.co/zh"
 # deepseek-v4-pro, and others visible in the aitodo.co settings page model selector.
 bibigpt_model: "openai/gpt-5.5"
 bibigpt_timeout: 120.0
-bibigpt_browser_profile_dir: "/app/browser-data/bibigpt"
+bibigpt_browser_profile_dir: "browser-data/bibigpt"
 bibigpt_browser_headless: true
 bibigpt_browser_timeout: 120.0
 # Leave empty to use BibiGPT's built-in prompt. Set this only when you want a
@@ -100,7 +100,7 @@ bibigpt_cookie_writeback: true
 # `python main.py --browser-login <platform>` before enabling.
 cookie_refresh_enabled: false
 cookie_refresh_platforms: []        # e.g. ["bilibili", "x"]
-cookie_refresh_profile_dir: "/app/browser-data/cookies"   # per-platform subdir
+cookie_refresh_profile_dir: "browser-data/cookies"   # per-platform subdir
 cookie_refresh_browser_headless: true
 cookie_refresh_browser_timeout: 60.0
 cookie_refresh_stale_before_seconds: 86400   # refresh if expiring within 1 day

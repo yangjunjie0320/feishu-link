@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     bibigpt_base_url: str = "https://aitodo.co/zh"
     bibigpt_model: str = "openai/gpt-5.5"
     bibigpt_timeout: float = 120.0
-    bibigpt_browser_profile_dir: str = "/app/browser-data/bibigpt"
+    bibigpt_browser_profile_dir: str = "browser-data/bibigpt"
     bibigpt_browser_headless: bool = True
     bibigpt_browser_timeout: float = 120.0
     bibigpt_default_prompt: str = ""
@@ -143,10 +143,9 @@ class Settings(BaseSettings):
         if self.cookie_file and Path(self.cookie_file).exists():
             return self.cookie_file
 
-        for cookie_dir in (Path("/etc/feishu-link/cookies"), Path("cookies")):
-            candidate = cookie_dir / f"{normalized}.txt"
-            if candidate.exists():
-                return str(candidate)
+        candidate = Path("cookies") / f"{normalized}.txt"
+        if candidate.exists():
+            return str(candidate)
 
         return ""
 

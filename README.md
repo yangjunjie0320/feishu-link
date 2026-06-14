@@ -67,21 +67,7 @@ archive_chat_id: "oc_xxx"
 
 `config.yaml` is intentionally ignored by Git.
 
-### 3. Run with Docker
-
-```bash
-docker compose up -d
-docker compose logs -f
-```
-
-The container mounts:
-
-- `./config.yaml` as read-only runtime config
-- `./cookies` as optional read-only platform cookie directory
-- `./logs` as writable log directory
-- `./browser-data` as writable Chromium profile storage for BibiGPT browser mode
-
-### 4. Run locally for development
+### 3. Run locally for development
 
 ```bash
 uv sync --extra dev
@@ -90,9 +76,9 @@ uv run python main.py --config config.yaml
 
 When you see the WebSocket long-connection log, send a supported link in a Feishu conversation where the app can receive events.
 
-## Run Without Docker
+## Run in production (native + launchd)
 
-Docker is recommended for production because it pins Python, `ffmpeg`, `ffprobe`, `deno`, and runtime mounts in one place. If you do not want to use Docker, run the same `main.py` entry point with `uv`.
+The service runs natively, with no container. `uv` pins Python and the dependencies; `ffmpeg`, `ffprobe`, and `deno` must be on `PATH`. Production uses a macOS launchd LaunchAgent so the process restarts on crash and survives reconnects.
 
 ### 1. Install system tools
 
@@ -141,7 +127,7 @@ cp config.example.yaml config.yaml
 mkdir -p cookies logs
 ```
 
-Set real credentials in `config.yaml`. If you use cookie files outside Docker, configure local paths:
+Set real credentials in `config.yaml`. If you use cookie files, configure local paths:
 
 ```yaml
 platform_cookie_files:
@@ -158,7 +144,7 @@ platform_cookie_files:
 uv run python main.py --config config.yaml
 ```
 
-Keep the process running with your preferred process manager, for example `systemd`, `supervisor`, `launchd`, or `tmux`. The service still uses `main.py` as the only runtime entry point.
+For production on macOS, run it under a launchd LaunchAgent: point `ProgramArguments` at `.venv/bin/python main.py --config config.yaml`, set `WorkingDirectory` to the project root, put `/opt/homebrew/bin` on the agent's `PATH` (launchd does not source your shell profile, and `yt-dlp` needs `deno`/`ffmpeg`), and enable `KeepAlive` so it restarts on crash. The service uses `main.py` as the only runtime entry point.
 
 ## Configuration
 
@@ -180,7 +166,7 @@ See `config.example.yaml` for the full reference. Common settings:
 | `bibigpt_access_mode` | `web` | `web` uses the normal BibiGPT web app quota via tRPC; `browser` sends the same request from persisted Chromium |
 | `bibigpt_base_url` | `https://bibigpt.co` | Base URL for BibiGPT. Use `https://aitodo.co/zh` for the international/overseas route. |
 | `bibigpt_timeout` | `120.0` | Timeout in seconds for BibiGPT summary requests |
-| `bibigpt_browser_profile_dir` | `/app/browser-data/bibigpt` | Chromium profile path for BibiGPT browser mode |
+| `bibigpt_browser_profile_dir` | `browser-data/bibigpt` | Chromium profile path for BibiGPT browser mode |
 | `bibigpt_browser_headless` | `true` | Run Chromium headless in browser mode |
 | `bibigpt_browser_timeout` | `120.0` | Timeout in seconds for browser startup, navigation, and summary fetch |
 | `bibigpt_default_prompt` | Empty | Optional default custom prompt. Leave empty to use BibiGPT's built-in prompt |
@@ -207,7 +193,7 @@ cookies/
 Example config:
 
 ```yaml
-cookie_file: "/etc/feishu-link/cookies/cookies.txt"
+cookie_file: "cookies/cookies.txt"
 ```
 
 Only provide cookies for accounts you control. Cookie files are ignored by Git and should not be shared.
@@ -223,7 +209,7 @@ url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"
 default = true
 ```
 
-The Dockerfile also switches Debian apt sources to TUNA and installs `uv` from TUNA PyPI. TUNA currently documents its Docker mirror as a Docker CE package repository, not a Docker Hub registry mirror, so the base image pull still depends on Docker Hub or your local Docker daemon mirror. Deno and Playwright browser binaries are also downloaded from their upstream release hosts.
+Deno and Playwright browser binaries are downloaded from their upstream release hosts. To use the default upstream PyPI instead of TUNA, override `tool.uv.index` or set `UV_DEFAULT_INDEX`.
 
 ## Title Translation
 
@@ -320,7 +306,7 @@ Browser mode can import valid cookies, but if the local cookie file is incomplet
 
 ### Feishu video preview shows the wrong duration
 
-Make sure `ffmpeg` and `ffprobe` are available in the runtime image and that uploaded videos are converted before sending. The Docker image includes these tools.
+Make sure `ffmpeg` and `ffprobe` are available on `PATH` and that uploaded videos are converted before sending.
 
 ### The service ignores a link
 

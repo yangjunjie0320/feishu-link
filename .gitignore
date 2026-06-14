@@ -2,6 +2,7 @@ logs/
 cookies/
 browser-data/
 config.yaml
+config.local.yaml
 .env
 .DS_Store
 *.swp
@@ -16,6 +17,7 @@ config.yaml
 AGENTS.md
 CLAUDE.md
 DESIGN.md
+maintain/
 .venv/
 __pycache__/
 *.pyc
