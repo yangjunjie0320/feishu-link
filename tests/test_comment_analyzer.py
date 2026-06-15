@@ -14,6 +14,7 @@ from src.comment_analyzer import (
     sort_comments_by_heat,
 )
 from src.config import Settings
+from src.cookie_utils import get_cookie_header
 from src.parsers.instagram_media_info import _shortcode_to_media_id
 
 
@@ -237,6 +238,61 @@ async def test_fetch_bilibili_comments_uses_wbi_reply_api() -> None:
     assert fetched.comments[1].text == "回复 & 详情"
     assert fetched.comments[1].parent_id == "101"
     assert fetched.comments[2].text == "第二页"
+
+
+@respx.mock
+async def test_fetch_bilibili_comments_sends_no_cookie(tmp_path) -> None:
+    cookie_file = tmp_path / "bilibili.txt"
+    cookie_file.write_text(
+        "# Netscape HTTP Cookie File\n.bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\tsecret-session\n",
+        encoding="utf-8",
+    )
+    # The cookie is available for this domain; it must still not be sent.
+    assert get_cookie_header(str(cookie_file), "www.bilibili.com")
+
+    respx.get("https://api.bilibili.com/x/web-interface/view").mock(
+        return_value=httpx.Response(
+            200,
+            json={"code": 0, "data": {"aid": 1, "stat": {"reply": 1}}},
+        )
+    )
+    respx.get("https://api.bilibili.com/x/web-interface/nav").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "wbi_img": {
+                        "img_url": "https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyzabcdef.png",
+                        "sub_url": "https://i0.hdslb.com/bfs/wbi/ghijklmnopqrstuvwxyzabcdefghijkl.png",
+                    }
+                }
+            },
+        )
+    )
+    reply_route = respx.get("https://api.bilibili.com/x/v2/reply/wbi/main").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "cursor": {"is_end": True, "all_count": 1, "pagination_reply": {}},
+                    "replies": [
+                        {"rpid": 1, "member": {"uname": "a"}, "content": {"message": "hi"}}
+                    ],
+                },
+            },
+        )
+    )
+
+    settings = Settings(platform_cookie_files={"bilibili": str(cookie_file)})
+    async with httpx.AsyncClient() as client:
+        analyzer = CommentAnalyzer(settings, client)
+        await analyzer.fetch_comment_page("https://www.bilibili.com/video/BV1BCGB66E8P/")
+
+    for route in respx.routes:
+        for call in route.calls:
+            assert "cookie" not in {k.lower() for k in call.request.headers}
+    assert reply_route.called
 
 
 def test_select_top_comments_ranks_by_likes_then_replies() -> None:

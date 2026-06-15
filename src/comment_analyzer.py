@@ -19,7 +19,7 @@ import httpx
 from .config import Settings
 from .cookie_utils import temporary_cookie_file
 from .parsers.instagram_media_info import _shortcode_from_url, _shortcode_to_media_id
-from .parsers.og_meta import _request_headers
+from .parsers.og_meta import _USER_AGENT, _request_headers
 from .platforms import detect_platform
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,16 @@ _TOP_COMMENT_COUNT = 8
 
 def _is_chinese(text: str) -> bool:
     return bool(_CJK_RE.search(text))
+
+
+def _bilibili_anon_headers(referer: str = "https://www.bilibili.com/") -> dict[str, str]:
+    """Anonymous headers for the public bilibili comment endpoints.
+
+    The comment APIs are public; injecting a stale bilibili login cookie makes the
+    heat-mode pagination cursor stop advancing after ~2 pages (see DESIGN.md), so
+    fetch without cookies.
+    """
+    return {"User-Agent": _USER_AGENT, "Referer": referer}
 
 
 @dataclass(frozen=True)
@@ -242,8 +252,7 @@ class CommentAnalyzer:
         if not bvid:
             raise CommentAnalysisError("Bilibili bvid not found.")
 
-        headers = _request_headers("https://www.bilibili.com/", self._settings)
-        headers["Referer"] = url
+        headers = _bilibili_anon_headers(referer=url)
         try:
             view_response = await self._client.get(
                 "https://api.bilibili.com/x/web-interface/view",
@@ -355,7 +364,7 @@ class CommentAnalyzer:
         try:
             response = await self._client.get(
                 "https://api.bilibili.com/x/web-interface/nav",
-                headers=_request_headers("https://www.bilibili.com/", self._settings),
+                headers=_bilibili_anon_headers(),
                 follow_redirects=True,
             )
             response.raise_for_status()
