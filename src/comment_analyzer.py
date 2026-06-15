@@ -279,60 +279,67 @@ class CommentAnalyzer:
 
         raw_comments: list[object] = []
         offset = ""
-        for _ in range(20):
-            params = await self._sign_bilibili_wbi(
-                {
-                    "oid": aid,
-                    "type": 1,
-                    "mode": 3,
-                    "pagination_str": json.dumps(
-                        {"offset": offset},
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    "plat": 1,
-                    "web_location": 1315875,
-                },
-                bvid,
-            )
-            try:
-                response = await self._client.get(
-                    "https://api.bilibili.com/x/v2/reply/wbi/main",
-                    headers=headers,
-                    params=params,
-                    follow_redirects=True,
+        # Fetch comment pages through an isolated client: the pipeline's shared
+        # cookie jar can hold a bilibili buvid3 (set when og_meta fetched the
+        # video page), and that cookie freezes the heat-mode pagination cursor
+        # after ~2 pages. See DESIGN.md.
+        async with httpx.AsyncClient(timeout=self._settings.request_timeout) as reply_client:
+            for _ in range(20):
+                params = await self._sign_bilibili_wbi(
+                    {
+                        "oid": aid,
+                        "type": 1,
+                        "mode": 3,
+                        "pagination_str": json.dumps(
+                            {"offset": offset},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        "plat": 1,
+                        "web_location": 1315875,
+                    },
+                    bvid,
                 )
-                response.raise_for_status()
-                data = response.json()
-            except httpx.HTTPError as e:
-                raise CommentAnalysisError(f"Bilibili reply request error: {e}") from e
-            except ValueError as e:
-                raise CommentAnalysisError("Bilibili reply API returned non-json response") from e
-            if data.get("code") != 0:
-                raise CommentAnalysisError(
-                    f"Bilibili reply API error {data.get('code')}: {data.get('message')}"
+                try:
+                    response = await reply_client.get(
+                        "https://api.bilibili.com/x/v2/reply/wbi/main",
+                        headers=headers,
+                        params=params,
+                        follow_redirects=True,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                except httpx.HTTPError as e:
+                    raise CommentAnalysisError(f"Bilibili reply request error: {e}") from e
+                except ValueError as e:
+                    raise CommentAnalysisError(
+                        "Bilibili reply API returned non-json response"
+                    ) from e
+                if data.get("code") != 0:
+                    raise CommentAnalysisError(
+                        f"Bilibili reply API error {data.get('code')}: {data.get('message')}"
+                    )
+
+                payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+                replies = payload.get("replies") if isinstance(payload.get("replies"), list) else []
+                if not replies:
+                    break
+                raw_comments.extend(_normalize_bilibili_reply(reply, bvid) for reply in replies)
+                if len(raw_comments) >= max_comments:
+                    break
+
+                cursor = payload.get("cursor") if isinstance(payload.get("cursor"), dict) else {}
+                known_total = _as_optional_int(cursor.get("all_count"))
+                total_count = _prefer_known_total(total_count, known_total)
+                pagination_reply = (
+                    cursor.get("pagination_reply")
+                    if isinstance(cursor.get("pagination_reply"), dict)
+                    else {}
                 )
-
-            payload = data.get("data") if isinstance(data.get("data"), dict) else {}
-            replies = payload.get("replies") if isinstance(payload.get("replies"), list) else []
-            if not replies:
-                break
-            raw_comments.extend(_normalize_bilibili_reply(reply, bvid) for reply in replies)
-            if len(raw_comments) >= max_comments:
-                break
-
-            cursor = payload.get("cursor") if isinstance(payload.get("cursor"), dict) else {}
-            known_total = _as_optional_int(cursor.get("all_count"))
-            total_count = _prefer_known_total(total_count, known_total)
-            pagination_reply = (
-                cursor.get("pagination_reply")
-                if isinstance(cursor.get("pagination_reply"), dict)
-                else {}
-            )
-            next_offset = str(pagination_reply.get("next_offset") or "")
-            if cursor.get("is_end") or not next_offset or next_offset == offset:
-                break
-            offset = next_offset
+                next_offset = str(pagination_reply.get("next_offset") or "")
+                if cursor.get("is_end") or not next_offset or next_offset == offset:
+                    break
+                offset = next_offset
 
         return FetchedComments(
             comments=comments_from_raw(raw_comments, max_comments=max_comments),

@@ -295,6 +295,54 @@ async def test_fetch_bilibili_comments_sends_no_cookie(tmp_path) -> None:
     assert reply_route.called
 
 
+@respx.mock
+async def test_fetch_bilibili_reply_isolated_from_shared_cookie_jar() -> None:
+    # A buvid3 in the shared client's cookie jar freezes bilibili heat-mode
+    # pagination; the reply loop must run on an isolated client and send no cookie.
+    respx.get("https://api.bilibili.com/x/web-interface/view").mock(
+        return_value=httpx.Response(
+            200, json={"code": 0, "data": {"aid": 1, "stat": {"reply": 1}}}
+        )
+    )
+    respx.get("https://api.bilibili.com/x/web-interface/nav").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "wbi_img": {
+                        "img_url": "https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyzabcdef.png",
+                        "sub_url": "https://i0.hdslb.com/bfs/wbi/ghijklmnopqrstuvwxyzabcdefghijkl.png",
+                    }
+                }
+            },
+        )
+    )
+    reply_route = respx.get("https://api.bilibili.com/x/v2/reply/wbi/main").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": {
+                    "cursor": {"is_end": True, "all_count": 1, "pagination_reply": {}},
+                    "replies": [
+                        {"rpid": 1, "member": {"uname": "a"}, "content": {"message": "hi"}}
+                    ],
+                },
+            },
+        )
+    )
+
+    jar = httpx.Cookies()
+    jar.set("buvid3", "seeded-into-shared-jar", domain=".bilibili.com", path="/")
+    async with httpx.AsyncClient(cookies=jar) as client:
+        analyzer = CommentAnalyzer(Settings(), client)
+        await analyzer.fetch_comment_page("https://www.bilibili.com/video/BV1BCGB66E8P/")
+
+    assert reply_route.called
+    for call in reply_route.calls:
+        assert "cookie" not in {k.lower() for k in call.request.headers}
+
+
 def test_select_top_comments_ranks_by_likes_then_replies() -> None:
     comments = [
         VideoComment(text="plain", like_count=9, reply_count=99),
