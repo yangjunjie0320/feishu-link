@@ -173,6 +173,9 @@ See `config.example.yaml` for the full reference. Common settings:
 | `deepseek_api_key` | Empty | Enables title translation and final BibiGPT summary rewriting when configured |
 | `deepseek_base_url` | DeepSeek API | Optional compatible API endpoint |
 | `enable_title_translation` | `false` | Translate non-Chinese titles when true |
+| `cookie_refresh_enabled` | `true` | Refresh expiring platform cookies from a persistent Chromium profile |
+| `cookie_refresh_platforms` | `["bilibili"]` | Platforms whose cookies are refreshed before yt-dlp parse/download |
+| `cookie_refresh_profile_dir` | `browser-data/cookies` | Parent directory for per-platform persistent browser profiles |
 | `comment_analysis_max_comments` | `200` | Max comments to collect per on-demand comment analysis action; runtime is hard-capped at 200 |
 | `comment_analysis_prompt_comments` | `120` | Max collected comments included in the LLM prompt |
 | `comment_analysis_timeout` | `120.0` | Timeout in seconds for the comment analysis LLM call |
@@ -195,6 +198,12 @@ Example config:
 ```yaml
 cookie_file: "cookies/cookies.txt"
 ```
+
+For refreshable platforms, prefer per-platform files such as `cookies/bilibili.txt`.
+Run `python main.py --browser-login bilibili` once to seed the persistent profile
+before relying on automatic refresh. X and Instagram can also be refreshed after
+logging in with `--browser-login x` / `--browser-login instagram` and adding them
+to `cookie_refresh_platforms`.
 
 Only provide cookies for accounts you control. Cookie files are ignored by Git and should not be shared.
 

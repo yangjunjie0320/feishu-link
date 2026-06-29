@@ -30,6 +30,30 @@ def test_cookie_file_for_platform_uses_unified_cookie_file(tmp_path: Path) -> No
     assert settings.cookie_file_for_platform("youtube") == str(unified)
 
 
+def test_cookie_file_for_platform_prefers_conventional_platform_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    unified = tmp_path / "cookies.txt"
+    platform_cookie = tmp_path / "cookies" / "bilibili.txt"
+    unified.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    platform_cookie.parent.mkdir()
+    platform_cookie.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+
+    settings = Settings(cookie_file=str(unified))
+
+    assert settings.cookie_file_for_platform("bilibili") == str(Path("cookies/bilibili.txt"))
+
+
+def test_cookie_refresh_defaults_to_bilibili() -> None:
+    settings = Settings()
+
+    assert settings.cookie_refresh_enabled is True
+    assert settings.cookie_refresh_platforms == ["bilibili"]
+    assert settings.cookie_refresh_profile_dir == "browser-data/cookies"
+
+
 def test_bibi_client_uses_bibigpt_platform_cookie_file(tmp_path: Path) -> None:
     cookie_file = tmp_path / "bibigpt.txt"
     cookie_file.write_text(

@@ -92,14 +92,14 @@ bibigpt_default_prompt: ""
 # the BibiGPT cookie file so the HTTP path stays fresh as supabase tokens rotate.
 bibigpt_cookie_writeback: true
 
-# Optional cookie auto-refresh for platforms whose exported cookies expire
-# (e.g. Bilibili SESSDATA). Disabled by default. When enabled, each listed
-# platform keeps a persistent logged-in Chromium profile; before a yt-dlp call,
-# if its cookie is missing/near expiry, fresh cookies are exported from the live
-# browser context and written back to the platform cookie file. Log in once with
-# `python main.py --browser-login <platform>` before enabling.
-cookie_refresh_enabled: false
-cookie_refresh_platforms: []        # e.g. ["bilibili", "x"]
+# Cookie auto-refresh for platforms whose exported cookies expire
+# (e.g. Bilibili SESSDATA). Bilibili is enabled by default. Each listed platform
+# needs a persistent logged-in Chromium profile; before a yt-dlp call, if its
+# cookie is missing/near expiry, fresh cookies are exported from the live browser
+# context and written back to the platform cookie file. Log in once with
+# `python main.py --browser-login <platform>`.
+cookie_refresh_enabled: true
+cookie_refresh_platforms: ["bilibili"]        # add "x"/"instagram" only after logging in
 cookie_refresh_profile_dir: "browser-data/cookies"   # per-platform subdir
 cookie_refresh_browser_headless: true
 cookie_refresh_browser_timeout: 60.0

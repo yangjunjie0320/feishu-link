@@ -42,10 +42,10 @@ class Settings(BaseSettings):
     bibigpt_default_prompt: str = ""
     bibigpt_cookie_writeback: bool = True
 
-    # Container-internal cookie auto-refresh via persistent Chromium profiles.
-    cookie_refresh_enabled: bool = False
-    cookie_refresh_platforms: list[str] = []
-    cookie_refresh_profile_dir: str = "/app/browser-data/cookies"
+    # Cookie auto-refresh via persistent Chromium profiles.
+    cookie_refresh_enabled: bool = True
+    cookie_refresh_platforms: list[str] = ["bilibili"]
+    cookie_refresh_profile_dir: str = "browser-data/cookies"
     cookie_refresh_browser_headless: bool = True
     cookie_refresh_browser_timeout: float = 60.0
     cookie_refresh_stale_before_seconds: int = 86400
@@ -140,12 +140,12 @@ class Settings(BaseSettings):
         if configured:
             return configured
 
-        if self.cookie_file and Path(self.cookie_file).exists():
-            return self.cookie_file
-
         candidate = Path("cookies") / f"{normalized}.txt"
         if candidate.exists():
             return str(candidate)
+
+        if self.cookie_file and Path(self.cookie_file).exists():
+            return self.cookie_file
 
         return ""
 

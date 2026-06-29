@@ -13,9 +13,10 @@ class XOEmbedParser:
         self._client = client
 
     async def parse(self, url: str) -> LinkMetadata:
+        oembed_url = canonical_x_status_url(url)
         endpoint = "https://publish.twitter.com/oembed?" + urlencode({
             "omit_script": "1",
-            "url": url,
+            "url": oembed_url,
         })
         try:
             resp = await self._client.get(endpoint, follow_redirects=True)
@@ -61,3 +62,22 @@ def _handle_from_author_url(author_url: str) -> str:
         return ""
     handle = path.split("/", 1)[0]
     return f"@{handle}" if handle else ""
+
+
+def canonical_x_status_url(url: str) -> str:
+    """Strip media subpaths like /status/{id}/video/1 for public tweet endpoints."""
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if "status" not in parts:
+        return url
+
+    index = parts.index("status")
+    if index + 1 >= len(parts):
+        return url
+
+    canonical_parts = parts[: index + 2]
+    return parsed._replace(
+        path="/" + "/".join(canonical_parts),
+        params="",
+        fragment="",
+    ).geturl()

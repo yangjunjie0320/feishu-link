@@ -84,18 +84,20 @@ class XGraphQLParser:
 
         legacy = result.get("legacy") if isinstance(result.get("legacy"), dict) else {}
         cover_url = _cover_url_from_legacy(legacy)
-        if not cover_url:
-            raise ParserError(url, "x GraphQL returned no media image")
+        full_text = str(legacy.get("full_text") or "")
+        if not full_text and not cover_url:
+            raise ParserError(url, "x GraphQL returned no usable tweet content")
 
         return LinkMetadata(
             source_url=url,
             title="X Post",
-            description=str(legacy.get("full_text") or ""),
+            description=full_text,
             cover_url=cover_url,
             site_name="X",
             platform="x",
             canonical_url=url,
             media_type=MediaType.ARTICLE,
+            channel=_handle_from_url(url),
             view_count=_view_count(result),
             like_count=_as_int(legacy.get("favorite_count")),
             comment_count=_as_int(legacy.get("reply_count")),
@@ -136,8 +138,6 @@ def _cover_url_from_legacy(legacy: dict[str, Any]) -> str:
         for media in media_items:
             if not isinstance(media, dict):
                 continue
-            if media.get("type") != "photo":
-                continue
             url = media.get("media_url_https") or media.get("media_url")
             if url:
                 return str(url)
@@ -158,3 +158,12 @@ def _as_int(value: object) -> int | None:
         return int(float(str(value)))
     except (TypeError, ValueError):
         return None
+
+
+def _handle_from_url(url: str) -> str | None:
+    parts = [part for part in urlparse(url).path.split("/") if part]
+    if not parts:
+        return None
+    if parts[0].lower() in {"i", "intent"}:
+        return None
+    return f"@{parts[0]}"

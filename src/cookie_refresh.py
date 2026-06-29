@@ -39,6 +39,11 @@ _PROFILES: dict[str, RefreshProfile] = {
         cookie_domain="x.com",
         required_names=frozenset({"auth_token", "ct0"}),
     ),
+    "instagram": RefreshProfile(
+        site_url="https://www.instagram.com/",
+        cookie_domain="instagram.com",
+        required_names=frozenset({"sessionid"}),
+    ),
 }
 
 # Per-process throttle so a burst of stale-cookie requests does not launch the
@@ -59,12 +64,17 @@ def _resolve_target(platform: str, settings: Settings) -> str | None:
     """Resolve the per-platform cookie file to refresh into.
 
     Never returns the shared unified cookie_file: writing refreshed cookies there
-    would clobber other platforms. If only the shared file is configured, refresh
-    is skipped with a warning pointing at platform_cookie_files.
+    would clobber other platforms. If a conventional cookies/{platform}.txt file
+    exists, prefer it over the shared file so refreshed cookies are also the ones
+    used by yt-dlp.
     """
     configured = settings.platform_cookie_files.get(platform, "")
     if configured:
         return configured
+    for cookie_dir in (Path("/etc/feishu-link/cookies"), Path("cookies")):
+        candidate = cookie_dir / f"{platform}.txt"
+        if candidate.exists():
+            return str(candidate)
     if settings.cookie_file and Path(settings.cookie_file).exists():
         logger.warning(
             "cookie_refresh for %s needs a platform_cookie_files entry; the shared "
@@ -72,10 +82,6 @@ def _resolve_target(platform: str, settings: Settings) -> str | None:
             platform,
         )
         return None
-    for cookie_dir in (Path("/etc/feishu-link/cookies"), Path("cookies")):
-        candidate = cookie_dir / f"{platform}.txt"
-        if candidate.exists():
-            return str(candidate)
     return str(Path("cookies") / f"{platform}.txt")
 
 
@@ -147,6 +153,22 @@ def write_netscape(cookies: list[dict[str, Any]], path: str) -> None:
         raise
 
 
+def _platform_cookies(
+    raw: list[dict[str, Any]],
+    profile: RefreshProfile,
+) -> list[dict[str, Any]]:
+    return [
+        c for c in raw if _domain_matches(str(c.get("domain", "")), profile.cookie_domain)
+    ]
+
+
+def _has_required_cookies(
+    cookies: list[dict[str, Any]],
+    profile: RefreshProfile,
+) -> bool:
+    return profile.required_names <= {str(c.get("name", "")) for c in cookies}
+
+
 async def refresh_cookies(
     platform: str,
     settings: Settings,
@@ -172,9 +194,15 @@ async def refresh_cookies(
             headless=settings.cookie_refresh_browser_headless,
             timeout_ms=timeout_ms,
         ) as context:
-            page = context.pages[0] if context.pages else await context.new_page()
-            await page.goto(profile.site_url, wait_until="domcontentloaded", timeout=timeout_ms)
-            raw = await context.cookies()
+            cookies = _platform_cookies(await context.cookies(), profile)
+            if not _has_required_cookies(cookies, profile):
+                page = context.pages[0] if context.pages else await context.new_page()
+                await page.goto(
+                    profile.site_url,
+                    wait_until="domcontentloaded",
+                    timeout=timeout_ms,
+                )
+                cookies = _platform_cookies(await context.cookies(), profile)
     except BrowserUnavailableError as exc:
         logger.warning("Cookie refresh for %s unavailable: %s", platform, exc)
         return False
@@ -182,10 +210,7 @@ async def refresh_cookies(
         logger.warning("Cookie refresh for %s failed: %s", platform, exc)
         return False
 
-    cookies = [
-        c for c in raw if _domain_matches(str(c.get("domain", "")), profile.cookie_domain)
-    ]
-    if not profile.required_names <= {str(c.get("name", "")) for c in cookies}:
+    if not _has_required_cookies(cookies, profile):
         logger.warning(
             "Cookie refresh for %s produced no logged-in session; run "
             "`python main.py --browser-login %s`",
@@ -228,11 +253,8 @@ async def ensure_fresh_cookies(platform: str, settings: Settings) -> None:
 async def _wait_for_login(context: Any, profile: RefreshProfile) -> list[dict[str, Any]]:
     deadline = time.monotonic() + _LOGIN_WAIT_SECONDS
     while time.monotonic() < deadline:
-        raw = await context.cookies()
-        cookies = [
-            c for c in raw if _domain_matches(str(c.get("domain", "")), profile.cookie_domain)
-        ]
-        if profile.required_names <= {str(c.get("name", "")) for c in cookies}:
+        cookies = _platform_cookies(await context.cookies(), profile)
+        if _has_required_cookies(cookies, profile):
             return cookies
         await asyncio.sleep(_LOGIN_POLL_SECONDS)
     return []

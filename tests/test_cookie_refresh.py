@@ -15,11 +15,17 @@ from src.cookie_refresh import (
 from src.cookie_utils import get_cookie_header
 
 
-def _playwright_cookie(name: str, value: str, expires: float) -> dict:
+def _playwright_cookie(
+    name: str,
+    value: str,
+    expires: float,
+    *,
+    domain: str = ".bilibili.com",
+) -> dict:
     return {
         "name": name,
         "value": value,
-        "domain": ".bilibili.com",
+        "domain": domain,
         "path": "/",
         "expires": expires,
         "secure": True,
@@ -59,6 +65,24 @@ def test_cookie_is_stale_true_when_required_missing(tmp_path) -> None:
     )
 
     assert cookie_is_stale(str(target), "bilibili", 86400) is True
+
+
+def test_cookie_is_stale_supports_instagram_session(tmp_path) -> None:
+    target = tmp_path / "instagram.txt"
+    far_future = time.time() + 30 * 86400
+    cookie_refresh.write_netscape(
+        [
+            _playwright_cookie(
+                "sessionid",
+                "fresh",
+                far_future,
+                domain=".instagram.com",
+            )
+        ],
+        str(target),
+    )
+
+    assert cookie_is_stale(str(target), "instagram", 86400) is False
 
 
 def test_write_netscape_roundtrips_through_reader(tmp_path) -> None:
@@ -111,11 +135,47 @@ async def test_refresh_cookies_writes_logged_in_session(monkeypatch, tmp_path) -
 
 
 @pytest.mark.asyncio
-async def test_refresh_cookies_skips_when_not_logged_in(monkeypatch, tmp_path) -> None:
+async def test_refresh_cookies_exports_existing_session_without_navigation(
+    monkeypatch,
+    tmp_path,
+) -> None:
     target = tmp_path / "bilibili.txt"
+    far_future = time.time() + 30 * 86400
+    navigated = False
 
     class FakePage:
         async def goto(self, *args, **kwargs):
+            nonlocal navigated
+            navigated = True
+
+    class FakeContext:
+        pages: ClassVar = [FakePage()]
+
+        async def cookies(self):
+            return [_playwright_cookie("SESSDATA", "live", far_future)]
+
+    @asynccontextmanager
+    async def fake_pc(*args, **kwargs):
+        yield FakeContext()
+
+    monkeypatch.setattr(cookie_refresh, "persistent_context", fake_pc)
+
+    ok = await refresh_cookies("bilibili", Settings(), target=str(target))
+
+    assert ok is True
+    assert navigated is False
+    assert "SESSDATA=live" in get_cookie_header(str(target), "bilibili.com")
+
+
+@pytest.mark.asyncio
+async def test_refresh_cookies_skips_when_not_logged_in(monkeypatch, tmp_path) -> None:
+    target = tmp_path / "bilibili.txt"
+    navigated = False
+
+    class FakePage:
+        async def goto(self, *args, **kwargs):
+            nonlocal navigated
+            navigated = True
             return None
 
     class FakeContext:
@@ -133,6 +193,7 @@ async def test_refresh_cookies_skips_when_not_logged_in(monkeypatch, tmp_path) -
     ok = await refresh_cookies("bilibili", Settings(), target=str(target))
 
     assert ok is False
+    assert navigated is True
     assert not target.exists()
 
 
@@ -213,3 +274,39 @@ async def test_browser_login_saves_cookies_when_logged_in(monkeypatch, tmp_path)
 
     assert ok is True
     assert "SESSDATA=logged-in" in get_cookie_header(str(target), "bilibili.com")
+
+
+@pytest.mark.asyncio
+async def test_browser_login_saves_instagram_cookies(monkeypatch, tmp_path) -> None:
+    target = tmp_path / "instagram.txt"
+    far_future = time.time() + 30 * 86400
+
+    class FakePage:
+        async def goto(self, *args, **kwargs):
+            return None
+
+    class FakeContext:
+        pages: ClassVar = [FakePage()]
+
+        async def cookies(self):
+            return [
+                _playwright_cookie(
+                    "sessionid",
+                    "logged-in",
+                    far_future,
+                    domain=".instagram.com",
+                )
+            ]
+
+    @asynccontextmanager
+    async def fake_pc(*args, **kwargs):
+        assert kwargs.get("headless") is False
+        yield FakeContext()
+
+    monkeypatch.setattr(cookie_refresh, "persistent_context", fake_pc)
+
+    settings = Settings(platform_cookie_files={"instagram": str(target)})
+    ok = await browser_login("instagram", settings)
+
+    assert ok is True
+    assert "sessionid=logged-in" in get_cookie_header(str(target), "instagram.com")
