@@ -5,6 +5,7 @@ config.yaml
 config.local.yaml
 .env
 .DS_Store
+uv.lock
 *.swp
 *.swo
 *.bak

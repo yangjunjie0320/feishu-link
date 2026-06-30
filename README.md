@@ -78,7 +78,7 @@ When you see the WebSocket long-connection log, send a supported link in a Feish
 
 ## Run in production (native + launchd)
 
-The service runs natively, with no container. `uv` pins Python and the dependencies; `ffmpeg`, `ffprobe`, and `deno` must be on `PATH`. Production uses a macOS launchd LaunchAgent so the process restarts on crash and survives reconnects.
+The service runs natively, with no container. `uv` manages Python and resolves dependencies from `pyproject.toml`; `ffmpeg`, `ffprobe`, and `deno` must be on `PATH`. Production uses a macOS launchd LaunchAgent so the process restarts on crash and survives reconnects.
 
 ### 1. Install system tools
 
@@ -209,16 +209,15 @@ Only provide cookies for accounts you control. Cookie files are ignored by Git a
 
 ## Dependency Mirrors
 
-The project config sets `uv` to TUNA PyPI:
+The project does not commit `uv.lock` and does not pin a package index in `pyproject.toml`. Deployment scripts remove any locally generated `uv.lock` before `uv sync`, so dependencies are resolved from the current `pyproject.toml` constraints each time.
 
-```toml
-[[tool.uv.index]]
-name = "tuna"
-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"
-default = true
+Use the default upstream PyPI, or choose a mirror per machine/per run:
+
+```bash
+UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/ uv sync
 ```
 
-Deno and Playwright browser binaries are downloaded from their upstream release hosts. To use the default upstream PyPI instead of TUNA, override `tool.uv.index` or set `UV_DEFAULT_INDEX`.
+Deno and Playwright browser binaries are downloaded from their upstream release hosts.
 
 ## Title Translation
 
