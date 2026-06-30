@@ -78,7 +78,7 @@ When you see the WebSocket long-connection log, send a supported link in a Feish
 
 ## Run in production (native + launchd)
 
-The service runs natively, with no container. `uv` manages Python and resolves dependencies from `pyproject.toml`; `ffmpeg`, `ffprobe`, and `deno` must be on `PATH`. Production uses a macOS launchd LaunchAgent so the process restarts on crash and survives reconnects.
+The service runs natively, with no container. `uv` manages Python and resolves dependencies from `pyproject.toml`; `ffmpeg`, `ffprobe`, and `deno` must be on `PATH`. Production uses a macOS launchd LaunchAgent so the process restarts on crash and survives reconnects. Playwright is pinned to a known browser build so browser-mode summaries and cookie refresh do not require a fresh Chromium download on every dependency refresh.
 
 ### 1. Install system tools
 
