@@ -1,3 +1,6 @@
+import sys
+import types
+
 import httpx
 import respx
 
@@ -130,6 +133,182 @@ async def test_fetch_instagram_comments_uses_media_comments_api() -> None:
     assert fetched.total_count == 42
     assert [comment.text for comment in comments] == ["First", "Second"]
     assert comments[0].author == "alice"
+
+
+@respx.mock
+async def test_fetch_instagram_comments_sends_cookie_and_web_headers(tmp_path) -> None:
+    cookie_file = tmp_path / "instagram.txt"
+    cookie_file.write_text(
+        "\n".join(
+            [
+                "# Netscape HTTP Cookie File",
+                ".instagram.com\tTRUE\t/\tTRUE\t1800000000\tsessionid\tsecret-session",
+                ".instagram.com\tTRUE\t/\tTRUE\t1800000000\tcsrftoken\tcsrf-token",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    media_id = _shortcode_to_media_id("DYfWbunGlNg")
+    respx.get("https://www.instagram.com/p/DYfWbunGlNg/").mock(
+        return_value=httpx.Response(
+            200,
+            text='{"rollout_hash":"rollout-1","claim":"claim-1"}',
+        )
+    )
+    route = respx.get(f"https://www.instagram.com/api/v1/media/{media_id}/comments/").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "comments": [
+                    {"pk": "c1", "user": {"username": "alice"}, "text": "First"},
+                ],
+                "has_more_comments": False,
+            },
+        )
+    )
+    settings = Settings(platform_cookie_files={"instagram": str(cookie_file)})
+
+    async with httpx.AsyncClient() as client:
+        await CommentAnalyzer(settings, client).fetch_comment_page(
+            "https://www.instagram.com/p/DYfWbunGlNg/"
+        )
+
+    headers = route.calls[0].request.headers
+    assert "sessionid=secret-session" in headers["cookie"]
+    assert headers["x-csrftoken"] == "csrf-token"
+    assert headers["x-ig-app-id"] == "936619743392459"
+    assert headers["x-asbd-id"] == "129477"
+    assert headers["x-instagram-ajax"] == "rollout-1"
+    assert headers["x-ig-www-claim"] == "claim-1"
+
+
+@respx.mock
+async def test_fetch_x_comments_uses_tweet_detail_graphql(tmp_path) -> None:
+    cookie_file = tmp_path / "x.txt"
+    cookie_file.write_text(
+        "\n".join(
+            [
+                "# Netscape HTTP Cookie File",
+                ".x.com\tTRUE\t/\tTRUE\t1800000000\tct0\tcsrf-token",
+                ".x.com\tTRUE\t/\tTRUE\t1800000000\tauth_token\tsecret-auth",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    route = respx.get(
+        "https://x.com/i/api/graphql/jd3V43oDY9cY7obs1YMfbQ/TweetDetail"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": {
+                    "threaded_conversation_with_injections_v2": {
+                        "instructions": [
+                            {
+                                "entries": [
+                                    {
+                                        "entryId": "tweet-123",
+                                        "content": {
+                                            "itemContent": {
+                                                "tweet_results": {
+                                                    "result": _x_tweet(
+                                                        "123",
+                                                        "root post",
+                                                        reply_count=2,
+                                                    )
+                                                }
+                                            }
+                                        },
+                                    },
+                                    {
+                                        "entryId": "conversationthread-456",
+                                        "content": {
+                                            "items": [
+                                                {
+                                                    "item": {
+                                                        "itemContent": {
+                                                            "tweet_results": {
+                                                                "result": _x_tweet(
+                                                                    "456",
+                                                                    "first reply",
+                                                                    favorite_count=15,
+                                                                    reply_count=1,
+                                                                    parent_id="123",
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            ]
+                                        },
+                                    },
+                                ]
+                            }
+                        ]
+                    }
+                },
+            },
+        )
+    )
+    settings = Settings(platform_cookie_files={"x": str(cookie_file)})
+
+    async with httpx.AsyncClient() as client:
+        fetched = await CommentAnalyzer(settings, client).fetch_comment_page(
+            "https://x.com/alice/status/123"
+        )
+
+    assert route.called
+    headers = route.calls[0].request.headers
+    assert "auth_token=secret-auth" in headers["cookie"]
+    assert headers["x-csrf-token"] == "csrf-token"
+    assert fetched.total_count == 2
+    assert len(fetched.comments) == 1
+    assert fetched.comments[0].text == "first reply"
+    assert fetched.comments[0].author == "@bob"
+    assert fetched.comments[0].author_url == "https://x.com/bob"
+    assert fetched.comments[0].comment_url == "https://x.com/bob/status/456"
+
+
+def test_ytdlp_comment_fetch_keeps_late_high_like_comments(monkeypatch) -> None:
+    class FakeYoutubeDL:
+        def __init__(self, options: dict[str, object]) -> None:
+            self.options = options
+
+        def __enter__(self) -> "FakeYoutubeDL":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def extract_info(self, url: str, download: bool = False) -> dict[str, object]:
+            return {
+                "id": "abc",
+                "extractor_key": "Youtube",
+                "comment_count": 4,
+                "comments": [
+                    {"id": "c1", "author": "a", "text": "early low", "like_count": 1},
+                    {"id": "c2", "author": "b", "text": "second low", "like_count": 2},
+                    {"id": "c3", "author": "c", "text": "late high", "like_count": 99},
+                    {"id": "c4", "author": "d", "text": "late warm", "like_count": 50},
+                ],
+            }
+
+    fake_module = types.SimpleNamespace(YoutubeDL=FakeYoutubeDL)
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake_module)
+
+    async def run() -> list[str]:
+        async with httpx.AsyncClient() as client:
+            fetched = await CommentAnalyzer(
+                Settings(comment_analysis_max_comments=2),
+                client,
+            ).fetch_comment_page("https://www.youtube.com/watch?v=abc")
+        return [comment.text for comment in fetched.comments]
+
+    import asyncio
+
+    assert asyncio.run(run()) == ["late high", "late warm"]
 
 
 @respx.mock
@@ -393,7 +572,7 @@ def test_build_comment_analysis_prompt_requests_fixed_json_template() -> None:
     assert "避免多层 bullet" in prompt
     assert '"top_comment_translations"' in prompt
     assert '"sentiment"' in prompt
-    assert '"best_comment"' in prompt
+    assert '"best_comment"' not in prompt
     assert "严格 JSON" in prompt
     assert "Great breakdown" in prompt
 
@@ -444,9 +623,41 @@ def test_render_comment_analysis_markdown_uses_fixed_template() -> None:
     assert "样本 2 条" in markdown
     assert "情绪基调: 以正面称赞为主" in markdown
     assert "- **分析概览**" in markdown
-    assert "- **最具信息量**" in markdown
-    assert "这条评论包含独家信息" in markdown
+    assert "- **最具信息量**" not in markdown
+    assert "这条评论包含独家信息" not in markdown
     assert "- **热门评论**" in markdown
     assert "**Alice**" in markdown
     assert "> 很有帮助" in markdown
     assert "原文:" not in markdown
+
+
+def _x_tweet(
+    tweet_id: str,
+    text: str,
+    *,
+    favorite_count: int = 0,
+    reply_count: int = 0,
+    parent_id: str | None = None,
+) -> dict[str, object]:
+    return {
+        "__typename": "Tweet",
+        "rest_id": tweet_id,
+        "core": {
+            "user_results": {
+                "result": {
+                    "core": {
+                        "screen_name": "bob",
+                        "name": "Bob",
+                    },
+                }
+            }
+        },
+        "legacy": {
+            "id_str": tweet_id,
+            "conversation_id_str": "123",
+            "full_text": text,
+            "favorite_count": favorite_count,
+            "reply_count": reply_count,
+            "in_reply_to_status_id_str": parent_id,
+        },
+    }

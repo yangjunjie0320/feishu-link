@@ -17,22 +17,53 @@ from typing import Any
 import httpx
 
 from .config import Settings
-from .cookie_utils import temporary_cookie_file
+from .cookie_utils import get_cookie_header, temporary_cookie_file
 from .parsers.instagram_media_info import _shortcode_from_url, _shortcode_to_media_id
 from .parsers.og_meta import _USER_AGENT, _request_headers
+from .parsers.x_graphql import _BEARER_TOKEN, _cookie_value, _tweet_id_from_url
 from .platforms import detect_platform
+from .ytdlp_options import apply_ytdlp_runtime
 
 logger = logging.getLogger(__name__)
 
 _MAX_COMMENT_FETCH_LIMIT = 500
 _BILIBILI_BVID_RE = re.compile(r"(?:bilibili\.com/video/|b23\.tv/)?(BV[A-Za-z0-9]+)")
 _BILIBILI_WBI_KEY_TTL_SECONDS = 30
+_X_TWEET_DETAIL_QUERY_ID = "jd3V43oDY9cY7obs1YMfbQ"
+_RAW_COMMENT_SCAN_LIMIT = 5000
+_TOP_LIKED_COMMENT_COUNT = 3
 _BILIBILI_MIXIN_KEY_ENC_TAB = [
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
     33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
     61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
     36, 20, 34, 44, 52,
 ]
+_X_TWEET_DETAIL_FEATURES = {
+    "profile_label_improvements_pcf_label_in_post_enabled": True,
+    "rweb_tipjar_consumption_enabled": True,
+    "creator_subscriptions_tweet_preview_api_enabled": True,
+    "responsive_web_graphql_timeline_navigation_enabled": True,
+    "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+    "communities_web_enable_tweet_community_results_fetch": True,
+    "c9s_tweet_anatomy_moderator_badge_enabled": True,
+    "responsive_web_edit_tweet_api_enabled": True,
+    "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+    "view_counts_everywhere_api_enabled": True,
+    "longform_notetweets_consumption_enabled": True,
+    "responsive_web_twitter_article_tweet_consumption_enabled": True,
+    "freedom_of_speech_not_reach_fetch_enabled": True,
+    "standardized_nudges_misinfo": True,
+    "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+    "longform_notetweets_rich_text_read_enabled": True,
+    "longform_notetweets_inline_media_enabled": True,
+    "responsive_web_enhance_cards_enabled": False,
+}
+_X_TWEET_DETAIL_FIELD_TOGGLES = {
+    "withArticleRichContentState": True,
+    "withArticlePlainText": False,
+    "withGrokAnalyze": False,
+    "withDisallowedReplyControls": False,
+}
 
 
 class CommentAnalysisError(Exception):
@@ -141,6 +172,9 @@ class CommentAnalyzer:
         max_comments = _comment_fetch_limit(self._settings)
         instagram_error: CommentAnalysisError | None = None
 
+        if platform == "x":
+            return await self._fetch_x_comments(url, max_comments)
+
         if platform == "instagram":
             try:
                 fetched = await self._fetch_instagram_comments(url, max_comments)
@@ -180,11 +214,8 @@ class CommentAnalyzer:
             "https://www.instagram.com/api/v1/media/"
             f"{_shortcode_to_media_id(shortcode)}/comments/"
         )
-        headers = _request_headers("https://www.instagram.com/", self._settings)
-        headers.update({
-            "Referer": url,
-            "X-IG-App-ID": "936619743392459",
-        })
+        headers = _instagram_comment_headers(url, self._settings)
+        await self._augment_instagram_comment_headers(url, headers)
 
         raw_comments: list[object] = []
         total_count: int | None = None
@@ -211,7 +242,7 @@ class CommentAnalyzer:
             try:
                 data: dict[str, Any] = response.json()
             except ValueError as e:
-                raise CommentAnalysisError("Instagram comments returned non-json response") from e
+                raise CommentAnalysisError(_instagram_non_json_reason(response)) from e
 
             page_comments = data.get("comments") or []
             if isinstance(page_comments, list):
@@ -231,6 +262,102 @@ class CommentAnalyzer:
         return FetchedComments(
             comments=comments_from_raw(raw_comments, max_comments=max_comments),
             total_count=total_count,
+        )
+
+    async def _augment_instagram_comment_headers(
+        self,
+        url: str,
+        headers: dict[str, str],
+    ) -> None:
+        if "Cookie" not in headers:
+            return
+        try:
+            response = await self._client.get(url, headers=headers, follow_redirects=True)
+        except httpx.RequestError as e:
+            logger.info("instagram web bootstrap failed before comments request: %s", e)
+            return
+        if response.status_code >= 400:
+            return
+
+        rollout = re.search(r'"rollout_hash":"([^"]+)"', response.text)
+        claim = re.search(r'"claim":"([^"]+)"', response.text)
+        if rollout:
+            headers["X-Instagram-AJAX"] = rollout.group(1)
+        headers["X-IG-WWW-Claim"] = claim.group(1) if claim else "0"
+        headers.update(
+            {
+                "Origin": "https://www.instagram.com",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+            }
+        )
+
+    async def _fetch_x_comments(self, url: str, max_comments: int) -> FetchedComments:
+        tweet_id = _tweet_id_from_url(url)
+        if not tweet_id:
+            raise CommentAnalysisError("X tweet id not found.")
+
+        cookie_file = self._settings.cookie_file_for_platform("x")
+        cookie_header = get_cookie_header(cookie_file, "x.com")
+        csrf_token = _cookie_value(cookie_header, "ct0")
+        if not cookie_header or not csrf_token:
+            raise CommentAnalysisError("X 评论抓取需要有效 x cookie。")
+
+        variables = {
+            "focalTweetId": tweet_id,
+            "with_rux_injections": False,
+            "rankingMode": "Relevance",
+            "includePromotedContent": False,
+            "withCommunity": True,
+            "withQuickPromoteEligibilityTweetFields": True,
+            "withBirdwatchNotes": True,
+            "withVoice": True,
+        }
+        endpoint = (
+            f"https://x.com/i/api/graphql/{_X_TWEET_DETAIL_QUERY_ID}/TweetDetail?"
+            + urllib.parse.urlencode(
+                {
+                    "variables": json.dumps(variables, separators=(",", ":")),
+                    "features": json.dumps(_X_TWEET_DETAIL_FEATURES, separators=(",", ":")),
+                    "fieldToggles": json.dumps(
+                        _X_TWEET_DETAIL_FIELD_TOGGLES,
+                        separators=(",", ":"),
+                    ),
+                }
+            )
+        )
+        try:
+            response = await self._client.get(
+                endpoint,
+                headers=_x_comment_headers(url, cookie_header, csrf_token),
+                follow_redirects=True,
+            )
+        except httpx.RequestError as e:
+            raise CommentAnalysisError(f"X comments request error: {e}") from e
+
+        if response.status_code == 429:
+            raise CommentAnalysisError("X 评论接口触发限流。")
+        if response.status_code in {401, 403}:
+            raise CommentAnalysisError(
+                f"X 评论接口需要有效登录 cookie (HTTP {response.status_code})。"
+            )
+        if response.status_code >= 400:
+            raise CommentAnalysisError(f"X comments HTTP {response.status_code}")
+
+        try:
+            data: dict[str, Any] = response.json()
+        except ValueError as e:
+            raise CommentAnalysisError("X comments returned non-json response") from e
+
+        if errors := data.get("errors"):
+            message = _x_error_message(errors)
+            raise CommentAnalysisError(f"X comments API error: {message}")
+
+        comments = _x_comments_from_tweet_detail(data, tweet_id, max_comments=max_comments)
+        return FetchedComments(
+            comments=comments,
+            total_count=_x_total_reply_count(data, tweet_id),
         )
 
     async def _resolve_bilibili_url(self, url: str) -> str:
@@ -418,6 +545,7 @@ class CommentAnalyzer:
                 "source_address": "0.0.0.0",
                 "logger": _YtDlpCommentLogger(),
             }
+            apply_ytdlp_runtime(options, platform)
 
             cookie_file = self._settings.cookie_file_for_platform(platform)
             try:
@@ -448,8 +576,14 @@ class CommentAnalyzer:
                     raw["comment_url"] = comment_url
                 raw_comments.append(raw)
 
+            comments = comments_from_raw(
+                raw_comments,
+                max_comments=max(max_comments, min(len(raw_comments), _RAW_COMMENT_SCAN_LIMIT)),
+            )
+            comments = _select_comment_sample(comments, max_comments=max_comments)
+
             return FetchedComments(
-                comments=comments_from_raw(raw_comments, max_comments=max_comments),
+                comments=comments,
                 total_count=_as_optional_int(info.get("comment_count")),
             )
 
@@ -576,6 +710,144 @@ def comments_from_raw(
     ]
 
 
+def _instagram_comment_headers(url: str, settings: Settings) -> dict[str, str]:
+    headers = _request_headers("https://www.instagram.com/", settings)
+    cookie_header = headers.get("Cookie", "")
+    csrf_token = _cookie_value(cookie_header, "csrftoken")
+    headers.update(
+        {
+            "Accept": "application/json, text/plain, */*",
+            "Referer": url,
+            "X-ASBD-ID": "129477",
+            "X-IG-App-ID": "936619743392459",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+    )
+    if csrf_token:
+        headers["X-CSRFToken"] = csrf_token
+    return headers
+
+
+def _instagram_non_json_reason(response: httpx.Response) -> str:
+    prefix = response.text[:300].lstrip().lower()
+    content_type = response.headers.get("content-type", "")
+    if prefix.startswith("<!doctype") or prefix.startswith("<html") or "text/html" in content_type:
+        return "Instagram comments returned HTML/login response"
+    return "Instagram comments returned non-json response"
+
+
+def _x_comment_headers(url: str, cookie_header: str, csrf_token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {_BEARER_TOKEN}",
+        "Cookie": cookie_header,
+        "Referer": url,
+        "User-Agent": _USER_AGENT,
+        "X-CSRF-Token": csrf_token,
+        "X-Twitter-Active-User": "yes",
+        "X-Twitter-Auth-Type": "OAuth2Session",
+        "X-Twitter-Client-Language": "en",
+    }
+
+
+def _x_error_message(errors: object) -> str:
+    if not isinstance(errors, list) or not errors:
+        return "unknown error"
+    first = errors[0]
+    if not isinstance(first, dict):
+        return str(first)
+    return str(first.get("message") or first.get("code") or "unknown error")
+
+
+def _x_comments_from_tweet_detail(
+    data: dict[str, Any],
+    tweet_id: str,
+    *,
+    max_comments: int,
+) -> list[VideoComment]:
+    comments: list[VideoComment] = []
+    seen: set[str] = set()
+    for tweet in _iter_x_tweet_results(data):
+        comment = _x_comment_from_tweet(tweet, root_tweet_id=tweet_id)
+        if comment is None or comment.comment_id in seen:
+            continue
+        seen.add(comment.comment_id)
+        comments.append(comment)
+    return _select_comment_sample(comments, max_comments=max_comments)
+
+
+def _iter_x_tweet_results(value: object) -> Iterable[dict[str, Any]]:
+    if isinstance(value, dict):
+        legacy = value.get("legacy") if isinstance(value.get("legacy"), dict) else {}
+        if "full_text" in legacy and (legacy.get("id_str") or value.get("rest_id")):
+            yield value
+        for child in value.values():
+            yield from _iter_x_tweet_results(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_x_tweet_results(child)
+
+
+def _x_comment_from_tweet(tweet: dict[str, Any], *, root_tweet_id: str) -> VideoComment | None:
+    legacy = tweet.get("legacy") if isinstance(tweet.get("legacy"), dict) else {}
+    comment_id = str(legacy.get("id_str") or tweet.get("rest_id") or "")
+    if not comment_id or comment_id == root_tweet_id:
+        return None
+    if str(legacy.get("conversation_id_str") or "") != root_tweet_id:
+        return None
+
+    text = _clean_comment_text(str(legacy.get("full_text") or ""))
+    if not text:
+        return None
+
+    user_result = (
+        tweet.get("core", {})
+        .get("user_results", {})
+        .get("result", {})
+    )
+    user_core = user_result.get("core") if isinstance(user_result, dict) else {}
+    user_legacy = user_result.get("legacy") if isinstance(user_result, dict) else {}
+    screen_name = ""
+    display_name = ""
+    if isinstance(user_core, dict):
+        screen_name = str(user_core.get("screen_name") or "")
+        display_name = str(user_core.get("name") or "")
+    if not screen_name and isinstance(user_legacy, dict):
+        screen_name = str(user_legacy.get("screen_name") or "")
+    author = f"@{screen_name}" if screen_name else display_name
+    author_url = f"https://x.com/{screen_name}" if screen_name else ""
+    comment_url = f"https://x.com/{screen_name}/status/{comment_id}" if screen_name else ""
+
+    return VideoComment(
+        text=text,
+        author=author,
+        author_url=author_url,
+        comment_url=comment_url,
+        like_count=_as_int(legacy.get("favorite_count")),
+        reply_count=_as_int(legacy.get("reply_count")),
+        comment_id=comment_id,
+        parent_id=str(legacy.get("in_reply_to_status_id_str") or ""),
+    )
+
+
+def _x_total_reply_count(data: dict[str, Any], tweet_id: str) -> int | None:
+    for tweet in _iter_x_tweet_results(data):
+        legacy = tweet.get("legacy") if isinstance(tweet.get("legacy"), dict) else {}
+        comment_id = str(legacy.get("id_str") or tweet.get("rest_id") or "")
+        if comment_id == tweet_id:
+            return _as_optional_int(legacy.get("reply_count"))
+    return None
+
+
+def _select_comment_sample(
+    comments: list[VideoComment],
+    *,
+    max_comments: int,
+) -> list[VideoComment]:
+    if len(comments) <= max_comments:
+        return comments
+    return sort_comments_by_heat(comments)[:max_comments]
+
+
 def _bilibili_bvid_from_url(url: str) -> str | None:
     match = _BILIBILI_BVID_RE.search(url)
     return match.group(1) if match else None
@@ -645,7 +917,18 @@ def select_top_comments(
     *,
     count: int,
 ) -> list[VideoComment]:
-    return sort_comments_by_heat(comments)[:count]
+    top_liked = sort_comments_by_heat(comments)[: min(_TOP_LIKED_COMMENT_COUNT, count)]
+    selected: list[VideoComment] = []
+    seen: set[tuple[str, str, str]] = set()
+    for comment in [*top_liked, *sort_comments_by_heat(comments)]:
+        key = (comment.comment_id, comment.author.lower(), comment.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(comment)
+        if len(selected) >= count:
+            break
+    return selected
 
 
 def sort_comments_by_heat(comments: list[VideoComment]) -> list[VideoComment]:
@@ -690,7 +973,6 @@ def build_comment_analysis_prompt(
         '  "consensus": ["共识 1", "共识 2"],\n'
         '  "controversy": ["争议 1"],\n'
         '  "notable_points": ["有价值的信息 1"],\n'
-        '  "best_comment": "信息密度最高的一条评论原文（不一定是点赞最多的，选包含独家信息、补充背景或纠正错误的）",\n'
         f'  "top_comment_translations": [{translation_placeholders}]\n'
         "}\n\n"
         f"排名最靠前的 {n} 条评论:\n"
@@ -720,7 +1002,7 @@ def parse_comment_insight(raw_content: str, *, top_comment_count: int) -> Commen
                 raise CommentAnalysisError("LLM returned invalid JSON.") from e
         else:
             logger.warning("comment insight parse failed, raw content: %s", content[:300])
-            raise CommentAnalysisError("LLM returned invalid JSON.")
+            raise CommentAnalysisError("LLM returned invalid JSON.") from None
     if not isinstance(data, dict):
         raise CommentAnalysisError("LLM returned invalid JSON shape.")
 
@@ -759,12 +1041,6 @@ def render_comment_analysis_markdown(
         f"    - 争议: {_join_points(insight.controversy)}",
         f"    - 信息增量: {_join_points(insight.notable_points)}",
     ]
-    if insight.best_comment:
-        overview += [
-            "- **最具信息量**",
-            f"    > {_clean_card_text(insight.best_comment)}",
-        ]
-
     hot = ["- **热门评论**"]
     for index, (comment, translation) in enumerate(
         itertools.zip_longest(top_comments, insight.top_comment_translations, fillvalue=""),
@@ -774,14 +1050,17 @@ def render_comment_analysis_markdown(
 
         author = _clean_card_text(comment.author or "unknown")
         author_md = f"[{author}]({comment.author_url})" if comment.author_url else f"**{author}**"
-        meta = f"    {index}. {author_md} · 点赞 {comment.like_count} · 子评论 {comment.reply_count}"
+        meta = (
+            f"    {index}. {author_md} · 点赞 {comment.like_count} "
+            f"· 子评论 {comment.reply_count}"
+        )
         if comment.comment_url:
             meta += f" · [查看原评论]({comment.comment_url})"
         hot.append(meta)
         hot.append(f"    > {_clean_card_text(display_text)}")
         hot.append("")
 
-    return "\n".join(overview + [""] + hot).strip()
+    return "\n".join([*overview, "", *hot]).strip()
 
 
 def _pick_display_text(original: str, translation: str) -> str:
