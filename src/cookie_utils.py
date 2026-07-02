@@ -55,3 +55,11 @@ def get_cookie_header(cookie_file: str, domain: str) -> str:
             pairs.append(f"{cookie.name}={cookie.value}")
 
     return "; ".join(pairs)
+
+
+def cookie_value(cookie_header: str, name: str) -> str:
+    """Extract a single cookie value from a Cookie header string."""
+    for part in cookie_header.split("; "):
+        if part.startswith(f"{name}="):
+            return part.split("=", 1)[1]
+    return ""

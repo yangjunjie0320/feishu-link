@@ -17,10 +17,10 @@ from typing import Any
 import httpx
 
 from .config import Settings
-from .cookie_utils import get_cookie_header, temporary_cookie_file
+from .cookie_utils import cookie_value, get_cookie_header, temporary_cookie_file
 from .parsers.instagram_media_info import _shortcode_from_url, _shortcode_to_media_id
 from .parsers.og_meta import _USER_AGENT, _request_headers
-from .parsers.x_graphql import _BEARER_TOKEN, _cookie_value, _tweet_id_from_url
+from .parsers.x_graphql import tweet_id_from_url, x_api_headers, x_graphql_endpoint
 from .platforms import detect_platform
 from .ytdlp_options import apply_ytdlp_runtime
 
@@ -31,7 +31,6 @@ _BILIBILI_BVID_RE = re.compile(r"(?:bilibili\.com/video/|b23\.tv/)?(BV[A-Za-z0-9
 _BILIBILI_WBI_KEY_TTL_SECONDS = 30
 _X_TWEET_DETAIL_QUERY_ID = "jd3V43oDY9cY7obs1YMfbQ"
 _RAW_COMMENT_SCAN_LIMIT = 5000
-_TOP_LIKED_COMMENT_COUNT = 3
 _BILIBILI_MIXIN_KEY_ENC_TAB = [
     46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
     33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
@@ -123,7 +122,6 @@ class CommentInsight:
     consensus: list[str]
     controversy: list[str]
     notable_points: list[str]
-    best_comment: str
     top_comment_translations: list[str]
 
 
@@ -294,13 +292,13 @@ class CommentAnalyzer:
         )
 
     async def _fetch_x_comments(self, url: str, max_comments: int) -> FetchedComments:
-        tweet_id = _tweet_id_from_url(url)
+        tweet_id = tweet_id_from_url(url)
         if not tweet_id:
             raise CommentAnalysisError("X tweet id not found.")
 
         cookie_file = self._settings.cookie_file_for_platform("x")
         cookie_header = get_cookie_header(cookie_file, "x.com")
-        csrf_token = _cookie_value(cookie_header, "ct0")
+        csrf_token = cookie_value(cookie_header, "ct0")
         if not cookie_header or not csrf_token:
             raise CommentAnalysisError("X 评论抓取需要有效 x cookie。")
 
@@ -314,23 +312,17 @@ class CommentAnalyzer:
             "withBirdwatchNotes": True,
             "withVoice": True,
         }
-        endpoint = (
-            f"https://x.com/i/api/graphql/{_X_TWEET_DETAIL_QUERY_ID}/TweetDetail?"
-            + urllib.parse.urlencode(
-                {
-                    "variables": json.dumps(variables, separators=(",", ":")),
-                    "features": json.dumps(_X_TWEET_DETAIL_FEATURES, separators=(",", ":")),
-                    "fieldToggles": json.dumps(
-                        _X_TWEET_DETAIL_FIELD_TOGGLES,
-                        separators=(",", ":"),
-                    ),
-                }
-            )
+        endpoint = x_graphql_endpoint(
+            _X_TWEET_DETAIL_QUERY_ID,
+            "TweetDetail",
+            variables,
+            _X_TWEET_DETAIL_FEATURES,
+            field_toggles=_X_TWEET_DETAIL_FIELD_TOGGLES,
         )
         try:
             response = await self._client.get(
                 endpoint,
-                headers=_x_comment_headers(url, cookie_header, csrf_token),
+                headers=x_api_headers(url, cookie_header, csrf_token, user_agent=_USER_AGENT),
                 follow_redirects=True,
             )
         except httpx.RequestError as e:
@@ -354,11 +346,10 @@ class CommentAnalyzer:
             message = _x_error_message(errors)
             raise CommentAnalysisError(f"X comments API error: {message}")
 
-        comments = _x_comments_from_tweet_detail(data, tweet_id, max_comments=max_comments)
-        return FetchedComments(
-            comments=comments,
-            total_count=_x_total_reply_count(data, tweet_id),
+        comments, total_count = _x_comments_from_tweet_detail(
+            data, tweet_id, max_comments=max_comments
         )
+        return FetchedComments(comments=comments, total_count=total_count)
 
     async def _resolve_bilibili_url(self, url: str) -> str:
         if "b23.tv" not in url:
@@ -576,10 +567,7 @@ class CommentAnalyzer:
                     raw["comment_url"] = comment_url
                 raw_comments.append(raw)
 
-            comments = comments_from_raw(
-                raw_comments,
-                max_comments=max(max_comments, min(len(raw_comments), _RAW_COMMENT_SCAN_LIMIT)),
-            )
+            comments = comments_from_raw(raw_comments, max_comments=_RAW_COMMENT_SCAN_LIMIT)
             comments = _select_comment_sample(comments, max_comments=max_comments)
 
             return FetchedComments(
@@ -713,7 +701,7 @@ def comments_from_raw(
 def _instagram_comment_headers(url: str, settings: Settings) -> dict[str, str]:
     headers = _request_headers("https://www.instagram.com/", settings)
     cookie_header = headers.get("Cookie", "")
-    csrf_token = _cookie_value(cookie_header, "csrftoken")
+    csrf_token = cookie_value(cookie_header, "csrftoken")
     headers.update(
         {
             "Accept": "application/json, text/plain, */*",
@@ -736,19 +724,6 @@ def _instagram_non_json_reason(response: httpx.Response) -> str:
     return "Instagram comments returned non-json response"
 
 
-def _x_comment_headers(url: str, cookie_header: str, csrf_token: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {_BEARER_TOKEN}",
-        "Cookie": cookie_header,
-        "Referer": url,
-        "User-Agent": _USER_AGENT,
-        "X-CSRF-Token": csrf_token,
-        "X-Twitter-Active-User": "yes",
-        "X-Twitter-Auth-Type": "OAuth2Session",
-        "X-Twitter-Client-Language": "en",
-    }
-
-
 def _x_error_message(errors: object) -> str:
     if not isinstance(errors, list) or not errors:
         return "unknown error"
@@ -763,16 +738,24 @@ def _x_comments_from_tweet_detail(
     tweet_id: str,
     *,
     max_comments: int,
-) -> list[VideoComment]:
+) -> tuple[list[VideoComment], int | None]:
     comments: list[VideoComment] = []
     seen: set[str] = set()
+    total_count: int | None = None
     for tweet in _iter_x_tweet_results(data):
-        comment = _x_comment_from_tweet(tweet, root_tweet_id=tweet_id)
-        if comment is None or comment.comment_id in seen:
+        legacy = tweet.get("legacy") if isinstance(tweet.get("legacy"), dict) else {}
+        comment_id = str(legacy.get("id_str") or tweet.get("rest_id") or "")
+        if not comment_id or comment_id in seen:
             continue
-        seen.add(comment.comment_id)
-        comments.append(comment)
-    return _select_comment_sample(comments, max_comments=max_comments)
+        if comment_id == tweet_id:
+            if total_count is None:
+                total_count = _as_optional_int(legacy.get("reply_count"))
+            continue
+        seen.add(comment_id)
+        comment = _x_comment_from_tweet(tweet, legacy, comment_id, root_tweet_id=tweet_id)
+        if comment is not None:
+            comments.append(comment)
+    return _select_comment_sample(comments, max_comments=max_comments), total_count
 
 
 def _iter_x_tweet_results(value: object) -> Iterable[dict[str, Any]]:
@@ -787,11 +770,13 @@ def _iter_x_tweet_results(value: object) -> Iterable[dict[str, Any]]:
             yield from _iter_x_tweet_results(child)
 
 
-def _x_comment_from_tweet(tweet: dict[str, Any], *, root_tweet_id: str) -> VideoComment | None:
-    legacy = tweet.get("legacy") if isinstance(tweet.get("legacy"), dict) else {}
-    comment_id = str(legacy.get("id_str") or tweet.get("rest_id") or "")
-    if not comment_id or comment_id == root_tweet_id:
-        return None
+def _x_comment_from_tweet(
+    tweet: dict[str, Any],
+    legacy: dict[str, Any],
+    comment_id: str,
+    *,
+    root_tweet_id: str,
+) -> VideoComment | None:
     if str(legacy.get("conversation_id_str") or "") != root_tweet_id:
         return None
 
@@ -827,15 +812,6 @@ def _x_comment_from_tweet(tweet: dict[str, Any], *, root_tweet_id: str) -> Video
         comment_id=comment_id,
         parent_id=str(legacy.get("in_reply_to_status_id_str") or ""),
     )
-
-
-def _x_total_reply_count(data: dict[str, Any], tweet_id: str) -> int | None:
-    for tweet in _iter_x_tweet_results(data):
-        legacy = tweet.get("legacy") if isinstance(tweet.get("legacy"), dict) else {}
-        comment_id = str(legacy.get("id_str") or tweet.get("rest_id") or "")
-        if comment_id == tweet_id:
-            return _as_optional_int(legacy.get("reply_count"))
-    return None
 
 
 def _select_comment_sample(
@@ -917,10 +893,9 @@ def select_top_comments(
     *,
     count: int,
 ) -> list[VideoComment]:
-    top_liked = sort_comments_by_heat(comments)[: min(_TOP_LIKED_COMMENT_COUNT, count)]
     selected: list[VideoComment] = []
     seen: set[tuple[str, str, str]] = set()
-    for comment in [*top_liked, *sort_comments_by_heat(comments)]:
+    for comment in sort_comments_by_heat(comments):
         key = (comment.comment_id, comment.author.lower(), comment.text)
         if key in seen:
             continue
@@ -1012,7 +987,6 @@ def parse_comment_insight(raw_content: str, *, top_comment_count: int) -> Commen
         consensus=_clean_insight_list(data.get("consensus"), limit=3),
         controversy=_clean_insight_list(data.get("controversy"), limit=2),
         notable_points=_clean_insight_list(data.get("notable_points"), limit=2),
-        best_comment=_clean_insight_text(data.get("best_comment")) or "",
         top_comment_translations=_clean_insight_list(
             data.get("top_comment_translations"),
             limit=max(1, top_comment_count),

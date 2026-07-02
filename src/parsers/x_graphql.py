@@ -7,7 +7,7 @@ from urllib.parse import urlencode, urlparse
 import httpx
 
 from ..config import Settings
-from ..cookie_utils import get_cookie_header
+from ..cookie_utils import cookie_value, get_cookie_header
 from .base import LinkMetadata, MediaType, ParserError
 
 _BEARER_TOKEN = (
@@ -22,20 +22,55 @@ _FEATURES = {
 }
 
 
+def x_graphql_endpoint(
+    query_id: str,
+    operation: str,
+    variables: dict[str, Any],
+    features: dict[str, Any],
+    field_toggles: dict[str, Any] | None = None,
+) -> str:
+    params = {
+        "variables": json.dumps(variables, separators=(",", ":")),
+        "features": json.dumps(features, separators=(",", ":")),
+    }
+    if field_toggles is not None:
+        params["fieldToggles"] = json.dumps(field_toggles, separators=(",", ":"))
+    return f"https://x.com/i/api/graphql/{query_id}/{operation}?" + urlencode(params)
+
+
+def x_api_headers(
+    url: str,
+    cookie_header: str,
+    csrf_token: str,
+    *,
+    user_agent: str = "Mozilla/5.0",
+) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {_BEARER_TOKEN}",
+        "Cookie": cookie_header,
+        "Referer": url,
+        "User-Agent": user_agent,
+        "X-CSRF-Token": csrf_token,
+        "X-Twitter-Active-User": "yes",
+        "X-Twitter-Auth-Type": "OAuth2Session",
+        "X-Twitter-Client-Language": "en",
+    }
+
+
 class XGraphQLParser:
     def __init__(self, client: httpx.AsyncClient, settings: Settings) -> None:
         self._client = client
         self._settings = settings
 
     async def parse(self, url: str) -> LinkMetadata:
-        tweet_id = _tweet_id_from_url(url)
+        tweet_id = tweet_id_from_url(url)
         if not tweet_id:
             raise ParserError(url, "x tweet id not found")
 
         domain = urlparse(url).netloc
         cookie_file = self._settings.cookie_file_for_platform("x")
         cookie_header = get_cookie_header(cookie_file, domain)
-        csrf_token = _cookie_value(cookie_header, "ct0")
+        csrf_token = cookie_value(cookie_header, "ct0")
         if not cookie_header or not csrf_token:
             raise ParserError(url, "x cookie is not configured")
 
@@ -45,26 +80,11 @@ class XGraphQLParser:
             "includePromotedContent": False,
             "withVoice": False,
         }
-        endpoint = (
-            f"https://x.com/i/api/graphql/{_QUERY_ID}/TweetResultByRestId?"
-            + urlencode({
-                "variables": json.dumps(variables, separators=(",", ":")),
-                "features": json.dumps(_FEATURES, separators=(",", ":")),
-            })
-        )
+        endpoint = x_graphql_endpoint(_QUERY_ID, "TweetResultByRestId", variables, _FEATURES)
         try:
             resp = await self._client.get(
                 endpoint,
-                headers={
-                    "Authorization": f"Bearer {_BEARER_TOKEN}",
-                    "Cookie": cookie_header,
-                    "Referer": url,
-                    "User-Agent": "Mozilla/5.0",
-                    "X-CSRF-Token": csrf_token,
-                    "X-Twitter-Active-User": "yes",
-                    "X-Twitter-Auth-Type": "OAuth2Session",
-                    "X-Twitter-Client-Language": "en",
-                },
+                headers=x_api_headers(url, cookie_header, csrf_token),
                 follow_redirects=True,
             )
         except httpx.RequestError as e:
@@ -105,7 +125,7 @@ class XGraphQLParser:
         )
 
 
-def _tweet_id_from_url(url: str) -> str:
+def tweet_id_from_url(url: str) -> str:
     parts = [part for part in urlparse(url).path.split("/") if part]
     if "status" not in parts:
         return ""
@@ -113,13 +133,6 @@ def _tweet_id_from_url(url: str) -> str:
     if index + 1 >= len(parts):
         return ""
     return parts[index + 1]
-
-
-def _cookie_value(cookie_header: str, name: str) -> str:
-    for part in cookie_header.split("; "):
-        if part.startswith(f"{name}="):
-            return part.split("=", 1)[1]
-    return ""
 
 
 def _tweet_result(data: dict[str, Any]) -> dict[str, Any]:

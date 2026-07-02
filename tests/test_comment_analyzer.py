@@ -271,7 +271,7 @@ async def test_fetch_x_comments_uses_tweet_detail_graphql(tmp_path) -> None:
     assert fetched.comments[0].comment_url == "https://x.com/bob/status/456"
 
 
-def test_ytdlp_comment_fetch_keeps_late_high_like_comments(monkeypatch) -> None:
+async def test_ytdlp_comment_fetch_keeps_late_high_like_comments(monkeypatch) -> None:
     class FakeYoutubeDL:
         def __init__(self, options: dict[str, object]) -> None:
             self.options = options
@@ -298,17 +298,13 @@ def test_ytdlp_comment_fetch_keeps_late_high_like_comments(monkeypatch) -> None:
     fake_module = types.SimpleNamespace(YoutubeDL=FakeYoutubeDL)
     monkeypatch.setitem(sys.modules, "yt_dlp", fake_module)
 
-    async def run() -> list[str]:
-        async with httpx.AsyncClient() as client:
-            fetched = await CommentAnalyzer(
-                Settings(comment_analysis_max_comments=2),
-                client,
-            ).fetch_comment_page("https://www.youtube.com/watch?v=abc")
-        return [comment.text for comment in fetched.comments]
+    async with httpx.AsyncClient() as client:
+        fetched = await CommentAnalyzer(
+            Settings(comment_analysis_max_comments=2),
+            client,
+        ).fetch_comment_page("https://www.youtube.com/watch?v=abc")
 
-    import asyncio
-
-    assert asyncio.run(run()) == ["late high", "late warm"]
+    assert [comment.text for comment in fetched.comments] == ["late high", "late warm"]
 
 
 @respx.mock
@@ -607,7 +603,6 @@ def test_render_comment_analysis_markdown_uses_fixed_template() -> None:
         consensus=["观点清晰", "例子有用"],
         controversy=["仍有人不同意结论"],
         notable_points=["补充了背景信息"],
-        best_comment="这条评论包含独家信息。",
         top_comment_translations=["很有帮助", "我不同意"],
     )
 
