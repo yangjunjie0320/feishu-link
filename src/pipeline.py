@@ -372,9 +372,7 @@ class Pipeline:
                     panel_title="总结正文",
                     sectioned=True,
                 )
-                card_sent = await self._sender.send(
-                    card_json, event.chat_id, event.message_id
-                )
+                card_sent = await self._sender.send(card_json, event.chat_id, event.message_id)
                 if not card_sent:
                     logger.error(
                         "summary card send failed: url=%s message_id=%s",
@@ -429,9 +427,7 @@ class Pipeline:
                     panel_title="评论区分析",
                     sectioned=True,
                 )
-                card_sent = await self._sender.send(
-                    card_json, event.chat_id, event.message_id
-                )
+                card_sent = await self._sender.send(card_json, event.chat_id, event.message_id)
                 if not card_sent:
                     logger.error(
                         "comment analysis card send failed: url=%s message_id=%s",
@@ -532,21 +528,34 @@ def _summary_failure_message(exc: Exception) -> str:
                 "BibiGPT 总结失败: 本地 cookie 文件不完整或已损坏, "
                 "请重新导出 aitodo.co cookies 后更新 cookies/bibigpt.txt。"
             )
-        return "BibiGPT 总结失败: BibiGPT 登录态已失效, 请重新导出 aitodo.co cookies。"
+        return "BibiGPT 总结失败: 登录态已失效, 需要在服务器上重新登录 aitodo.co 账号后重试。"
+
+    if isinstance(exc, TranscriptUnavailableError):
+        return (
+            "BibiGPT 总结失败: 没有拿到这个视频的字幕或转录文本, "
+            "可能是视频没有字幕、字幕被限制, 或转录抓取临时失败, 可稍后重试。"
+        )
 
     if isinstance(exc, BibiAPIError):
-        if isinstance(exc, TranscriptUnavailableError):
+        status = exc.status_code
+        body = exc.body or ""
+        if status == 402 or "PAYMENT_REQUIRED" in body or "余额不足" in body:
             return (
-                "BibiGPT 总结失败: BibiGPT 没有拿到这个视频的字幕或转录文本, "
-                "可能是视频没有字幕、字幕被限制, 或 YouTube 转录抓取临时失败。"
+                "BibiGPT 总结失败: 账号额度不足或会员已过期, 需要为 aitodo.co 账号充值/续费后重试。"
             )
-        detail = str(exc)
-        if "service returned an HTML error page" in detail:
+        if status == 429:
+            return "BibiGPT 总结失败: 触发接口限流, 请稍后重试。"
+        if "service returned an HTML error page" in str(exc):
             return (
-                f"BibiGPT 总结失败: 服务返回了 HTML 错误页 (HTTP {exc.status_code}), "
-                "通常是登录态异常或 BibiGPT 服务端临时异常。"
+                f"BibiGPT 总结失败: 服务返回了 HTML 错误页 (HTTP {status}), "
+                "可能是登录态异常或服务端临时异常, 请稍后重试。"
             )
-        return f"BibiGPT 总结失败: {detail}"
+        if status in (500, 502, 503, 504) or status == 0 or "Connection error" in body:
+            suffix = f" (HTTP {status})" if status else ""
+            return (
+                f"BibiGPT 总结失败: BibiGPT 服务端暂时不稳定{suffix}, 通常是临时故障, 请稍后重试。"
+            )
+        return f"BibiGPT 总结失败: {exc!s}"
 
     return f"BibiGPT 总结失败: {str(exc) or exc.__class__.__name__}"
 
