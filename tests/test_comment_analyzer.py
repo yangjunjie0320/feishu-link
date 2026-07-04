@@ -5,6 +5,7 @@ import httpx
 import respx
 
 from src.comment_analyzer import (
+    CommentAnalysisError,
     CommentAnalyzer,
     CommentInsight,
     VideoComment,
@@ -133,6 +134,21 @@ async def test_fetch_instagram_comments_uses_media_comments_api() -> None:
     assert fetched.total_count == 42
     assert [comment.text for comment in comments] == ["First", "Second"]
     assert comments[0].author == "alice"
+
+
+@respx.mock
+async def test_instagram_non_post_url_rejected_without_ytdlp_fallback() -> None:
+    # Profile links carry no shortcode; they must fail fast with a friendly
+    # message instead of falling back to yt-dlp (its IG extractor is broken).
+    async with httpx.AsyncClient() as client:
+        analyzer = CommentAnalyzer(Settings(), client)
+        try:
+            await analyzer.fetch_comment_page("https://www.instagram.com/andrettife?igsh=abc")
+        except CommentAnalysisError as e:
+            assert "不是 Instagram 帖子/Reel" in str(e)
+        else:
+            raise AssertionError("expected CommentAnalysisError")
+    assert respx.calls.call_count == 0
 
 
 @respx.mock

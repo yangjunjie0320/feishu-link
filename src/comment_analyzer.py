@@ -234,6 +234,10 @@ class CommentAnalyzer:
             return await self._fetch_x_comments(url, max_comments)
 
         if platform == "instagram":
+            # Profile / fundraiser 等提不出 shortcode 的链接没有评论区可言，
+            # 且 yt-dlp 的 Instagram 提取器上游已标记 broken，兜底只会抛原始堆栈。
+            if not _shortcode_from_url(url):
+                raise CommentAnalysisError("该链接不是 Instagram 帖子/Reel，无法分析评论。")
             try:
                 fetched = await self._fetch_instagram_comments(url, max_comments)
                 if fetched.comments:
