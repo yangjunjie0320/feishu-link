@@ -81,6 +81,36 @@ def test_cookie_is_stale_supports_instagram_session(tmp_path) -> None:
     assert cookie_is_stale(str(target), "instagram", 86400) is False
 
 
+def test_cookie_is_stale_supports_youtube_session(tmp_path) -> None:
+    target = tmp_path / "youtube.txt"
+    far_future = time.time() + 30 * 86400
+    cookie_refresh.write_netscape(
+        [
+            _playwright_cookie("SAPISID", "fresh", far_future, domain=".youtube.com"),
+            _playwright_cookie(
+                "__Secure-3PSID",
+                "fresh",
+                far_future,
+                domain=".youtube.com",
+            ),
+        ],
+        str(target),
+    )
+
+    assert cookie_is_stale(str(target), "youtube", 86400) is False
+
+
+def test_cookie_is_stale_true_when_youtube_anchor_missing(tmp_path) -> None:
+    target = tmp_path / "youtube.txt"
+    far_future = time.time() + 30 * 86400
+    cookie_refresh.write_netscape(
+        [_playwright_cookie("SAPISID", "fresh", far_future, domain=".youtube.com")],
+        str(target),
+    )
+
+    assert cookie_is_stale(str(target), "youtube", 86400) is True
+
+
 def test_write_netscape_roundtrips_through_reader(tmp_path) -> None:
     target = tmp_path / "bilibili.txt"
     far_future = time.time() + 30 * 86400
@@ -131,10 +161,12 @@ async def test_refresh_cookies_writes_logged_in_session(monkeypatch, tmp_path) -
 
 
 @pytest.mark.asyncio
-async def test_refresh_cookies_exports_existing_session_without_navigation(
+async def test_refresh_cookies_always_navigates_to_renew_session(
     monkeypatch,
     tmp_path,
 ) -> None:
+    # Refresh only runs when the exported cookie is near expiry, so the site
+    # must get a page load to rotate the session even if cookies are present.
     target = tmp_path / "bilibili.txt"
     far_future = time.time() + 30 * 86400
     navigated = False
@@ -159,7 +191,7 @@ async def test_refresh_cookies_exports_existing_session_without_navigation(
     ok = await refresh_cookies("bilibili", Settings(), target=str(target))
 
     assert ok is True
-    assert navigated is False
+    assert navigated is True
     assert "SESSDATA=live" in get_cookie_header(str(target), "bilibili.com")
 
 
@@ -240,7 +272,33 @@ async def test_ensure_fresh_cookies_refreshes_when_stale(monkeypatch, tmp_path) 
 
 @pytest.mark.asyncio
 async def test_browser_login_rejects_unknown_platform() -> None:
-    assert await browser_login("youtube", Settings()) is False
+    assert await browser_login("tiktok", Settings()) is False
+
+
+@pytest.mark.asyncio
+async def test_browser_login_reports_closed_window(monkeypatch, tmp_path, caplog) -> None:
+    class FakePage:
+        async def goto(self, *args, **kwargs):
+            return None
+
+    class FakeContext:
+        pages: ClassVar = [FakePage()]
+
+        async def cookies(self):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    @asynccontextmanager
+    async def fake_pc(*args, **kwargs):
+        yield FakeContext()
+
+    monkeypatch.setattr(cookie_refresh, "persistent_context", fake_pc)
+
+    settings = Settings(platform_cookie_files={"x": str(tmp_path / "x.txt")})
+    ok = await browser_login("x", settings)
+
+    assert ok is False
+    assert any("closed before session cookies" in r.getMessage() for r in caplog.records)
+    assert not any(r.levelname == "ERROR" for r in caplog.records)
 
 
 @pytest.mark.asyncio

@@ -44,6 +44,11 @@ _PROFILES: dict[str, RefreshProfile] = {
         cookie_domain="instagram.com",
         required_names=frozenset({"sessionid"}),
     ),
+    "youtube": RefreshProfile(
+        site_url="https://www.youtube.com/",
+        cookie_domain="youtube.com",
+        required_names=frozenset({"SAPISID", "__Secure-3PSID"}),
+    ),
 }
 
 # Per-process throttle so a burst of stale-cookie requests does not launch the
@@ -192,15 +197,17 @@ async def refresh_cookies(
             headless=settings.cookie_refresh_browser_headless,
             timeout_ms=timeout_ms,
         ) as context:
+            # Refresh runs only when the exported cookie is missing or near
+            # expiry, so always load the site first: exporting without a page
+            # load would just re-export the same expiring cookie, while a visit
+            # lets the site rotate/renew the session.
+            page = context.pages[0] if context.pages else await context.new_page()
+            await page.goto(
+                profile.site_url,
+                wait_until="domcontentloaded",
+                timeout=timeout_ms,
+            )
             cookies = _platform_cookies(await context.cookies(), profile)
-            if not _has_required_cookies(cookies, profile):
-                page = context.pages[0] if context.pages else await context.new_page()
-                await page.goto(
-                    profile.site_url,
-                    wait_until="domcontentloaded",
-                    timeout=timeout_ms,
-                )
-                cookies = _platform_cookies(await context.cookies(), profile)
     except BrowserUnavailableError as exc:
         logger.warning("Cookie refresh for %s unavailable: %s", platform, exc)
         return False
@@ -248,6 +255,12 @@ async def ensure_fresh_cookies(platform: str, settings: Settings) -> None:
     await refresh_cookies(platform, settings, target=target)
 
 
+def _is_closed_error(exc: Exception) -> bool:
+    """Playwright raises TargetClosedError-family errors when the user closes
+    the login window mid-wait; match on message to keep the import lazy."""
+    return "has been closed" in str(exc)
+
+
 async def _wait_for_login(context: Any, profile: RefreshProfile) -> list[dict[str, Any]]:
     deadline = time.monotonic() + _LOGIN_WAIT_SECONDS
     while time.monotonic() < deadline:
@@ -288,7 +301,15 @@ async def browser_login(platform: str, settings: Settings) -> bool:
         logger.error("Cannot open browser for login: %s", exc)
         return False
     except Exception as exc:
-        logger.error("Browser login for %s failed: %s", platform, exc)
+        if _is_closed_error(exc):
+            logger.warning(
+                "Login window for %s was closed before session cookies appeared; "
+                "run `python main.py --browser-login %s` again and complete the login",
+                platform,
+                platform,
+            )
+        else:
+            logger.error("Browser login for %s failed: %s", platform, exc)
         return False
 
     if not cookies:

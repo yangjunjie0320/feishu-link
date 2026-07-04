@@ -70,6 +70,7 @@ platform_cookie_files: {}
 #   bibigpt: "cookies/bibigpt.txt"
 #   instagram: "cookies/instagram.txt"
 #   x: "cookies/x.txt"
+#   youtube: "cookies/youtube.txt"
 
 # Optional BibiGPT integration. Mention the bot with a YouTube or Bilibili URL
 # to send a summary instead of appending the video.
@@ -99,7 +100,7 @@ bibigpt_cookie_writeback: true
 # context and written back to the platform cookie file. Log in once with
 # `python main.py --browser-login <platform>`.
 cookie_refresh_enabled: true
-cookie_refresh_platforms: ["bilibili"]        # add "x"/"instagram" only after logging in
+cookie_refresh_platforms: ["bilibili"]        # add "x"/"instagram"/"youtube" only after logging in
 cookie_refresh_profile_dir: "browser-data/cookies"   # per-platform subdir
 cookie_refresh_browser_headless: true
 cookie_refresh_browser_timeout: 60.0
