@@ -157,9 +157,7 @@ def _platform_cookies(
     raw: list[dict[str, Any]],
     profile: RefreshProfile,
 ) -> list[dict[str, Any]]:
-    return [
-        c for c in raw if _domain_matches(str(c.get("domain", "")), profile.cookie_domain)
-    ]
+    return [c for c in raw if _domain_matches(str(c.get("domain", "")), profile.cookie_domain)]
 
 
 def _has_required_cookies(

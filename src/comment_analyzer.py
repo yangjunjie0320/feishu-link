@@ -32,10 +32,70 @@ _BILIBILI_WBI_KEY_TTL_SECONDS = 30
 _X_TWEET_DETAIL_QUERY_ID = "jd3V43oDY9cY7obs1YMfbQ"
 _RAW_COMMENT_SCAN_LIMIT = 5000
 _BILIBILI_MIXIN_KEY_ENC_TAB = [
-    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
-    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
-    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
-    36, 20, 34, 44, 52,
+    46,
+    47,
+    18,
+    2,
+    53,
+    8,
+    23,
+    32,
+    15,
+    50,
+    10,
+    31,
+    58,
+    3,
+    45,
+    35,
+    27,
+    43,
+    5,
+    49,
+    33,
+    9,
+    42,
+    19,
+    29,
+    28,
+    14,
+    39,
+    12,
+    38,
+    41,
+    13,
+    37,
+    48,
+    7,
+    16,
+    24,
+    55,
+    40,
+    61,
+    26,
+    17,
+    0,
+    1,
+    60,
+    51,
+    30,
+    4,
+    22,
+    25,
+    54,
+    21,
+    56,
+    59,
+    6,
+    63,
+    57,
+    62,
+    11,
+    36,
+    20,
+    34,
+    44,
+    52,
 ]
 _X_TWEET_DETAIL_FEATURES = {
     "profile_label_improvements_pcf_label_in_post_enabled": True,
@@ -209,8 +269,7 @@ class CommentAnalyzer:
             raise CommentAnalysisError("Instagram shortcode not found.")
 
         endpoint = (
-            "https://www.instagram.com/api/v1/media/"
-            f"{_shortcode_to_media_id(shortcode)}/comments/"
+            f"https://www.instagram.com/api/v1/media/{_shortcode_to_media_id(shortcode)}/comments/"
         )
         headers = _instagram_comment_headers(url, self._settings)
         await self._augment_instagram_comment_headers(url, headers)
@@ -233,9 +292,7 @@ class CommentAnalyzer:
                 raise CommentAnalysisError(f"Instagram comments request error: {e}") from e
 
             if response.status_code >= 400:
-                raise CommentAnalysisError(
-                    f"Instagram comments HTTP {response.status_code}"
-                )
+                raise CommentAnalysisError(f"Instagram comments HTTP {response.status_code}")
 
             try:
                 data: dict[str, Any] = response.json()
@@ -502,8 +559,7 @@ class CommentAnalyzer:
         data = nav_data.get("data") if isinstance(nav_data.get("data"), dict) else {}
         wbi_img = data.get("wbi_img") if isinstance(data.get("wbi_img"), dict) else {}
         lookup = "".join(
-            _bilibili_wbi_image_key(wbi_img.get(key))
-            for key in ("img_url", "sub_url")
+            _bilibili_wbi_image_key(wbi_img.get(key)) for key in ("img_url", "sub_url")
         )
         if len(lookup) < 64:
             raise CommentAnalysisError("Bilibili wbi key not found.")
@@ -518,7 +574,6 @@ class CommentAnalyzer:
         platform: str,
         max_comments: int,
     ) -> FetchedComments:
-
         def _extract() -> FetchedComments:
             try:
                 import yt_dlp
@@ -558,7 +613,7 @@ class CommentAnalyzer:
             is_youtube = "youtube" in extractor
 
             raw_comments: list[object] = []
-            for raw in (info.get("comments") or []):
+            for raw in info.get("comments") or []:
                 if is_youtube and video_id and isinstance(raw, dict):
                     cid = str(raw.get("id") or "")
                     comment_url = (
@@ -642,9 +697,7 @@ class CommentAnalyzer:
             timeout=self._settings.comment_analysis_timeout,
         )
         if response.status_code >= 400:
-            raise CommentAnalysisError(
-                f"LLM HTTP {response.status_code}: {response.text[:200]}"
-            )
+            raise CommentAnalysisError(f"LLM HTTP {response.status_code}: {response.text[:200]}")
 
         data: dict[str, Any] = response.json()
         choices = data.get("choices", [])
@@ -784,11 +837,7 @@ def _x_comment_from_tweet(
     if not text:
         return None
 
-    user_result = (
-        tweet.get("core", {})
-        .get("user_results", {})
-        .get("result", {})
-    )
+    user_result = tweet.get("core", {}).get("user_results", {}).get("result", {})
     user_core = user_result.get("core") if isinstance(user_result, dict) else {}
     user_legacy = user_result.get("legacy") if isinstance(user_result, dict) else {}
     screen_name = ""
@@ -849,8 +898,7 @@ def _normalize_bilibili_reply(reply: object, bvid: str = "") -> object:
     comment_url = ""
     if bvid and rpid and not parent:
         comment_url = (
-            f"https://www.bilibili.com/video/{bvid}"
-            f"?comment_on=1&comment_root_id={rpid}#reply{rpid}"
+            f"https://www.bilibili.com/video/{bvid}?comment_on=1&comment_root_id={rpid}#reply{rpid}"
         )
     return {
         "id": rpid,
@@ -928,8 +976,7 @@ def build_comment_analysis_prompt(
         for index, comment in enumerate(top_comments, start=1)
     )
     comment_lines = "\n".join(
-        f"- {_format_comment_for_prompt(comment, max_chars=180)}"
-        for comment in prompt_comments
+        f"- {_format_comment_for_prompt(comment, max_chars=180)}" for comment in prompt_comments
     )
     translation_placeholders = ", ".join(
         f'"第 {i} 条评论中文翻译（若已是中文则原样返回）"' for i in range(1, n + 1)
@@ -1025,8 +1072,7 @@ def render_comment_analysis_markdown(
         author = _clean_card_text(comment.author or "unknown")
         author_md = f"[{author}]({comment.author_url})" if comment.author_url else f"**{author}**"
         meta = (
-            f"    {index}. {author_md} · 点赞 {comment.like_count} "
-            f"· 子评论 {comment.reply_count}"
+            f"    {index}. {author_md} · 点赞 {comment.like_count} · 子评论 {comment.reply_count}"
         )
         if comment.comment_url:
             meta += f" · [查看原评论]({comment.comment_url})"
@@ -1147,11 +1193,7 @@ def _comment_from_raw(raw: dict[str, Any]) -> VideoComment | None:
         or len(_raw_child_comments(raw))
     )
     author = str(
-        raw.get("author")
-        or user.get("username")
-        or raw.get("author_id")
-        or user.get("pk")
-        or ""
+        raw.get("author") or user.get("username") or raw.get("author_id") or user.get("pk") or ""
     )
     author_url = str(raw.get("author_url") or "")
     if not author_url and user.get("username"):
@@ -1162,9 +1204,7 @@ def _comment_from_raw(raw: dict[str, Any]) -> VideoComment | None:
         author_url=author_url,
         comment_url=str(raw.get("comment_url") or ""),
         like_count=_as_int(
-            raw.get("like_count")
-            or raw.get("likes")
-            or raw.get("comment_like_count")
+            raw.get("like_count") or raw.get("likes") or raw.get("comment_like_count")
         ),
         reply_count=reply_count,
         comment_id=str(raw.get("id") or raw.get("pk") or raw.get("comment_id") or ""),
@@ -1183,10 +1223,7 @@ def _clean_comment_text(text: str) -> str:
 def _format_comment_for_prompt(comment: VideoComment, *, max_chars: int) -> str:
     author = comment.author or "unknown"
     text = _truncate(comment.text, max_chars)
-    return (
-        f"作者={author}; 点赞={comment.like_count}; "
-        f"子评论={comment.reply_count}; 原文={text}"
-    )
+    return f"作者={author}; 点赞={comment.like_count}; 子评论={comment.reply_count}; 原文={text}"
 
 
 def _truncate(text: str, max_chars: int) -> str:

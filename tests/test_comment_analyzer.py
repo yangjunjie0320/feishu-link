@@ -197,9 +197,7 @@ async def test_fetch_x_comments_uses_tweet_detail_graphql(tmp_path) -> None:
         + "\n",
         encoding="utf-8",
     )
-    route = respx.get(
-        "https://x.com/i/api/graphql/jd3V43oDY9cY7obs1YMfbQ/TweetDetail"
-    ).mock(
+    route = respx.get("https://x.com/i/api/graphql/jd3V43oDY9cY7obs1YMfbQ/TweetDetail").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -475,9 +473,7 @@ async def test_fetch_bilibili_reply_isolated_from_shared_cookie_jar() -> None:
     # A buvid3 in the shared client's cookie jar freezes bilibili heat-mode
     # pagination; the reply loop must run on an isolated client and send no cookie.
     respx.get("https://api.bilibili.com/x/web-interface/view").mock(
-        return_value=httpx.Response(
-            200, json={"code": 0, "data": {"aid": 1, "stat": {"reply": 1}}}
-        )
+        return_value=httpx.Response(200, json={"code": 0, "data": {"aid": 1, "stat": {"reply": 1}}})
     )
     respx.get("https://api.bilibili.com/x/web-interface/nav").mock(
         return_value=httpx.Response(
