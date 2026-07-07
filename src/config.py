@@ -42,8 +42,12 @@ class Settings(BaseSettings):
     bibigpt_default_prompt: str = ""
     bibigpt_cookie_writeback: bool = True
 
-    # Cookie auto-refresh via persistent Chromium profiles.
+    # Cookie auto-refresh. Source "chrome" extracts from the system Chrome's
+    # cookie store (login state maintained by the human using that browser);
+    # "browser_profile" is the legacy Playwright persistent-profile path.
     cookie_refresh_enabled: bool = True
+    cookie_refresh_source: str = "chrome"
+    cookie_refresh_chrome_profile: str = ""
     cookie_refresh_platforms: list[str] = ["bilibili"]
     cookie_refresh_profile_dir: str = "browser-data/cookies"
     cookie_refresh_browser_headless: bool = True

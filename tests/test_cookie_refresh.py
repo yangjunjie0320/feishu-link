@@ -152,7 +152,11 @@ async def test_refresh_cookies_writes_logged_in_session(monkeypatch, tmp_path) -
 
     monkeypatch.setattr(cookie_refresh, "persistent_context", fake_pc)
 
-    ok = await refresh_cookies("bilibili", Settings(), target=str(target))
+    ok = await refresh_cookies(
+        "bilibili",
+        Settings(cookie_refresh_source="browser_profile"),
+        target=str(target),
+    )
 
     assert ok is True
     header = get_cookie_header(str(target), "bilibili.com")
@@ -188,7 +192,11 @@ async def test_refresh_cookies_always_navigates_to_renew_session(
 
     monkeypatch.setattr(cookie_refresh, "persistent_context", fake_pc)
 
-    ok = await refresh_cookies("bilibili", Settings(), target=str(target))
+    ok = await refresh_cookies(
+        "bilibili",
+        Settings(cookie_refresh_source="browser_profile"),
+        target=str(target),
+    )
 
     assert ok is True
     assert navigated is True
@@ -218,7 +226,11 @@ async def test_refresh_cookies_skips_when_not_logged_in(monkeypatch, tmp_path) -
 
     monkeypatch.setattr(cookie_refresh, "persistent_context", fake_pc)
 
-    ok = await refresh_cookies("bilibili", Settings(), target=str(target))
+    ok = await refresh_cookies(
+        "bilibili",
+        Settings(cookie_refresh_source="browser_profile"),
+        target=str(target),
+    )
 
     assert ok is False
     assert navigated is True
@@ -328,6 +340,98 @@ async def test_browser_login_saves_cookies_when_logged_in(monkeypatch, tmp_path)
 
     assert ok is True
     assert "SESSDATA=logged-in" in get_cookie_header(str(target), "bilibili.com")
+
+
+def test_default_cookie_source_is_chrome() -> None:
+    assert Settings().cookie_refresh_source == "chrome"
+
+
+def test_cookiejar_cookie_to_dict_maps_fields() -> None:
+    from http.cookiejar import Cookie
+
+    cookie = Cookie(
+        version=0,
+        name="SESSDATA",
+        value="live",
+        port=None,
+        port_specified=False,
+        domain=".bilibili.com",
+        domain_specified=True,
+        domain_initial_dot=True,
+        path="/",
+        path_specified=True,
+        secure=True,
+        expires=1900000000,
+        discard=False,
+        comment=None,
+        comment_url=None,
+        rest={"HTTPOnly": None},
+    )
+
+    converted = cookie_refresh._cookiejar_cookie_to_dict(cookie)
+
+    assert converted["domain"] == ".bilibili.com"
+    assert converted["name"] == "SESSDATA"
+    assert converted["value"] == "live"
+    assert converted["secure"] is True
+    assert converted["expires"] == 1900000000
+    assert converted["httpOnly"] is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_from_chrome_writes_platform_cookies(monkeypatch, tmp_path) -> None:
+    target = tmp_path / "bilibili.txt"
+    far_future = time.time() + 30 * 86400
+    extracted = [
+        _playwright_cookie("SESSDATA", "from-chrome", far_future),
+        _playwright_cookie("noise", "n", far_future, domain=".other.com"),
+    ]
+
+    monkeypatch.setattr(
+        cookie_refresh, "_extract_chrome_cookies_sync", lambda chrome_profile: extracted
+    )
+
+    ok = await refresh_cookies("bilibili", Settings(), target=str(target))
+
+    assert ok is True
+    header = get_cookie_header(str(target), "bilibili.com")
+    assert "SESSDATA=from-chrome" in header
+    assert "noise" not in header
+
+
+@pytest.mark.asyncio
+async def test_refresh_from_chrome_reports_not_logged_in(monkeypatch, tmp_path, caplog) -> None:
+    target = tmp_path / "bilibili.txt"
+    far_future = time.time() + 30 * 86400
+
+    monkeypatch.setattr(
+        cookie_refresh,
+        "_extract_chrome_cookies_sync",
+        lambda chrome_profile: [_playwright_cookie("buvid3", "anon", far_future)],
+    )
+
+    ok = await refresh_cookies("bilibili", Settings(), target=str(target))
+
+    assert ok is False
+    assert not target.exists()
+    assert any("open Chrome" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_refresh_from_chrome_swallows_extraction_failure(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    target = tmp_path / "bilibili.txt"
+
+    def boom(chrome_profile):
+        raise RuntimeError("keychain access denied")
+
+    monkeypatch.setattr(cookie_refresh, "_extract_chrome_cookies_sync", boom)
+
+    ok = await refresh_cookies("bilibili", Settings(), target=str(target))
+
+    assert ok is False
+    assert any("Chrome cookie extraction" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio

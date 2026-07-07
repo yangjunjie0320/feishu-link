@@ -172,13 +172,63 @@ def _has_required_cookies(
     return profile.required_names <= {str(c.get("name", "")) for c in cookies}
 
 
+def _cookiejar_cookie_to_dict(cookie: Any) -> dict[str, Any]:
+    rest = getattr(cookie, "_rest", None) or {}
+    http_only = any(str(key).lower() == "httponly" for key in rest)
+    return {
+        "domain": cookie.domain,
+        "name": cookie.name,
+        "value": cookie.value or "",
+        "path": cookie.path or "/",
+        "secure": bool(cookie.secure),
+        "expires": cookie.expires if cookie.expires else -1,
+        "httpOnly": http_only,
+    }
+
+
+def _extract_chrome_cookies_sync(chrome_profile: str) -> list[dict[str, Any]]:
+    """Read the system Chrome's cookie store (blocking: sqlite copy + keychain)."""
+    from yt_dlp.cookies import extract_cookies_from_browser
+
+    jar = extract_cookies_from_browser("chrome", chrome_profile or None)
+    return [_cookiejar_cookie_to_dict(cookie) for cookie in jar]
+
+
+async def _refresh_from_chrome(
+    platform: str,
+    profile: RefreshProfile,
+    settings: Settings,
+    target: str,
+) -> bool:
+    try:
+        raw = await asyncio.to_thread(
+            _extract_chrome_cookies_sync, settings.cookie_refresh_chrome_profile
+        )
+    except Exception as exc:
+        logger.warning("Chrome cookie extraction for %s failed: %s", platform, exc)
+        return False
+
+    cookies = _platform_cookies(raw, profile)
+    if not _has_required_cookies(cookies, profile):
+        logger.warning(
+            "Chrome has no logged-in %s session; open Chrome on this machine and log in at %s",
+            platform,
+            profile.site_url,
+        )
+        return False
+
+    write_netscape(cookies, target)
+    logger.info("Refreshed %d cookies for %s from Chrome -> %s", len(cookies), platform, target)
+    return True
+
+
 async def refresh_cookies(
     platform: str,
     settings: Settings,
     *,
     target: str | None = None,
 ) -> bool:
-    """Export fresh cookies from the platform's persistent profile to its file."""
+    """Export fresh cookies for the platform from the configured source."""
     profile = _PROFILES.get(platform)
     if profile is None:
         logger.warning("No cookie-refresh profile for platform %s", platform)
@@ -188,6 +238,9 @@ async def refresh_cookies(
         target = _resolve_target(platform, settings)
     if not target:
         return False
+
+    if settings.cookie_refresh_source == "chrome":
+        return await _refresh_from_chrome(platform, profile, settings, target)
 
     profile_dir = str(Path(settings.cookie_refresh_profile_dir) / platform)
     timeout_ms = int(settings.cookie_refresh_browser_timeout * 1000)
@@ -282,6 +335,14 @@ async def browser_login(platform: str, settings: Settings) -> bool:
     if profile is None:
         logger.error("No cookie-refresh profile for platform %s", platform)
         return False
+
+    if settings.cookie_refresh_source == "chrome":
+        logger.info(
+            "cookie_refresh_source is 'chrome': refresh reads the system Chrome, "
+            "not the profile this login seeds; log in to %s in Chrome instead "
+            "unless you plan to switch to source 'browser_profile'",
+            profile.site_url,
+        )
 
     target = _resolve_target(platform, settings)
     profile_dir = str(Path(settings.cookie_refresh_profile_dir) / platform)

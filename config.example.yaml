@@ -94,15 +94,22 @@ bibigpt_default_prompt: ""
 bibigpt_cookie_writeback: true
 
 # Cookie auto-refresh for platforms whose exported cookies expire
-# (e.g. Bilibili SESSDATA). Bilibili is enabled by default. Each listed platform
-# needs a persistent logged-in Chromium profile; before a yt-dlp call, if its
-# cookie is missing/near expiry, fresh cookies are exported from the live browser
-# context and written back to the platform cookie file. Log in once with
-# `python main.py --browser-login <platform>`.
+# (e.g. Bilibili SESSDATA). Bilibili is enabled by default.
+# Source "chrome" (default): before a yt-dlp call, if the platform cookie is
+# missing/near expiry, cookies are extracted from the system Google Chrome's
+# cookie store (macOS keychain decryption via yt-dlp). Login state is whatever
+# the human keeps logged in by normally using Chrome on this machine; no login
+# command needed. First extraction may prompt for keychain access - allow always.
+# Source "browser_profile" (legacy fallback): a persistent logged-in Playwright
+# profile per platform, seeded once with `python main.py --browser-login <platform>`;
+# refresh visits the site headlessly and exports the live context cookies.
 cookie_refresh_enabled: true
-cookie_refresh_platforms: ["bilibili"]        # add "x"/"instagram"/"youtube" only after logging in
-cookie_refresh_profile_dir: "browser-data/cookies"   # per-platform subdir
+cookie_refresh_source: "chrome"               # "chrome" | "browser_profile"
+cookie_refresh_chrome_profile: ""             # Chrome profile name; empty = default profile
+cookie_refresh_platforms: ["bilibili"]        # add "x"/"instagram"/"youtube" once logged in
+cookie_refresh_profile_dir: "browser-data/cookies"   # per-platform subdir (browser_profile source)
 cookie_refresh_browser_headless: true
+cookie_refresh_browser_channel: ""            # e.g. "chrome" to launch real Chrome (browser_profile source)
 cookie_refresh_browser_timeout: 60.0
 cookie_refresh_stale_before_seconds: 86400   # refresh if expiring within 1 day
 cookie_refresh_min_interval_seconds: 600     # in-process throttle per platform
