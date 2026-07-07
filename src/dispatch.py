@@ -41,6 +41,7 @@ class Dispatcher:
             _normalize_short_platform_meta(meta)
             return meta
         except ParserError as e:
+            logger.warning("ytdlp metadata failed: %s", e)
             if detect_platform(url) == "x":
                 try:
                     meta = await self._x_oembed.parse(url)
@@ -306,9 +307,7 @@ def _normalize_instagram_post_meta(meta: LinkMetadata) -> None:
     meta.channel = meta.channel or _extract_instagram_handle(meta.description)
     likes, comments = _extract_instagram_counts(meta.description)
 
-    caption = _extract_instagram_caption(meta.description) or _extract_instagram_caption(
-        meta.title
-    )
+    caption = _extract_instagram_caption(meta.description) or _extract_instagram_caption(meta.title)
     if caption:
         meta.description = caption
 
@@ -366,7 +365,7 @@ def _clean_x_title(title: str) -> str:
     cleaned = re.sub(r"\s*/\s*X\s*$", "", title.strip(), flags=re.IGNORECASE)
     cleaned = re.sub(r"^X\s+on\s+X:\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^[^:]{1,80}\s+on\s+X:\s*", "", cleaned, flags=re.IGNORECASE)
-    return _clean_caption(cleaned.strip("\""))
+    return _clean_caption(cleaned.strip('"'))
 
 
 def _is_x_placeholder_text(text: str) -> bool:

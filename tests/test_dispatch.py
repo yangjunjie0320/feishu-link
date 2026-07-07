@@ -1,4 +1,7 @@
+import logging
+
 import httpx
+import pytest
 
 from src.config import Settings
 from src.dispatch import (
@@ -77,6 +80,25 @@ async def test_instagram_reel_still_uses_ytdlp() -> None:
     assert meta.media_type == MediaType.VIDEO
 
 
+async def test_ytdlp_parse_failure_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    url = "https://www.bilibili.com/video/BV1d8jC6bEBv/"
+    async with httpx.AsyncClient() as client:
+        dispatcher = Dispatcher(Settings(), client)
+        dispatcher._ytdlp = _ParserErrorParser()  # type: ignore[assignment]
+        dispatcher._og = _StaticParser(
+            LinkMetadata(source_url=url, title="fallback title", platform="bilibili")
+        )  # type: ignore[assignment]
+
+        with caplog.at_level(logging.WARNING, logger="src.dispatch"):
+            meta = await dispatcher.parse(url)
+
+    assert meta.parse_warnings == ["bilibili 视频解析失败, 已先发送卡片"]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(url in m and "intentional test failure" in m for m in warnings)
+
+
 def test_instagram_post_without_video_is_treated_as_image_post() -> None:
     url = "https://www.instagram.com/p/DXPd2NUiM2n/?img_index=3"
     reason = "yt-dlp metadata failed: ERROR: [Instagram] DXPd2NUiM2n: No video formats found!"
@@ -93,8 +115,7 @@ def test_instagram_reel_parse_failure_still_reports_video_failure() -> None:
     assert _fallback_media_type(url, "instagram", reason) == MediaType.VIDEO
     assert _fallback_title(url, "instagram", MediaType.VIDEO) == "Instagram Reel"
     assert (
-        _friendly_parse_warning(url, "instagram", reason)
-        == "instagram 视频解析失败, 已先发送卡片"
+        _friendly_parse_warning(url, "instagram", reason) == "instagram 视频解析失败, 已先发送卡片"
     )
 
 
@@ -120,11 +141,10 @@ def test_normalize_instagram_post_extracts_caption_author_and_counts() -> None:
     meta = LinkMetadata(
         source_url="https://www.instagram.com/p/DXPd2NUiM2n/?img_index=3",
         title=(
-            'Rebecca Kunnis on Instagram: "BMW M1 widebody, '
-            'covered in custom rhinestone artwork"'
+            'Rebecca Kunnis on Instagram: "BMW M1 widebody, covered in custom rhinestone artwork"'
         ),
         description=(
-            '77K likes, 56 comments - beccu.studio on April 17, 2026: '
+            "77K likes, 56 comments - beccu.studio on April 17, 2026: "
             '"BMW M1 widebody, covered in custom rhinestone artwork. '
             'Would u drive it? Made w @krea_ai <3".'
         ),
@@ -147,7 +167,7 @@ def test_normalize_instagram_post_extracts_caption_author_and_counts() -> None:
 def test_normalize_x_post_extracts_text_and_author() -> None:
     meta = LinkMetadata(
         source_url="https://x.com/example/status/123",
-        title="Example on X: \"A compact electric wagon concept with solar roof\" / X",
+        title='Example on X: "A compact electric wagon concept with solar roof" / X',
         description="",
         channel="example",
         platform="x",
@@ -178,6 +198,4 @@ def test_normalize_x_post_drops_placeholder_page() -> None:
 
     assert meta.title == "X Post"
     assert meta.description == ""
-    assert meta.parse_warnings == [
-        "X 内容受限或需要 cookie, 无法获取正文, 已先发送卡片"
-    ]
+    assert meta.parse_warnings == ["X 内容受限或需要 cookie, 无法获取正文, 已先发送卡片"]
