@@ -196,6 +196,7 @@ async def refresh_cookies(
             profile_dir,
             headless=settings.cookie_refresh_browser_headless,
             timeout_ms=timeout_ms,
+            channel=settings.cookie_refresh_browser_channel or None,
         ) as context:
             # Refresh runs only when the exported cookie is missing or near
             # expiry, so always load the site first: exporting without a page
@@ -287,7 +288,10 @@ async def browser_login(platform: str, settings: Settings) -> bool:
     timeout_ms = int(settings.cookie_refresh_browser_timeout * 1000)
     try:
         async with persistent_context(
-            profile_dir, headless=False, timeout_ms=timeout_ms
+            profile_dir,
+            headless=False,
+            timeout_ms=timeout_ms,
+            channel=settings.cookie_refresh_browser_channel or None,
         ) as context:
             page = context.pages[0] if context.pages else await context.new_page()
             await page.goto(profile.site_url, wait_until="domcontentloaded", timeout=timeout_ms)

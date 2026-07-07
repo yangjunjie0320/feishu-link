@@ -11,11 +11,14 @@ logger = logging.getLogger(__name__)
 
 # Disable the on-disk HTTP cache so persistent profiles used only for cookie
 # refresh / browser-backed requests do not grow unbounded over time.
+# AutomationControlled is disabled so pages do not see navigator.webdriver;
+# Google refuses logins from browsers that expose it.
 _LAUNCH_ARGS = [
     "--disable-dev-shm-usage",
     "--disable-gpu",
     "--no-sandbox",
     "--disk-cache-size=0",
+    "--disable-blink-features=AutomationControlled",
 ]
 
 # Lock files Chromium writes into a persistent profile. A crashed run leaves them
@@ -54,6 +57,7 @@ async def persistent_context(
     user_agent: str | None = None,
     timeout_ms: int = 60000,
     viewport: dict[str, int] | None = None,
+    channel: str | None = None,
 ) -> AsyncIterator[Any]:
     """Launch a persistent Chromium profile and yield its browser context.
 
@@ -83,6 +87,11 @@ async def persistent_context(
         launch_kwargs["user_agent"] = user_agent
     if viewport:
         launch_kwargs["viewport"] = viewport
+    if channel:
+        # Branded browser channel (e.g. "chrome"): Google rejects logins from
+        # the bundled Chromium build, so profiles that need a Google session
+        # must run on the system's real Chrome.
+        launch_kwargs["channel"] = channel
 
     async with _lock_for(path), async_playwright() as playwright:
         context = await playwright.chromium.launch_persistent_context(**launch_kwargs)

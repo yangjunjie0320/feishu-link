@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     cookie_refresh_platforms: list[str] = ["bilibili"]
     cookie_refresh_profile_dir: str = "browser-data/cookies"
     cookie_refresh_browser_headless: bool = True
+    cookie_refresh_browser_channel: str = ""
     cookie_refresh_browser_timeout: float = 60.0
     cookie_refresh_stale_before_seconds: int = 86400
     cookie_refresh_min_interval_seconds: int = 600
