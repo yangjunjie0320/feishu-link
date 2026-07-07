@@ -9,29 +9,40 @@ import lark_oapi as lark
 
 from src import log
 from src.config import Settings
-from src.listener import LarkEventListener
+from src.listener import LarkEventListener, ListenerEvent
 from src.pipeline import Pipeline
+
+logger = logging.getLogger(__name__)
+
+
+async def _handle_safely(pipeline: Pipeline, event: ListenerEvent) -> None:
+    """Handle one event, logging any error so a fire-and-forget task never
+    silently swallows it and one failure cannot crash the event loop."""
+    try:
+        await pipeline.handle(event)
+    except Exception:
+        logger.exception("unhandled error handling event")
 
 
 async def _run(settings: Settings) -> None:
-    logger = logging.getLogger(__name__)
-
     if not settings.app_id or not settings.app_secret:
         raise RuntimeError("app_id and app_secret must be configured")
 
     lark_client = (
-        lark.Client.builder()
-        .app_id(settings.app_id)
-        .app_secret(settings.app_secret)
-        .build()
+        lark.Client.builder().app_id(settings.app_id).app_secret(settings.app_secret).build()
     )
 
     listener = LarkEventListener(settings)
     pipeline = Pipeline(settings, lark_client)
 
     logger.info("feishu-link started (mode=%s)", settings.mode.value)
+    # Each event runs as its own task so a slow handler (comment analysis,
+    # summary, download) never head-of-line blocks other messages.
+    tasks: set[asyncio.Task[None]] = set()
     async for event in listener.listen():
-        await pipeline.handle(event)
+        task = asyncio.create_task(_handle_safely(pipeline, event))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
 
 
 def main() -> None:

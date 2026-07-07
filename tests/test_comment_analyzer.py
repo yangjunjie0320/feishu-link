@@ -136,6 +136,23 @@ async def test_fetch_instagram_comments_uses_media_comments_api() -> None:
     assert comments[0].author == "alice"
 
 
+async def test_analyze_times_out_slow_comment_fetch(monkeypatch) -> None:
+    import asyncio
+
+    async def slow_fetch(url: str):
+        await asyncio.sleep(5)
+
+    async with httpx.AsyncClient() as client:
+        analyzer = CommentAnalyzer(Settings(comment_fetch_timeout=0.05), client)
+        monkeypatch.setattr(analyzer, "fetch_comment_page", slow_fetch)
+        try:
+            await analyzer.analyze("https://www.youtube.com/watch?v=abc")
+        except CommentAnalysisError as e:
+            assert "超时" in str(e)
+        else:
+            raise AssertionError("expected CommentAnalysisError on timeout")
+
+
 @respx.mock
 async def test_instagram_non_post_url_rejected_without_ytdlp_fallback() -> None:
     # Profile links carry no shortcode; they must fail fast with a friendly

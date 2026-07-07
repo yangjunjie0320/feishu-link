@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     comment_analysis_max_comments: int = 500
     comment_analysis_prompt_comments: int = 200
     comment_analysis_timeout: float = 120.0
+    comment_fetch_timeout: float = 90.0
 
     _allowlist_patterns: list[re.Pattern[str]] = []
     _blacklist_patterns: list[re.Pattern[str]] = []

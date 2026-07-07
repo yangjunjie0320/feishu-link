@@ -11,6 +11,7 @@ import time
 import urllib.parse
 from collections import Counter
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -190,9 +191,22 @@ class CommentAnalyzer:
         self._settings = settings
         self._client = client
         self._bilibili_wbi_key: tuple[str, float] | None = None
+        # Dedicated pool for the blocking yt-dlp comment extraction. wait_for can
+        # only cancel the awaiting coroutine, not the running thread, so a stuck
+        # extraction is isolated here instead of starving the shared default
+        # executor used by video download and Chrome cookie extraction.
+        self._comment_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="comment-fetch"
+        )
 
     async def analyze(self, url: str) -> CommentAnalysisResult:
-        fetched = await self.fetch_comment_page(url)
+        try:
+            fetched = await asyncio.wait_for(
+                self.fetch_comment_page(url),
+                timeout=self._settings.comment_fetch_timeout,
+            )
+        except TimeoutError as e:
+            raise CommentAnalysisError("评论抓取超时，请稍后重试。") from e
         comments = sort_comments_by_heat(fetched.comments)
         if not comments:
             raise CommentAnalysisError("没有获取到评论内容。")
@@ -592,8 +606,18 @@ class CommentAnalyzer:
                 "noprogress": True,
                 "getcomments": True,
                 "socket_timeout": 30,
+                "extractor_retries": 2,
                 "source_address": "0.0.0.0",
                 "logger": _YtDlpCommentLogger(),
+            }
+            # Cap total comments and skip reply threads so pagination terminates in
+            # bounded time; the wall-clock timeout in analyze() is the real guard,
+            # this just shortens how long a stuck extraction thread lingers.
+            options["extractor_args"] = {
+                "youtube": {
+                    "comment_sort": ["top"],
+                    "max_comments": [str(max_comments), "all", "0", "0"],
+                }
             }
             apply_ytdlp_runtime(options, platform)
 
@@ -635,7 +659,7 @@ class CommentAnalyzer:
             )
 
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, _extract)
+        return await loop.run_in_executor(self._comment_executor, _extract)
 
     def _build_comment_llm_payload(
         self,
