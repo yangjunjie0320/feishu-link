@@ -16,6 +16,11 @@ def setup(level: str = "INFO", log_dir: str = "logs") -> None:
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
+    # httpx logs full request URLs at INFO, including tRPC input query strings.
+    # Keep signed source URLs and other request parameters out of application logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     if not root.handlers:
         stream = logging.StreamHandler()
         stream.setFormatter(fmt)

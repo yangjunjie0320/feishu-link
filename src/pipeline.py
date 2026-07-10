@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import OrderedDict
@@ -13,7 +14,13 @@ from .bibi_client import (
     BibiClient,
     TranscriptUnavailableError,
 )
-from .card import build_card, build_markdown_card
+from .bibi_models import SummaryResult
+from .card import (
+    build_card,
+    build_markdown_card,
+    build_subtitle_cards,
+    card_message_wire_size,
+)
 from .comment_analyzer import CommentAnalysisError, CommentAnalyzer
 from .config import Settings
 from .dispatch import Dispatcher
@@ -29,6 +36,7 @@ from .url_extract import extract_prompt, extract_urls, is_manual_download_comman
 logger = logging.getLogger(__name__)
 
 _SEEN_CAPACITY = 500
+_SUBTITLE_SEND_INTERVAL_SECONDS = 0.25
 
 
 class Pipeline:
@@ -336,8 +344,7 @@ class Pipeline:
                 else None
             )
             logger.info(
-                "summarizing video=%s prompt=%s message_id=%s",
-                url,
+                "summarizing video prompt=%s message_id=%s",
                 prompt[:30] if prompt else "(default)",
                 event.message_id,
             )
@@ -349,12 +356,11 @@ class Pipeline:
                     source_url=url,
                 )
             except Exception as e:
-                error = str(e) or e.__class__.__name__
                 logger.error(
-                    "summarize failed: url=%s message_id=%s error=%s",
-                    url,
+                    "summarize failed: message_id=%s error_type=%s status=%s",
                     event.message_id,
-                    error,
+                    e.__class__.__name__,
+                    getattr(e, "status_code", "n/a"),
                 )
                 await self._text_sender.send(
                     _summary_failure_message(e),
@@ -375,25 +381,140 @@ class Pipeline:
                 card_sent = await self._sender.send(card_json, event.chat_id, event.message_id)
                 if not card_sent:
                     logger.error(
-                        "summary card send failed: url=%s message_id=%s",
-                        url,
+                        "summary card send failed: message_id=%s",
                         event.message_id,
                     )
                     return
                 logger.info(
-                    "done: video=%s tokens=%d cached=%s message_id=%s",
-                    url,
+                    "summary sent: content_id=%s tokens=%d cached=%s message_id=%s",
+                    result.content_id or "missing",
                     result.usage.total_tokens,
                     result.from_cache,
                     event.message_id,
                 )
             except Exception as e:
                 logger.error(
-                    "reply failed: url=%s message_id=%s error=%s",
-                    url,
+                    "summary reply failed: message_id=%s error=%s",
                     event.message_id,
                     e,
                 )
+                return
+
+            await self._try_send_bibigpt_subtitles(event, result)
+
+    async def _try_send_bibigpt_subtitles(
+        self,
+        event: MessageEvent | CardActionEvent,
+        result: SummaryResult,
+    ) -> None:
+        try:
+            subtitle_result = await self._bibi_client.fetch_cached_subtitles(result)
+        except Exception as e:
+            logger.warning(
+                "subtitle lookup failed unexpectedly: content_id=%s "
+                "message_id=%s error=%s",
+                result.content_id,
+                event.message_id,
+                e,
+            )
+            await self._text_sender.send(
+                "BibiGPT 字幕暂不可用: 没有获取到可读取的已存字幕。",
+                event.chat_id,
+                event.message_id,
+            )
+            return
+
+        subtitles = subtitle_result.subtitles
+        logger.info(
+            "subtitle lookup complete: content_id=%s source=%s status=%s "
+            "segments=%d message_id=%s reason=%s",
+            result.content_id,
+            subtitle_result.source,
+            subtitle_result.status,
+            len(subtitles),
+            event.message_id,
+            subtitle_result.reason or "(none)",
+        )
+        if not subtitles:
+            await self._text_sender.send(
+                "BibiGPT 字幕暂不可用: 没有获取到可读取的已存字幕。",
+                event.chat_id,
+                event.message_id,
+            )
+            return
+
+        try:
+            formatted = await self._translator.format_subtitles(
+                subtitles,
+                content_id=result.content_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "subtitle formatting failed unexpectedly, using original text: "
+                "content_id=%s segments=%d message_id=%s error=%s",
+                result.content_id,
+                len(subtitles),
+                event.message_id,
+                e,
+            )
+            formatted = subtitles
+
+        try:
+            cards = build_subtitle_cards(formatted)
+        except Exception as e:
+            logger.error(
+                "subtitle card build failed: content_id=%s segments=%d "
+                "message_id=%s error=%s",
+                result.content_id,
+                len(formatted),
+                event.message_id,
+                e,
+            )
+            await self._text_sender.send(
+                "BibiGPT 字幕暂不可用: 字幕卡片生成失败。",
+                event.chat_id,
+                event.message_id,
+            )
+            return
+
+        total = len(cards)
+        logger.info(
+            "subtitle cards ready: content_id=%s segments=%d cards=%d message_id=%s",
+            result.content_id,
+            len(formatted),
+            total,
+            event.message_id,
+        )
+        for part_index, card_json in enumerate(cards, start=1):
+            if part_index > 1:
+                await asyncio.sleep(_SUBTITLE_SEND_INTERVAL_SECONDS)
+            wire_bytes = card_message_wire_size(card_json)
+            card_sent = await self._sender.send(card_json, event.chat_id, event.message_id)
+            if not card_sent:
+                logger.error(
+                    "subtitle card send failed: content_id=%s part=%d/%d "
+                    "wire_bytes=%d message_id=%s",
+                    result.content_id,
+                    part_index,
+                    total,
+                    wire_bytes,
+                    event.message_id,
+                )
+                await self._text_sender.send(
+                    f"BibiGPT 字幕发送不完整: 已发送 {part_index - 1}/{total} 段, 可重试。",
+                    event.chat_id,
+                    event.message_id,
+                )
+                return
+            logger.info(
+                "subtitle card sent: content_id=%s part=%d/%d wire_bytes=%d "
+                "message_id=%s",
+                result.content_id,
+                part_index,
+                total,
+                wire_bytes,
+                event.message_id,
+            )
 
     async def _try_send_comment_analysis(
         self,

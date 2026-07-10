@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
@@ -12,7 +15,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from .bibi_models import SummaryResult
+from .bibi_models import (
+    SubtitleFetchResult,
+    SummaryResult,
+    subtitle_segments_from_web_response,
+)
 from .browser_session import BrowserUnavailableError, persistent_context
 from .config import Settings
 from .cookie_refresh import write_netscape
@@ -115,6 +122,197 @@ class BibiClient:
             return await self._summarize_browser(video_url, effective_prompt)
         return await self._summarize_web(video_url, effective_prompt)
 
+    async def fetch_cached_subtitles(self, summary: SummaryResult) -> SubtitleFetchResult:
+        """Read subtitles already cached by BibiGPT without starting a new task."""
+        if summary.subtitles:
+            logger.info(
+                "BibiGPT subtitles available (content_id=%s, source=embedded, count=%d)",
+                summary.content_id or "missing",
+                len(summary.subtitles),
+            )
+            return SubtitleFetchResult(
+                subtitles=summary.subtitles,
+                status="available",
+                source="embedded",
+            )
+
+        content_id = summary.content_id.strip()
+        if not content_id:
+            logger.warning("BibiGPT subtitles unavailable because content_id is missing")
+            return SubtitleFetchResult(
+                subtitles=(),
+                status="unavailable",
+                source="none",
+                reason="BibiGPT summary response did not include contentId.",
+            )
+
+        try:
+            if self._settings.bibigpt_access_mode == "browser":
+                result = await self._fetch_cached_subtitles_browser(
+                    content_id,
+                    summary.video_url,
+                )
+            else:
+                if self._cookie_error:
+                    raise AuthenticationError(0, self._cookie_error)
+                result = await self._fetch_cached_subtitles_web(
+                    content_id,
+                    summary.video_url,
+                )
+        except Exception as exc:
+            reason = _subtitle_fetch_error_reason(exc)
+            logger.warning(
+                "BibiGPT subtitle lookup failed (content_id=%s, reason=%s)",
+                content_id,
+                reason,
+            )
+            return SubtitleFetchResult(
+                subtitles=(),
+                status="error",
+                source="none",
+                reason=reason,
+            )
+
+        logger.info(
+            "BibiGPT subtitle lookup complete "
+            "(content_id=%s, status=%s, source=%s, count=%d)",
+            content_id,
+            result.status,
+            result.source,
+            len(result.subtitles),
+        )
+        return result
+
+    async def _fetch_cached_subtitles_web(
+        self,
+        content_id: str,
+        video_url: str,
+    ) -> SubtitleFetchResult:
+        async with httpx.AsyncClient(timeout=self._settings.bibigpt_timeout) as client:
+
+            async def request(
+                path: str, payload: dict[str, Any]
+            ) -> dict[str, Any] | None:
+                url = f"{self._routes.api_base_url}/api/trpc/{path}"
+                response = await client.get(
+                    url,
+                    params={"input": _encode_trpc_input(payload)},
+                    headers=self._headers,
+                )
+                self._check_response(response)
+                return _extract_optional_trpc_data(response.json())
+
+            return await self._fetch_cached_subtitles_with_request(
+                content_id,
+                video_url,
+                request,
+            )
+
+    async def _fetch_cached_subtitles_browser(
+        self,
+        content_id: str,
+        video_url: str,
+    ) -> SubtitleFetchResult:
+        async with self._browser_page() as page:
+
+            async def request(
+                path: str, payload: dict[str, Any]
+            ) -> dict[str, Any] | None:
+                url = _trpc_query_url(self._routes.api_base_url, path, payload)
+                raw_data = await self._browser_request_json(page, url, None, method="GET")
+                return _extract_optional_trpc_data(raw_data)
+
+            return await self._fetch_cached_subtitles_with_request(
+                content_id,
+                video_url,
+                request,
+            )
+
+    async def _fetch_cached_subtitles_with_request(
+        self,
+        content_id: str,
+        video_url: str,
+        request: Callable[
+            [str, dict[str, Any]], Awaitable[dict[str, Any] | None]
+        ],
+    ) -> SubtitleFetchResult:
+        errors: list[str] = []
+        status_payload = {"taskId": content_id}
+        for attempt in range(1, 4):
+            try:
+                data = await request("content.subtitlesTaskStatus", status_payload)
+            except Exception as exc:
+                reason = _subtitle_fetch_error_reason(exc)
+                errors.append(f"subtitlesTaskStatus: {reason}")
+                logger.warning(
+                    "BibiGPT subtitle status query failed "
+                    "(content_id=%s, attempt=%d, reason=%s)",
+                    content_id,
+                    attempt,
+                    reason,
+                )
+                break
+
+            subtitles = subtitle_segments_from_web_response(data) if data is not None else ()
+            if subtitles:
+                return SubtitleFetchResult(
+                    subtitles=subtitles,
+                    status="available",
+                    source="subtitles_task_status",
+                )
+
+            task_status = _extract_subtitle_task_status(data) if data is not None else ""
+            logger.debug(
+                "BibiGPT subtitle status query returned no subtitles "
+                "(content_id=%s, attempt=%d, task_status=%s)",
+                content_id,
+                attempt,
+                task_status or "unknown",
+            )
+            if _is_terminal_subtitle_task_status(task_status):
+                break
+            if attempt < 3:
+                await asyncio.sleep(2)
+
+        info_payload = {
+            "url": video_url,
+            "contentId": content_id,
+            "skipSubtitleTask": True,
+            "isRefresh": False,
+        }
+        try:
+            data = await request("content.info", info_payload)
+        except Exception as exc:
+            reason = _subtitle_fetch_error_reason(exc)
+            errors.append(f"content.info: {reason}")
+            logger.warning(
+                "BibiGPT cached content lookup failed (content_id=%s, reason=%s)",
+                content_id,
+                reason,
+            )
+        else:
+            subtitles = subtitle_segments_from_web_response(data) if data is not None else ()
+            if subtitles:
+                return SubtitleFetchResult(
+                    subtitles=subtitles,
+                    status="available",
+                    source="content_info",
+                )
+
+        if errors:
+            return SubtitleFetchResult(
+                subtitles=(),
+                status="error",
+                source="none",
+                reason="; ".join(errors),
+            )
+        return SubtitleFetchResult(
+            subtitles=(),
+            status="unavailable",
+            source="none",
+            reason="BibiGPT has no cached subtitles for this content.",
+        )
+
     async def _summarize_browser(self, video_url: str, prompt: str) -> SummaryResult:
         body: dict[str, Any] = {
             "0": {
@@ -130,7 +328,10 @@ class BibiClient:
         }
 
         url = f"{self._routes.api_base_url}/api/trpc/video.summaryBySetting?batch=1"
-        logger.info("Requesting browser-backed web summary for %s", video_url)
+        logger.info(
+            "Requesting browser-backed web summary for %s",
+            _source_url_for_log(video_url),
+        )
 
         raw_data = await self._browser_fetch_json(url, body)
         data = _extract_trpc_data(raw_data)
@@ -159,7 +360,7 @@ class BibiClient:
         }
 
         url = f"{self._routes.api_base_url}/api/trpc/video.summaryBySetting?batch=1"
-        logger.info("Requesting web summary for %s", video_url)
+        logger.info("Requesting web summary for %s", _source_url_for_log(video_url))
 
         async with httpx.AsyncClient(timeout=self._settings.bibigpt_timeout) as client:
             response = await client.post(url, json=body, headers=self._headers)
@@ -227,6 +428,11 @@ class BibiClient:
         *,
         method: str = "POST",
     ) -> Any:
+        async with self._browser_page() as page:
+            return await self._browser_request_json(page, url, body, method=method)
+
+    @asynccontextmanager
+    async def _browser_page(self) -> AsyncIterator[Any]:
         try:
             from playwright.async_api import (
                 Error as PlaywrightError,
@@ -257,28 +463,7 @@ class BibiClient:
                     wait_until="domcontentloaded",
                     timeout=timeout_ms,
                 )
-                result = await page.evaluate(
-                    """async ({url, method, body}) => {
-                        const init = {
-                            method,
-                            credentials: "include",
-                            headers: {
-                                "accept": "application/json",
-                                "content-type": "application/json"
-                            }
-                        };
-                        if (body !== null) {
-                            init.body = JSON.stringify(body);
-                        }
-                        const response = await fetch(url, init);
-                        return {
-                            status: response.status,
-                            ok: response.ok,
-                            text: await response.text()
-                        };
-                    }""",
-                    {"url": url, "method": method, "body": body},
-                )
+                yield page
                 if self._settings.bibigpt_cookie_writeback:
                     await self._writeback_cookies(context)
         except BrowserUnavailableError as exc:
@@ -292,6 +477,36 @@ class BibiClient:
         except PlaywrightError as exc:
             raise BibiAPIError(0, f"BibiGPT browser request failed: {exc}") from exc
 
+    async def _browser_request_json(
+        self,
+        page: Any,
+        url: str,
+        body: dict[str, Any] | None,
+        *,
+        method: str = "POST",
+    ) -> Any:
+        result = await page.evaluate(
+            """async ({url, method, body}) => {
+                const init = {
+                    method,
+                    credentials: "include",
+                    headers: {
+                        "accept": "application/json",
+                        "content-type": "application/json"
+                    }
+                };
+                if (body !== null) {
+                    init.body = JSON.stringify(body);
+                }
+                const response = await fetch(url, init);
+                return {
+                    status: response.status,
+                    ok: response.ok,
+                    text: await response.text()
+                };
+            }""",
+            {"url": url, "method": method, "body": body},
+        )
         if not isinstance(result, dict):
             raise BibiAPIError(0, "BibiGPT browser request returned an unexpected result.")
 
@@ -354,8 +569,72 @@ def _domain_matches_writeback(cookie_domain: str, want: str) -> bool:
     return d == want or want.endswith(f".{d}")
 
 
+def _source_url_for_log(url: str) -> str:
+    parsed = urlsplit(url)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
 def _with_output_instructions(prompt: str) -> str:
     return f"{prompt.strip()}\n\n{_OUTPUT_INSTRUCTIONS.strip()}"
+
+
+def _encode_trpc_input(payload: dict[str, Any]) -> str:
+    return json.dumps({"json": payload}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _trpc_query_url(base_url: str, path: str, payload: dict[str, Any]) -> str:
+    url = f"{base_url}/api/trpc/{path}"
+    return str(httpx.URL(url, params={"input": _encode_trpc_input(payload)}))
+
+
+def _extract_subtitle_task_status(data: dict[str, Any]) -> str:
+    pending = [data]
+    seen: set[int] = set()
+    while pending:
+        candidate = pending.pop(0)
+        identity = id(candidate)
+        if identity in seen:
+            continue
+        seen.add(identity)
+
+        for key in ("status", "taskStatus", "subtitlesTaskStatus"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        for key in ("data", "detail", "videoDetail", "task"):
+            nested = candidate.get(key)
+            if isinstance(nested, dict):
+                pending.append(nested)
+    return ""
+
+
+def _is_terminal_subtitle_task_status(status: str) -> bool:
+    return status.lower() in {
+        "canceled",
+        "cancelled",
+        "complete",
+        "completed",
+        "error",
+        "failed",
+        "finished",
+        "not_found",
+        "success",
+        "succeeded",
+    }
+
+
+def _subtitle_fetch_error_reason(exc: Exception) -> str:
+    if isinstance(exc, AuthenticationError):
+        return "BibiGPT authentication failed."
+    if isinstance(exc, httpx.TimeoutException):
+        return "BibiGPT subtitle request timed out."
+    if isinstance(exc, BibiAPIError):
+        return f"BibiGPT API returned HTTP {exc.status_code}."
+    if isinstance(exc, (json.JSONDecodeError, ValueError, TypeError)):
+        return "BibiGPT returned an unexpected subtitle response."
+    if isinstance(exc, httpx.HTTPError):
+        return "BibiGPT subtitle request failed."
+    return f"BibiGPT subtitle lookup failed ({type(exc).__name__})."
 
 
 def _validate_summary_result(result: SummaryResult) -> SummaryResult:
@@ -407,6 +686,22 @@ def _web_prompt_config(prompt: str, *, model: str = "", refresh: bool = False) -
 
 
 def _extract_trpc_data(data: Any) -> dict[str, Any]:
+    payload = _extract_trpc_payload(data)
+    if not isinstance(payload, dict):
+        raise ValueError("BibiGPT web response data has unexpected shape")
+    return payload
+
+
+def _extract_optional_trpc_data(data: Any) -> dict[str, Any] | None:
+    payload = _extract_trpc_payload(data)
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise ValueError("BibiGPT web response data has unexpected shape")
+    return payload
+
+
+def _extract_trpc_payload(data: Any) -> Any:
     item = data[0] if isinstance(data, list) and data else data
     if not isinstance(item, dict):
         raise ValueError("BibiGPT web response has unexpected shape")
@@ -421,8 +716,6 @@ def _extract_trpc_data(data: Any) -> dict[str, Any]:
     payload = result.get("data", result)
     if isinstance(payload, dict) and "json" in payload:
         payload = payload["json"]
-    if not isinstance(payload, dict):
-        raise ValueError("BibiGPT web response data has unexpected shape")
     return payload
 
 

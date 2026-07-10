@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from collections.abc import Callable, Sequence
 from html import escape
 
+from .bibi_models import SubtitleSegment
 from .parsers.base import LinkMetadata, MediaType
 
 _SOURCE_COLORS = {
@@ -16,6 +18,10 @@ _SOURCE_COLORS = {
     "instagram": "purple",
     "tiktok": "grey",
 }
+
+_SUBTITLE_CARD_TARGET_BYTES = 24 * 1024
+_SUBTITLE_CARD_HARD_LIMIT_BYTES = 30 * 1024
+_FEISHU_RECEIVE_ID_SIZE_BUDGET = 256
 
 
 def _fmt_duration(seconds: int) -> str:
@@ -121,6 +127,178 @@ def build_markdown_card(
         card["card_link"] = {"url": source_url}
 
     return json.dumps(card, ensure_ascii=False)
+
+
+def card_message_wire_size(card_json: str) -> int:
+    """Return a conservative UTF-8 size for either Feishu send mode."""
+    reply_payload = {"content": card_json, "msg_type": "interactive"}
+    archive_payload = {
+        "receive_id": "x" * _FEISHU_RECEIVE_ID_SIZE_BUDGET,
+        "msg_type": "interactive",
+        "content": card_json,
+    }
+    return max(
+        len(json.dumps(reply_payload, ensure_ascii=False).encode("utf-8")),
+        len(json.dumps(archive_payload, ensure_ascii=False).encode("utf-8")),
+    )
+
+
+def build_subtitle_cards(segments: Sequence[SubtitleSegment]) -> list[str]:
+    """Render timestamped subtitles into size-safe, collapsed Feishu cards."""
+    if not segments:
+        return []
+
+    single_content = "\n\n".join(_format_subtitle_segment(segment) for segment in segments)
+    single_card = _build_subtitle_card(single_content, panel_title="完整字幕")
+    if card_message_wire_size(single_card) <= _SUBTITLE_CARD_TARGET_BYTES:
+        return [single_card]
+
+    sizing_title = "完整字幕（1/1）"
+    while True:
+        contents = _partition_subtitle_contents(segments, panel_title=sizing_title)
+        total = len(contents)
+        next_sizing_title = f"完整字幕（{total}/{total}）"
+        if len(next_sizing_title.encode("utf-8")) == len(sizing_title.encode("utf-8")):
+            break
+        sizing_title = next_sizing_title
+
+    cards = [
+        _build_subtitle_card(content, panel_title=f"完整字幕（{index}/{total}）")
+        for index, content in enumerate(contents, start=1)
+    ]
+    if any(card_message_wire_size(card) >= _SUBTITLE_CARD_HARD_LIMIT_BYTES for card in cards):
+        raise ValueError("subtitle card exceeds Feishu's hard message size limit")
+    return cards
+
+
+def _partition_subtitle_contents(
+    segments: Sequence[SubtitleSegment],
+    *,
+    panel_title: str,
+) -> list[str]:
+    units: list[str] = []
+    for segment in segments:
+        rendered = _format_subtitle_segment(segment)
+        if _subtitle_content_fits(rendered, panel_title=panel_title):
+            units.append(rendered)
+        else:
+            units.extend(_split_oversized_subtitle_segment(segment, panel_title=panel_title))
+
+    contents: list[str] = []
+    current: list[str] = []
+    for unit in units:
+        candidate = "\n\n".join([*current, unit])
+        if current and not _subtitle_content_fits(candidate, panel_title=panel_title):
+            contents.append("\n\n".join(current))
+            current = [unit]
+        else:
+            current.append(unit)
+
+    if current:
+        contents.append("\n\n".join(current))
+    return contents
+
+
+def _split_oversized_subtitle_segment(
+    segment: SubtitleSegment,
+    *,
+    panel_title: str,
+) -> list[str]:
+    prefix = _subtitle_segment_prefix(segment)
+    remaining = segment.text
+    fragments: list[str] = []
+    first = True
+
+    while remaining:
+        continuation = "" if first else "（续）"
+
+        def render(text: str, marker: str = continuation) -> str:
+            return f"{prefix}{marker}{text}"
+
+        fragment_length = _largest_fitting_prefix(
+            remaining,
+            render=render,
+            panel_title=panel_title,
+        )
+        if fragment_length == 0:
+            raise ValueError("subtitle card metadata leaves no room for subtitle text")
+        fragments.append(render(remaining[:fragment_length]))
+        remaining = remaining[fragment_length:]
+        first = False
+
+    if not fragments:
+        fragments.append(prefix)
+    return fragments
+
+
+def _largest_fitting_prefix(
+    text: str,
+    *,
+    render: Callable[[str], str],
+    panel_title: str,
+) -> int:
+    low = 1
+    high = len(text)
+    best = 0
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = render(text[:middle])
+        if _subtitle_content_fits(candidate, panel_title=panel_title):
+            best = middle
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
+def _subtitle_content_fits(content: str, *, panel_title: str) -> bool:
+    card = _build_subtitle_card(content, panel_title=panel_title)
+    return card_message_wire_size(card) <= _SUBTITLE_CARD_TARGET_BYTES
+
+
+def _format_subtitle_segment(segment: SubtitleSegment) -> str:
+    return f"{_subtitle_segment_prefix(segment)}{segment.text}"
+
+
+def _subtitle_segment_prefix(segment: SubtitleSegment) -> str:
+    start = _fmt_subtitle_timestamp(segment.start_time)
+    end = _fmt_subtitle_timestamp(segment.end_time)
+    speaker = f"说话人 {segment.speaker_id}：" if segment.speaker_id is not None else ""
+    return f"**[{start}–{end}]** {speaker}"
+
+
+def _fmt_subtitle_timestamp(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _build_subtitle_card(content: str, *, panel_title: str) -> str:
+    card: dict[str, object] = {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "BibiGPT 字幕"},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "collapsible_panel",
+                    "expanded": False,
+                    "header": {
+                        "title": {"tag": "markdown", "content": f"**{panel_title}**"},
+                        "vertical_align": "center",
+                        "padding": "4px 0px 4px 8px",
+                    },
+                    "elements": [{"tag": "markdown", "content": content}],
+                }
+            ]
+        },
+    }
+    return json.dumps(card, ensure_ascii=False, separators=(",", ":"))
 
 
 def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
