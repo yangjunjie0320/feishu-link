@@ -118,7 +118,7 @@ cookie_refresh_min_interval_seconds: 600     # in-process throttle per platform
 title_translation_enabled: false
 deepseek_api_key: ""
 deepseek_base_url: "https://api.deepseek.com"
-deepseek_model: "deepseek-chat"
+deepseek_model: "deepseek-v4-flash"
 translation_timeout: 10.0
 
 # Comment analysis action. Uses the DeepSeek-compatible chat completions config above.

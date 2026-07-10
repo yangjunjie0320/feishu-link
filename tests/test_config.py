@@ -83,3 +83,8 @@ def test_bibigpt_defaults() -> None:
 
     assert settings.bibigpt_base_url == "https://aitodo.co/zh"
     assert settings.bibigpt_model == "openai/gpt-5.5"
+
+
+def test_deepseek_model_defaults_to_v4_flash_and_allows_override() -> None:
+    assert Settings().deepseek_model == "deepseek-v4-flash"
+    assert Settings(deepseek_model="deepseek-v4-pro").deepseek_model == "deepseek-v4-pro"

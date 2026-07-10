@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     title_translation_enabled: bool = False
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-v4-flash"
     deepseek_thinking_enabled: bool = True
     deepseek_reasoning_effort: str | None = None
     translation_timeout: float = 10.0

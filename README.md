@@ -172,6 +172,7 @@ See `config.example.yaml` for the full reference. Common settings:
 | `bibigpt_default_prompt` | Empty | Optional default custom prompt. Leave empty to use BibiGPT's built-in prompt |
 | `deepseek_api_key` | Empty | Enables title translation, BibiGPT summary rewriting, and faithful Chinese transcript formatting; transcript formatting falls back to the stored original when unavailable |
 | `deepseek_base_url` | DeepSeek API | Optional compatible API endpoint |
+| `deepseek_model` | `deepseek-v4-flash` | DeepSeek model used for translation, summary rewriting, comment analysis, and transcript formatting; explicit configuration overrides this default |
 | `enable_title_translation` | `false` | Translate non-Chinese titles when true |
 | `cookie_refresh_enabled` | `true` | Refresh expiring platform cookies from a persistent Chromium profile |
 | `cookie_refresh_platforms` | `["bilibili"]` | Platforms whose cookies are refreshed before yt-dlp parse/download |
@@ -226,7 +227,7 @@ Title translation is optional. When enabled, the service calls DeepSeek only if 
 ```yaml
 enable_title_translation: true
 deepseek_api_key: "sk-xxx"
-deepseek_model: "deepseek-chat"
+deepseek_model: "deepseek-v4-flash"
 ```
 
 Cards display both the Chinese translation and the original title. Translation failures are logged and do not block card sending.
