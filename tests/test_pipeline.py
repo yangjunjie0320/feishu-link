@@ -4,12 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.bibi_client import AuthenticationError, BibiAPIError, TranscriptUnavailableError
-from src.bibi_models import (
-    SubtitleFetchResult,
-    SubtitleSegment,
-    SummaryResult,
-    Usage,
-)
+from src.bibi_models import SummaryResult, Usage
 from src.comment_analyzer import CommentAnalysisError
 from src.config import Settings
 from src.listener import CardActionEvent
@@ -29,7 +24,7 @@ class _NoopHold:
         return None
 
 
-def _summary_result(*, subtitles: tuple[SubtitleSegment, ...] = ()) -> SummaryResult:
+def _summary_result() -> SummaryResult:
     return SummaryResult(
         content="- **总结**\n    - 内容",
         model="bibigpt-web",
@@ -37,7 +32,6 @@ def _summary_result(*, subtitles: tuple[SubtitleSegment, ...] = ()) -> SummaryRe
         from_cache=False,
         video_url="https://youtu.be/abc123",
         content_id="content-123",
-        subtitles=subtitles,
     )
 
 
@@ -164,74 +158,25 @@ def test_summary_failure_message_for_expired_login() -> None:
 
 
 @pytest.mark.asyncio
-async def test_summary_sends_card_before_formatting_and_subtitle_card() -> None:
-    pipeline = _prepare_summary_pipeline()
-    segment = SubtitleSegment(index=0, start_time=1, end_time=2, text="Original")
-    formatted = SubtitleSegment(index=0, start_time=1, end_time=2, text="中文")
-    summary = _summary_result(subtitles=(segment,))
-    timeline: list[str] = []
-
-    pipeline._bibi_client.summarize = AsyncMock(return_value=summary)  # type: ignore[method-assign]
-
-    async def fetch_cached_subtitles(result: SummaryResult) -> SubtitleFetchResult:
-        assert result is summary
-        timeline.append("fetch")
-        return SubtitleFetchResult(
-            subtitles=(segment,), status="available", source="embedded"
-        )
-
-    async def format_subtitles(subtitles, *, content_id: str = ""):
-        assert subtitles == (segment,)
-        assert content_id == "content-123"
-        timeline.append("format")
-        return (formatted,)
-
-    async def send(card_json: str, chat_id: str, message_id: str) -> bool:
-        card = json.loads(card_json)
-        is_summary = card["header"]["title"]["content"] == "BibiGPT 总结"
-        timeline.append("summary" if is_summary else "subtitle")
-        assert chat_id == "oc_chat"
-        assert message_id == "om_summary"
-        return True
-
-    pipeline._bibi_client.fetch_cached_subtitles = fetch_cached_subtitles  # type: ignore[method-assign]
-    pipeline._translator.format_subtitles = format_subtitles  # type: ignore[method-assign]
-    pipeline._sender.send = send  # type: ignore[method-assign]
-
-    await pipeline._try_send_bibigpt_summary(summary.video_url, _summary_event())
-
-    assert timeline == ["summary", "fetch", "format", "subtitle"]
-
-
-@pytest.mark.asyncio
-async def test_summary_reports_unavailable_subtitles_without_formatting() -> None:
+async def test_summary_sends_only_summary_card() -> None:
     pipeline = _prepare_summary_pipeline()
     summary = _summary_result()
     pipeline._bibi_client.summarize = AsyncMock(return_value=summary)  # type: ignore[method-assign]
-    pipeline._bibi_client.fetch_cached_subtitles = AsyncMock(  # type: ignore[method-assign]
-        return_value=SubtitleFetchResult(
-            subtitles=(),
-            status="unavailable",
-            source="none",
-            reason="No cached subtitles.",
-        )
-    )
+    pipeline._bibi_client.fetch_cached_subtitles = AsyncMock()  # type: ignore[method-assign]
     pipeline._translator.format_subtitles = AsyncMock()  # type: ignore[method-assign]
     pipeline._sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
-    pipeline._text_sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
 
     await pipeline._try_send_bibigpt_summary(summary.video_url, _summary_event())
 
+    pipeline._sender.send.assert_awaited_once()
+    card = json.loads(pipeline._sender.send.await_args.args[0])
+    assert card["header"]["title"]["content"] == "BibiGPT 总结"
+    pipeline._bibi_client.fetch_cached_subtitles.assert_not_called()
     pipeline._translator.format_subtitles.assert_not_called()
-    pipeline._text_sender.send.assert_awaited_once_with(
-        "BibiGPT 字幕暂不可用: 没有获取到可读取的已存字幕。",
-        "oc_chat",
-        "om_summary",
-    )
 
 
 @pytest.mark.asyncio
-async def test_summary_send_failure_stops_before_subtitle_lookup() -> None:
+async def test_summary_send_failure_does_not_lookup_subtitles() -> None:
     pipeline = _prepare_summary_pipeline()
     summary = _summary_result()
     pipeline._bibi_client.summarize = AsyncMock(return_value=summary)  # type: ignore[method-assign]
@@ -243,46 +188,6 @@ async def test_summary_send_failure_stops_before_subtitle_lookup() -> None:
 
     pipeline._bibi_client.fetch_cached_subtitles.assert_not_called()
     pipeline._text_sender.send.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_subtitle_send_failure_stops_later_parts_and_reports_progress(
-    monkeypatch,
-) -> None:
-    pipeline = _prepare_summary_pipeline()
-    segment = SubtitleSegment(index=0, start_time=1, end_time=2, text="字幕")
-    summary = _summary_result(subtitles=(segment,))
-    pipeline._bibi_client.summarize = AsyncMock(return_value=summary)  # type: ignore[method-assign]
-    pipeline._bibi_client.fetch_cached_subtitles = AsyncMock(  # type: ignore[method-assign]
-        return_value=SubtitleFetchResult(
-            subtitles=(segment,), status="available", source="embedded"
-        )
-    )
-    pipeline._translator.format_subtitles = AsyncMock(  # type: ignore[method-assign]
-        return_value=(segment,)
-    )
-    pipeline._sender.send = AsyncMock(side_effect=[True, True, False])  # type: ignore[method-assign]
-    pipeline._text_sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
-    monkeypatch.setattr(
-        "src.pipeline.build_subtitle_cards",
-        lambda subtitles: ["subtitle-card-1", "subtitle-card-2", "subtitle-card-3"],
-    )
-    sleep = AsyncMock()
-    monkeypatch.setattr("src.pipeline.asyncio.sleep", sleep)
-
-    await pipeline._try_send_bibigpt_summary(summary.video_url, _summary_event())
-
-    assert pipeline._sender.send.await_count == 3
-    sent_cards = [call.args[0] for call in pipeline._sender.send.await_args_list]
-    assert sent_cards[1:] == ["subtitle-card-1", "subtitle-card-2"]
-    for call in pipeline._sender.send.await_args_list:
-        assert call.args[1:] == ("oc_chat", "om_summary")
-    sleep.assert_awaited_once_with(0.25)
-    pipeline._text_sender.send.assert_awaited_once_with(
-        "BibiGPT 字幕发送不完整: 已发送 1/3 段, 可重试。",
-        "oc_chat",
-        "om_summary",
-    )
 
 
 @pytest.mark.asyncio
