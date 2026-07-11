@@ -4,7 +4,7 @@ import httpx
 import pytest
 import respx
 
-from src.bibi_models import SubtitleSegment
+from src.bibi_models import ChapterSummarySection
 from src.config import Settings
 from src.parsers.base import LinkMetadata
 from src.translator import TitleTranslator, contains_chinese
@@ -113,10 +113,13 @@ async def test_translate_non_chinese_description() -> None:
     assert meta.translated_description == "BMW M1 宽体车, 覆盖定制水钻艺术装饰"
 
 
-@pytest.mark.parametrize("text,expected", [
-    ("\"中文标题\"", "中文标题"),
-    ("  hello   world  ", "hello world"),
-])
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ('"中文标题"', "中文标题"),
+        ("  hello   world  ", "hello world"),
+    ],
+)
 def test_clean_translation(text: str, expected: str) -> None:
     from src.translator import _clean_translation
 
@@ -126,16 +129,10 @@ def test_clean_translation(text: str, expected: str) -> None:
 def test_clean_markdown_translation_preserves_nested_list_indentation() -> None:
     from src.translator import _clean_markdown_translation
 
-    text = (
-        "- **问题**\n"
-        "  - **大学应如何调整课程？** ：  使用 AI 作为研究工具\n"
-        "    - 保持第一性原理"
-    )
+    text = "- **问题**\n  - **大学应如何调整课程？** ：  使用 AI 作为研究工具\n    - 保持第一性原理"
 
     assert _clean_markdown_translation(text) == (
-        "- **问题**\n"
-        "  - **大学应如何调整课程？** ： 使用 AI 作为研究工具\n"
-        "    - 保持第一性原理"
+        "- **问题**\n  - **大学应如何调整课程？** ： 使用 AI 作为研究工具\n    - 保持第一性原理"
     )
 
 
@@ -199,7 +196,7 @@ async def test_ensure_chinese_markdown_summary_rewrites_existing_chinese() -> No
 
 
 @respx.mock
-async def test_format_subtitles_uses_strict_json_and_preserves_timing() -> None:
+async def test_format_chapter_summary_uses_strict_json_and_preserves_timing() -> None:
     settings = Settings(
         deepseek_api_key="test-key",
         deepseek_thinking_enabled=True,
@@ -214,7 +211,20 @@ async def test_format_subtitles_uses_strict_json_and_preserves_timing() -> None:
                     {
                         "message": {
                             "content": json.dumps(
-                                {"items": [{"id": 7, "text": "这是  格式化后的字幕。"}]},
+                                {
+                                    "items": [
+                                        {
+                                            "id": "overview",
+                                            "title": "总述",
+                                            "summary": "这是  格式化后的总述。",
+                                        },
+                                        {
+                                            "id": "section:7",
+                                            "title": "项目  背景",
+                                            "summary": "这是  格式化后的章节总结。",
+                                        },
+                                    ]
+                                },
                                 ensure_ascii=False,
                             )
                         }
@@ -223,38 +233,59 @@ async def test_format_subtitles_uses_strict_json_and_preserves_timing() -> None:
             },
         )
     )
-    original = SubtitleSegment(
+    original = ChapterSummarySection(
         index=7,
         start_time=12.5,
         end_time=17.25,
-        text="This is the subtitle",
-        speaker_id=3,
+        title="Project background",
+        summary="This is the chapter summary",
     )
 
     async with httpx.AsyncClient() as client:
-        formatted = await TitleTranslator(settings, client).format_subtitles(
-            [original], content_id="content-1"
+        introduction, formatted = await TitleTranslator(settings, client).format_chapter_summary(
+            "This is the overview", [original], content_id="content-1"
         )
 
+    assert introduction == "这是 格式化后的总述。"
     assert formatted == (
-        SubtitleSegment(
+        ChapterSummarySection(
             index=7,
             start_time=12.5,
             end_time=17.25,
-            text="这是 格式化后的字幕。",
-            speaker_id=3,
+            title="项目 背景",
+            summary="这是 格式化后的章节总结。",
         ),
     )
     body = json.loads(route.calls.last.request.content)
     assert body["response_format"] == {"type": "json_object"}
     assert body["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in body
     assert body["max_tokens"] == 8192
     user_prompt = body["messages"][1]["content"]
     input_data = json.loads(user_prompt.split("\n", maxsplit=1)[1])
-    assert input_data == {"items": [{"id": 7, "text": "This is the subtitle"}]}
+    assert input_data == {
+        "items": [
+            {
+                "id": "overview",
+                "title": "总述",
+                "summary": "This is the overview",
+            },
+            {
+                "id": "section:7",
+                "title": "Project background",
+                "summary": "This is the chapter summary",
+            },
+        ]
+    }
+    assert set().union(*(item.keys() for item in input_data["items"])) == {
+        "id",
+        "title",
+        "summary",
+    }
     assert "start_time" not in user_prompt
     assert "end_time" not in user_prompt
-    assert "speaker_id" not in user_prompt
+    assert "contents" not in user_prompt
+    assert "text" not in user_prompt
     assert route.calls.last.request.extensions["timeout"] == {
         "connect": 37.0,
         "read": 37.0,
@@ -264,7 +295,7 @@ async def test_format_subtitles_uses_strict_json_and_preserves_timing() -> None:
 
 
 @respx.mock
-async def test_format_subtitles_batches_by_item_and_character_limits() -> None:
+async def test_format_chapter_summary_batches_by_item_and_character_limits() -> None:
     settings = Settings(deepseek_api_key="test-key")
     batch_sizes: list[int] = []
     batch_characters: list[int] = []
@@ -274,9 +305,16 @@ async def test_format_subtitles_batches_by_item_and_character_limits() -> None:
         user_prompt = body["messages"][1]["content"]
         items = json.loads(user_prompt.split("\n", maxsplit=1)[1])["items"]
         batch_sizes.append(len(items))
-        batch_characters.append(sum(len(item["text"]) for item in items))
+        batch_characters.append(sum(len(item["title"]) + len(item["summary"]) for item in items))
         formatted = {
-            "items": [{"id": item["id"], "text": f"格式化 {item['id']}"} for item in items]
+            "items": [
+                {
+                    "id": item["id"],
+                    "title": f"标题 {item['id']}",
+                    "summary": f"格式化 {item['id']}",
+                }
+                for item in items
+            ]
         }
         return httpx.Response(
             200,
@@ -284,22 +322,31 @@ async def test_format_subtitles_batches_by_item_and_character_limits() -> None:
         )
 
     respx.post("https://api.deepseek.com/chat/completions").mock(side_effect=respond)
-    subtitles = [
-        SubtitleSegment(index=index, start_time=index, end_time=index + 1, text="a" * 75)
+    sections = [
+        ChapterSummarySection(
+            index=index,
+            start_time=index,
+            end_time=index + 1,
+            title="t",
+            summary="a" * 74,
+        )
         for index in range(81)
     ]
 
     async with httpx.AsyncClient() as client:
-        formatted = await TitleTranslator(settings, client).format_subtitles(subtitles)
+        introduction, formatted = await TitleTranslator(settings, client).format_chapter_summary(
+            "", sections
+        )
 
     assert batch_sizes == [80, 1]
     assert batch_characters == [6000, 75]
-    assert [segment.index for segment in formatted] == list(range(81))
-    assert formatted[80].text == "格式化 80"
+    assert introduction == ""
+    assert [section.index for section in formatted] == list(range(81))
+    assert formatted[80].summary == "格式化 section:80"
 
 
 @respx.mock
-async def test_format_subtitles_retries_invalid_batch_then_continues() -> None:
+async def test_format_chapter_summary_retries_invalid_batch_then_continues() -> None:
     settings = Settings(deepseek_api_key="test-key")
     request_number = 0
 
@@ -307,91 +354,153 @@ async def test_format_subtitles_retries_invalid_batch_then_continues() -> None:
         nonlocal request_number
         request_number += 1
         body = json.loads(request.content)
-        items = json.loads(body["messages"][1]["content"].split("\n", maxsplit=1)[1])[
-            "items"
-        ]
+        items = json.loads(body["messages"][1]["content"].split("\n", maxsplit=1)[1])["items"]
         if request_number <= 2:
             output_items = list(reversed(items))
         else:
-            output_items = [{"id": item["id"], "text": "最后一条已格式化"} for item in items]
+            output_items = [
+                {
+                    "id": item["id"],
+                    "title": "最后一章",
+                    "summary": "最后一条已格式化",
+                }
+                for item in items
+            ]
         return httpx.Response(
             200,
-            json={
-                "choices": [
-                    {"message": {"content": json.dumps({"items": output_items})}}
-                ]
-            },
+            json={"choices": [{"message": {"content": json.dumps({"items": output_items})}}]},
         )
 
     route = respx.post("https://api.deepseek.com/chat/completions").mock(side_effect=respond)
-    subtitles = [
-        SubtitleSegment(index=index, start_time=index, end_time=index + 1, text=f"original {index}")
+    sections = [
+        ChapterSummarySection(
+            index=index,
+            start_time=index,
+            end_time=index + 1,
+            title=f"title {index}",
+            summary=f"original {index}",
+        )
         for index in range(81)
     ]
 
     async with httpx.AsyncClient() as client:
-        formatted = await TitleTranslator(settings, client).format_subtitles(subtitles)
+        _, formatted = await TitleTranslator(settings, client).format_chapter_summary("", sections)
 
     assert route.call_count == 3
-    assert formatted[:80] == tuple(subtitles[:80])
-    assert formatted[80].text == "最后一条已格式化"
+    assert formatted[:80] == tuple(sections[:80])
+    assert formatted[80].title == "最后一章"
+    assert formatted[80].summary == "最后一条已格式化"
 
 
 @respx.mock
-async def test_format_subtitles_stops_after_service_error() -> None:
-    settings = Settings(deepseek_api_key="test-key")
-    route = respx.post("https://api.deepseek.com/chat/completions").mock(
-        return_value=httpx.Response(401, json={"error": {"message": "invalid key"}})
-    )
-    subtitles = [
-        SubtitleSegment(index=index, start_time=index, end_time=index + 1, text=f"original {index}")
-        for index in range(81)
-    ]
-
-    async with httpx.AsyncClient() as client:
-        formatted = await TitleTranslator(settings, client).format_subtitles(subtitles)
-
-    assert route.call_count == 1
-    assert formatted == tuple(subtitles)
-
-
-@respx.mock
-async def test_format_subtitles_falls_back_without_api_key() -> None:
-    settings = Settings(deepseek_api_key="")
-    route = respx.post("https://api.deepseek.com/chat/completions")
-    subtitles = (SubtitleSegment(index=0, start_time=0, end_time=1, text="original"),)
-
-    async with httpx.AsyncClient() as client:
-        formatted = await TitleTranslator(settings, client).format_subtitles(subtitles)
-
-    assert route.called is False
-    assert formatted == subtitles
-
-
-@respx.mock
-async def test_format_subtitles_does_not_send_oversized_item() -> None:
+async def test_format_chapter_summary_stops_after_service_error() -> None:
     settings = Settings(deepseek_api_key="test-key")
 
     def respond(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        items = json.loads(body["messages"][1]["content"].split("\n", maxsplit=1)[1])[
-            "items"
-        ]
-        output = {"items": [{"id": item["id"], "text": "已格式化"} for item in items]}
+        items = json.loads(body["messages"][1]["content"].split("\n", maxsplit=1)[1])["items"]
+        if items[0]["id"] == "section:0":
+            output = {
+                "items": [
+                    {
+                        "id": item["id"],
+                        "title": f"已格式化 {item['id']}",
+                        "summary": f"已格式化 {item['id']}",
+                    }
+                    for item in items
+                ]
+            }
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": json.dumps(output)}}]},
+            )
+        return httpx.Response(401, json={"error": {"message": "invalid key"}})
+
+    route = respx.post("https://api.deepseek.com/chat/completions").mock(side_effect=respond)
+    sections = [
+        ChapterSummarySection(
+            index=index,
+            start_time=index,
+            end_time=index + 1,
+            title=f"title {index}",
+            summary=f"original {index}",
+        )
+        for index in range(81)
+    ]
+
+    async with httpx.AsyncClient() as client:
+        _, formatted = await TitleTranslator(settings, client).format_chapter_summary("", sections)
+
+    assert route.call_count == 2
+    assert formatted[0].summary == "已格式化 section:0"
+    assert formatted[79].summary == "已格式化 section:79"
+    assert formatted[80] == sections[80]
+
+
+@respx.mock
+async def test_format_chapter_summary_falls_back_without_api_key(caplog) -> None:
+    settings = Settings(deepseek_api_key="")
+    route = respx.post("https://api.deepseek.com/chat/completions")
+    sections = (
+        ChapterSummarySection(
+            index=0,
+            start_time=0,
+            end_time=1,
+            title="original title",
+            summary="original summary",
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        async with httpx.AsyncClient() as client:
+            introduction, formatted = await TitleTranslator(
+                settings, client
+            ).format_chapter_summary("original overview", sections)
+
+    assert route.called is False
+    assert introduction == "original overview"
+    assert formatted == sections
+    assert "batches=1 fallback_batches=1" in caplog.text
+
+
+@respx.mock
+async def test_format_chapter_summary_does_not_send_oversized_item() -> None:
+    settings = Settings(deepseek_api_key="test-key")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        items = json.loads(body["messages"][1]["content"].split("\n", maxsplit=1)[1])["items"]
+        output = {
+            "items": [
+                {"id": item["id"], "title": "已格式化", "summary": "已格式化"} for item in items
+            ]
+        }
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": json.dumps(output)}}]},
         )
 
     route = respx.post("https://api.deepseek.com/chat/completions").mock(side_effect=respond)
-    subtitles = (
-        SubtitleSegment(index=0, start_time=0, end_time=1, text="normal"),
-        SubtitleSegment(index=1, start_time=1, end_time=2, text="x" * 6001),
+    sections = (
+        ChapterSummarySection(
+            index=0,
+            start_time=0,
+            end_time=1,
+            title="normal",
+            summary="normal",
+        ),
+        ChapterSummarySection(
+            index=1,
+            start_time=1,
+            end_time=2,
+            title="oversized",
+            summary="x" * 6001,
+        ),
     )
 
     async with httpx.AsyncClient() as client:
-        formatted = await TitleTranslator(settings, client).format_subtitles(subtitles)
+        _, formatted = await TitleTranslator(settings, client).format_chapter_summary("", sections)
 
     assert route.call_count == 1
-    assert formatted[0].text == "已格式化"
-    assert formatted[1] == subtitles[1]
+    assert formatted[0].summary == "已格式化"
+    assert formatted[1] == sections[1]

@@ -1,14 +1,15 @@
 import json
+import unicodedata
 
-from src.bibi_models import SubtitleSegment
+from src.bibi_models import ChapterSummarySection
 from src.card import (
     _fmt_count,
     _fmt_duration,
     _format_source_tag,
     _split_markdown,
     build_card,
+    build_chapter_summary_cards,
     build_markdown_card,
-    build_subtitle_cards,
     card_message_wire_size,
 )
 from src.parsers.base import LinkMetadata, MediaType
@@ -36,74 +37,108 @@ def test_fmt_count() -> None:
     assert _fmt_count(100000000) == "1亿"
 
 
-def test_subtitle_card_renders_timestamp_in_single_collapsed_panel() -> None:
-    cards = build_subtitle_cards(
-        (SubtitleSegment(index=0, start_time=4, end_time=8, text="第一句字幕"),)
+def test_chapter_summary_card_renders_introduction_and_timeline_section() -> None:
+    cards = build_chapter_summary_cards(
+        "这是视频的时间线总述。",
+        (
+            ChapterSummarySection(
+                index=0,
+                start_time=4,
+                end_time=8,
+                title="项目背景",
+                summary="介绍项目的目标和设计思路。",
+            ),
+        ),
     )
 
     assert len(cards) == 1
     card = json.loads(cards[0])
+    assert card["header"]["title"]["content"] == "BibiGPT 字幕总结"
     panels = card["body"]["elements"]
     assert len(panels) == 1
     assert panels[0]["tag"] == "collapsible_panel"
     assert panels[0]["expanded"] is False
-    assert panels[0]["header"]["title"]["content"] == "**完整字幕**"
+    assert panels[0]["header"]["title"]["content"] == "**字幕总结**"
     assert panels[0]["elements"] == [
-        {"tag": "markdown", "content": "**[00:04–00:08]** 第一句字幕"}
+        {
+            "tag": "markdown",
+            "content": (
+                "这是视频的时间线总述。\n\n"
+                "**[00:04–00:08] 项目背景**\n"
+                "介绍项目的目标和设计思路。"
+            ),
+        }
     ]
     assert "card_link" not in card
     assert "打开视频" not in cards[0]
 
 
-def test_subtitle_card_renders_hour_timestamp_and_speaker() -> None:
-    cards = build_subtitle_cards(
+def test_chapter_summary_card_renders_hour_timestamp() -> None:
+    cards = build_chapter_summary_cards(
+        "",
         [
-            SubtitleSegment(
+            ChapterSummarySection(
                 index=7,
                 start_time=3661.9,
                 end_time=3723.2,
-                text="带说话人的字幕",
-                speaker_id=2,
+                title="后续计划",
+                summary="说明项目下一步工作。",
             )
-        ]
+        ],
     )
 
     content = json.loads(cards[0])["body"]["elements"][0]["elements"][0]["content"]
-    assert content == "**[1:01:01–1:02:03]** 说话人 2：带说话人的字幕"
+    assert content == "**[1:01:01–1:02:03] 后续计划**\n说明项目下一步工作。"
 
 
-def test_subtitle_cards_split_chinese_content_at_cue_boundaries() -> None:
-    segments = [
-        SubtitleSegment(
+def test_chapter_summary_cards_split_chinese_content_at_section_boundaries() -> None:
+    sections = [
+        ChapterSummarySection(
             index=index,
             start_time=index * 5,
             end_time=index * 5 + 5,
-            text=f"第{index}段" + "中" * 5_000,
+            title=f"章节 {index}",
+            summary=f"第{index}段" + "中" * 5_000,
         )
         for index in range(3)
     ]
 
-    cards = build_subtitle_cards(segments)
+    cards = build_chapter_summary_cards("总述只应出现一次。", sections)
 
     assert len(cards) == 3
+    contents: list[str] = []
     for index, card_json in enumerate(cards, start=1):
         card = json.loads(card_json)
         panel = card["body"]["elements"][0]
         assert len(card["body"]["elements"]) == 1
-        assert panel["header"]["title"]["content"] == f"**完整字幕（{index}/3）**"
+        assert panel["header"]["title"]["content"] == f"**字幕总结（{index}/3）**"
         assert "（续）" not in panel["elements"][0]["content"]
+        contents.append(panel["elements"][0]["content"])
         assert card_message_wire_size(card_json) <= 24 * 1024
         assert card_message_wire_size(card_json) < 30 * 1024
 
+    assert sum(content.count("总述只应出现一次。") for content in contents) == 1
+    for index, content in enumerate(contents):
+        assert f"章节 {index}" in content
 
-def test_subtitle_cards_split_oversized_cue_without_losing_unicode_text() -> None:
+
+def test_chapter_summary_cards_split_oversized_section_without_losing_unicode() -> None:
     original = "汉𠮷é" * 8_000
-    cards = build_subtitle_cards(
-        [SubtitleSegment(index=0, start_time=0, end_time=1, text=original)]
+    cards = build_chapter_summary_cards(
+        "",
+        [
+            ChapterSummarySection(
+                index=0,
+                start_time=0,
+                end_time=1,
+                title="超长章节",
+                summary=original,
+            )
+        ],
     )
 
     assert len(cards) > 1
-    prefix = "**[00:00–00:01]** "
+    prefix = "**[00:00–00:01] 超长章节**\n"
     reconstructed: list[str] = []
     for index, card_json in enumerate(cards):
         panel = json.loads(card_json)["body"]["elements"][0]
@@ -115,10 +150,72 @@ def test_subtitle_cards_split_oversized_cue_without_losing_unicode_text() -> Non
             fragment = fragment.removeprefix("（续）")
         else:
             assert not fragment.startswith("（续）")
+        assert not fragment or unicodedata.combining(fragment[0]) == 0
         reconstructed.append(fragment)
         assert card_message_wire_size(card_json) <= 24 * 1024
 
     assert "".join(reconstructed) == original
+
+
+def test_chapter_summary_cards_do_not_split_emoji_zwj_sequence() -> None:
+    family = "👨‍👩‍👧‍👦"
+    original = family * 6_000
+    cards = build_chapter_summary_cards(
+        "",
+        [
+            ChapterSummarySection(
+                index=0,
+                start_time=0,
+                end_time=1,
+                title="超长章节",
+                summary=original,
+            )
+        ],
+    )
+
+    prefix = "**[00:00–00:01] 超长章节**\n"
+    reconstructed: list[str] = []
+    for index, card_json in enumerate(cards):
+        content = json.loads(card_json)["body"]["elements"][0]["elements"][0]["content"]
+        fragment = content.removeprefix(prefix)
+        if index:
+            fragment = fragment.removeprefix("（续）")
+        assert not fragment.startswith("\u200d")
+        assert not fragment.endswith("\u200d")
+        reconstructed.append(fragment)
+
+    assert "".join(reconstructed) == original
+
+
+def test_chapter_summary_cards_split_oversized_title_without_losing_text() -> None:
+    title = "章" * 10_000
+    summary = "短摘要"
+    cards = build_chapter_summary_cards(
+        "",
+        [
+            ChapterSummarySection(
+                index=0,
+                start_time=0,
+                end_time=1,
+                title=title,
+                summary=summary,
+            )
+        ],
+    )
+
+    assert len(cards) > 1
+    contents = [
+        json.loads(card_json)["body"]["elements"][0]["elements"][0]["content"]
+        for card_json in cards
+    ]
+    assert sum(content.count("章") for content in contents) == len(title)
+    assert sum(content.count(summary) for content in contents) == 1
+    assert any("（标题续）" in content for content in contents[1:])
+    assert all(card_message_wire_size(card_json) <= 24 * 1024 for card_json in cards)
+
+
+def test_chapter_summary_cards_require_at_least_one_section() -> None:
+    assert build_chapter_summary_cards("只有总述", ()) == []
 
 
 def test_card_message_wire_size_covers_reply_and_archive_payloads() -> None:

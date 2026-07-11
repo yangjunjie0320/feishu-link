@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
+import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from http.cookiejar import MozillaCookieJar
@@ -16,9 +16,9 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from .bibi_models import (
-    SubtitleFetchResult,
+    ChapterSummaryFetchResult,
     SummaryResult,
-    subtitle_segments_from_web_response,
+    parse_chapter_summary_response,
 )
 from .browser_session import BrowserUnavailableError, persistent_context
 from .config import Settings
@@ -122,25 +122,17 @@ class BibiClient:
             return await self._summarize_browser(video_url, effective_prompt)
         return await self._summarize_web(video_url, effective_prompt)
 
-    async def fetch_cached_subtitles(self, summary: SummaryResult) -> SubtitleFetchResult:
-        """Read subtitles already cached by BibiGPT without starting a new task."""
-        if summary.subtitles:
-            logger.info(
-                "BibiGPT subtitles available (content_id=%s, source=embedded, count=%d)",
-                summary.content_id or "missing",
-                len(summary.subtitles),
-            )
-            return SubtitleFetchResult(
-                subtitles=summary.subtitles,
-                status="available",
-                source="embedded",
-            )
-
+    async def fetch_chapter_summary(
+        self,
+        summary: SummaryResult,
+    ) -> ChapterSummaryFetchResult:
+        """Fetch BibiGPT's Chinese timeline summary for an existing content item."""
         content_id = summary.content_id.strip()
         if not content_id:
-            logger.warning("BibiGPT subtitles unavailable because content_id is missing")
-            return SubtitleFetchResult(
-                subtitles=(),
+            logger.warning("BibiGPT chapter summary unavailable because content_id is missing")
+            return ChapterSummaryFetchResult(
+                introduction="",
+                sections=(),
                 status="unavailable",
                 source="none",
                 reason="BibiGPT summary response did not include contentId.",
@@ -148,170 +140,88 @@ class BibiClient:
 
         try:
             if self._settings.bibigpt_access_mode == "browser":
-                result = await self._fetch_cached_subtitles_browser(
-                    content_id,
-                    summary.video_url,
-                )
+                data = await self._fetch_chapter_summary_browser(content_id)
             else:
                 if self._cookie_error:
                     raise AuthenticationError(0, self._cookie_error)
-                result = await self._fetch_cached_subtitles_web(
-                    content_id,
-                    summary.video_url,
-                )
+                data = await self._fetch_chapter_summary_web(content_id)
         except Exception as exc:
-            reason = _subtitle_fetch_error_reason(exc)
+            reason = _chapter_summary_fetch_error_reason(exc)
             logger.warning(
-                "BibiGPT subtitle lookup failed (content_id=%s, reason=%s)",
+                "BibiGPT chapter summary lookup failed (content_id=%s, reason=%s)",
                 content_id,
                 reason,
             )
-            return SubtitleFetchResult(
-                subtitles=(),
+            return ChapterSummaryFetchResult(
+                introduction="",
+                sections=(),
                 status="error",
                 source="none",
                 reason=reason,
             )
 
+        if data is None:
+            result = ChapterSummaryFetchResult(
+                introduction="",
+                sections=(),
+                status="unavailable",
+                source="none",
+                reason="BibiGPT has no timeline chapter summary for this content.",
+            )
+        else:
+            introduction, sections = parse_chapter_summary_response(data)
+            if sections:
+                result = ChapterSummaryFetchResult(
+                    introduction=introduction,
+                    sections=sections,
+                    status="available",
+                    source="video.chapterSummary",
+                )
+            else:
+                result = ChapterSummaryFetchResult(
+                    introduction=introduction,
+                    sections=(),
+                    status="unavailable",
+                    source="none",
+                    reason="BibiGPT has no timeline chapter summary for this content.",
+                )
+
         logger.info(
-            "BibiGPT subtitle lookup complete "
-            "(content_id=%s, status=%s, source=%s, count=%d)",
+            "BibiGPT chapter summary lookup complete "
+            "(content_id=%s, status=%s, source=%s, sections=%d)",
             content_id,
             result.status,
             result.source,
-            len(result.subtitles),
+            len(result.sections),
         )
         return result
 
-    async def _fetch_cached_subtitles_web(
+    async def _fetch_chapter_summary_web(
         self,
         content_id: str,
-        video_url: str,
-    ) -> SubtitleFetchResult:
+    ) -> dict[str, Any] | None:
+        payload = _chapter_summary_payload(content_id)
+        url = f"{self._routes.api_base_url}/api/trpc/video.chapterSummary"
         async with httpx.AsyncClient(timeout=self._settings.bibigpt_timeout) as client:
-
-            async def request(
-                path: str, payload: dict[str, Any]
-            ) -> dict[str, Any] | None:
-                url = f"{self._routes.api_base_url}/api/trpc/{path}"
-                response = await client.get(
-                    url,
-                    params={"input": _encode_trpc_input(payload)},
-                    headers=self._headers,
-                )
-                self._check_response(response)
-                return _extract_optional_trpc_data(response.json())
-
-            return await self._fetch_cached_subtitles_with_request(
-                content_id,
-                video_url,
-                request,
+            response = await client.get(
+                url,
+                params={"input": _encode_trpc_input(payload)},
+                headers=self._headers,
             )
+        self._check_response(response)
+        return _extract_optional_trpc_data(response.json())
 
-    async def _fetch_cached_subtitles_browser(
+    async def _fetch_chapter_summary_browser(
         self,
         content_id: str,
-        video_url: str,
-    ) -> SubtitleFetchResult:
-        async with self._browser_page() as page:
-
-            async def request(
-                path: str, payload: dict[str, Any]
-            ) -> dict[str, Any] | None:
-                url = _trpc_query_url(self._routes.api_base_url, path, payload)
-                raw_data = await self._browser_request_json(page, url, None, method="GET")
-                return _extract_optional_trpc_data(raw_data)
-
-            return await self._fetch_cached_subtitles_with_request(
-                content_id,
-                video_url,
-                request,
-            )
-
-    async def _fetch_cached_subtitles_with_request(
-        self,
-        content_id: str,
-        video_url: str,
-        request: Callable[
-            [str, dict[str, Any]], Awaitable[dict[str, Any] | None]
-        ],
-    ) -> SubtitleFetchResult:
-        errors: list[str] = []
-        status_payload = {"taskId": content_id}
-        for attempt in range(1, 4):
-            try:
-                data = await request("content.subtitlesTaskStatus", status_payload)
-            except Exception as exc:
-                reason = _subtitle_fetch_error_reason(exc)
-                errors.append(f"subtitlesTaskStatus: {reason}")
-                logger.warning(
-                    "BibiGPT subtitle status query failed "
-                    "(content_id=%s, attempt=%d, reason=%s)",
-                    content_id,
-                    attempt,
-                    reason,
-                )
-                break
-
-            subtitles = subtitle_segments_from_web_response(data) if data is not None else ()
-            if subtitles:
-                return SubtitleFetchResult(
-                    subtitles=subtitles,
-                    status="available",
-                    source="subtitles_task_status",
-                )
-
-            task_status = _extract_subtitle_task_status(data) if data is not None else ""
-            logger.debug(
-                "BibiGPT subtitle status query returned no subtitles "
-                "(content_id=%s, attempt=%d, task_status=%s)",
-                content_id,
-                attempt,
-                task_status or "unknown",
-            )
-            if _is_terminal_subtitle_task_status(task_status):
-                break
-            if attempt < 3:
-                await asyncio.sleep(2)
-
-        info_payload = {
-            "url": video_url,
-            "contentId": content_id,
-            "skipSubtitleTask": True,
-            "isRefresh": False,
-        }
-        try:
-            data = await request("content.info", info_payload)
-        except Exception as exc:
-            reason = _subtitle_fetch_error_reason(exc)
-            errors.append(f"content.info: {reason}")
-            logger.warning(
-                "BibiGPT cached content lookup failed (content_id=%s, reason=%s)",
-                content_id,
-                reason,
-            )
-        else:
-            subtitles = subtitle_segments_from_web_response(data) if data is not None else ()
-            if subtitles:
-                return SubtitleFetchResult(
-                    subtitles=subtitles,
-                    status="available",
-                    source="content_info",
-                )
-
-        if errors:
-            return SubtitleFetchResult(
-                subtitles=(),
-                status="error",
-                source="none",
-                reason="; ".join(errors),
-            )
-        return SubtitleFetchResult(
-            subtitles=(),
-            status="unavailable",
-            source="none",
-            reason="BibiGPT has no cached subtitles for this content.",
+    ) -> dict[str, Any] | None:
+        url = _trpc_query_url(
+            self._routes.api_base_url,
+            "video.chapterSummary",
+            _chapter_summary_payload(content_id),
         )
+        raw_data = await self._browser_fetch_json(url, None, method="GET")
+        return _extract_optional_trpc_data(raw_data)
 
     async def _summarize_browser(self, video_url: str, prompt: str) -> SummaryResult:
         body: dict[str, Any] = {
@@ -587,54 +497,95 @@ def _trpc_query_url(base_url: str, path: str, payload: dict[str, Any]) -> str:
     return str(httpx.URL(url, params={"input": _encode_trpc_input(payload)}))
 
 
-def _extract_subtitle_task_status(data: dict[str, Any]) -> str:
-    pending = [data]
-    seen: set[int] = set()
-    while pending:
-        candidate = pending.pop(0)
-        identity = id(candidate)
-        if identity in seen:
-            continue
-        seen.add(identity)
-
-        for key in ("status", "taskStatus", "subtitlesTaskStatus"):
-            value = candidate.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        for key in ("data", "detail", "videoDetail", "task"):
-            nested = candidate.get(key)
-            if isinstance(nested, dict):
-                pending.append(nested)
-    return ""
-
-
-def _is_terminal_subtitle_task_status(status: str) -> bool:
-    return status.lower() in {
-        "canceled",
-        "cancelled",
-        "complete",
-        "completed",
-        "error",
-        "failed",
-        "finished",
-        "not_found",
-        "success",
-        "succeeded",
+def _chapter_summary_payload(content_id: str) -> dict[str, Any]:
+    return {
+        "contentId": content_id,
+        "outputLanguage": "中文",
+        "summaryType": "timeline",
     }
 
 
-def _subtitle_fetch_error_reason(exc: Exception) -> str:
+def _chapter_summary_fetch_error_reason(exc: Exception) -> str:
     if isinstance(exc, AuthenticationError):
         return "BibiGPT authentication failed."
     if isinstance(exc, httpx.TimeoutException):
-        return "BibiGPT subtitle request timed out."
+        return "BibiGPT chapter summary request timed out."
     if isinstance(exc, BibiAPIError):
-        return f"BibiGPT API returned HTTP {exc.status_code}."
+        return _chapter_summary_api_error_reason(exc)
     if isinstance(exc, (json.JSONDecodeError, ValueError, TypeError)):
-        return "BibiGPT returned an unexpected subtitle response."
+        return "BibiGPT returned an unexpected chapter summary response."
     if isinstance(exc, httpx.HTTPError):
-        return "BibiGPT subtitle request failed."
-    return f"BibiGPT subtitle lookup failed ({type(exc).__name__})."
+        return "BibiGPT chapter summary request failed."
+    return f"BibiGPT chapter summary lookup failed ({type(exc).__name__})."
+
+
+def _chapter_summary_api_error_reason(exc: BibiAPIError) -> str:
+    if exc.status_code == 402:
+        return "BibiGPT chapter summary quota is exhausted or paid access is required."
+    if exc.status_code == 429:
+        return "BibiGPT chapter summary request was rate limited."
+    if exc.status_code >= 500:
+        return "BibiGPT chapter summary service returned a server error."
+    if exc.status_code != 200:
+        return f"BibiGPT API returned HTTP {exc.status_code}."
+
+    code, http_status, message = _trpc_error_metadata(exc.body)
+    normalized_code = code.upper()
+    normalized_message = message.lower()
+    if http_status == 401 or normalized_code == "UNAUTHORIZED":
+        return "BibiGPT authentication failed."
+    if (
+        http_status == 402
+        or normalized_code == "PAYMENT_REQUIRED"
+        or "payment required" in normalized_message
+        or "余额不足" in message
+    ):
+        return "BibiGPT chapter summary quota is exhausted or paid access is required."
+    if http_status == 403 or normalized_code == "FORBIDDEN":
+        return "BibiGPT account does not have access to chapter summaries."
+    if http_status == 429 or normalized_code == "TOO_MANY_REQUESTS":
+        return "BibiGPT chapter summary request was rate limited."
+    if http_status is not None and http_status >= 500:
+        return "BibiGPT chapter summary service returned a server error."
+
+    safe_code = re.sub(r"[^A-Za-z0-9_.-]", "", code)[:40]
+    details: list[str] = []
+    if safe_code:
+        details.append(f"code={safe_code}")
+    if http_status is not None:
+        details.append(f"status={http_status}")
+    suffix = f" ({', '.join(details)})" if details else ""
+    return f"BibiGPT chapter summary API returned an error{suffix}."
+
+
+def _trpc_error_metadata(body: str) -> tuple[str, int | None, str]:
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return "", None, ""
+
+    code = ""
+    http_status: int | None = None
+    message = ""
+    pending: list[Any] = [payload]
+    while pending:
+        candidate = pending.pop(0)
+        if isinstance(candidate, list):
+            pending.extend(candidate)
+            continue
+        if not isinstance(candidate, dict):
+            continue
+        candidate_message = candidate.get("message")
+        if not message and isinstance(candidate_message, str):
+            message = candidate_message[:200]
+        candidate_status = candidate.get("httpStatus")
+        if http_status is None and type(candidate_status) is int:
+            http_status = candidate_status
+        candidate_code = candidate.get("code")
+        if not code and isinstance(candidate_code, str):
+            code = candidate_code[:80]
+        pending.extend(value for value in candidate.values() if isinstance(value, (dict, list)))
+    return code, http_status, message
 
 
 def _validate_summary_result(result: SummaryResult) -> SummaryResult:

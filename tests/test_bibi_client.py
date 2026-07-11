@@ -1,13 +1,11 @@
 import json
 import time
-from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
 import pytest
 import respx
 
-import src.bibi_client as bibi_client_module
 from src.bibi_client import (
     AuthenticationError,
     BibiAPIError,
@@ -16,7 +14,7 @@ from src.bibi_client import (
     _resolve_routes,
     _source_url_for_log,
 )
-from src.bibi_models import SubtitleSegment, SummaryResult, Usage
+from src.bibi_models import ChapterSummarySection, SummaryResult, Usage
 from src.config import Settings
 from src.cookie_utils import get_cookie_header
 
@@ -24,7 +22,6 @@ from src.cookie_utils import get_cookie_header
 def _summary_result(
     *,
     content_id: str = "content-123",
-    subtitles: tuple[SubtitleSegment, ...] = (),
 ) -> SummaryResult:
     return SummaryResult(
         content="- Point",
@@ -33,7 +30,6 @@ def _summary_result(
         from_cache=True,
         video_url="https://youtu.be/abc123",
         content_id=content_id,
-        subtitles=subtitles,
     )
 
 
@@ -421,15 +417,7 @@ async def test_bibi_client_writes_back_cookies(tmp_path) -> None:
         (
             {
                 "contentId": "top-content",
-                "subtitlesArray": [
-                    {
-                        "index": 7,
-                        "startTime": 1.25,
-                        "end": 2.5,
-                        "text": " Top subtitle ",
-                        "speaker_id": 2,
-                    }
-                ],
+                "subtitlesArray": [{"text": "must not be retained"}],
             },
             "top-content",
         ),
@@ -437,15 +425,7 @@ async def test_bibi_client_writes_back_cookies(tmp_path) -> None:
             {
                 "detail": {
                     "dbId": "detail-content",
-                    "subtitlesArray": [
-                        {
-                            "index": "8",
-                            "startTime": "3",
-                            "endTime": "4.5",
-                            "text": "Detail subtitle",
-                            "speakerId": "3",
-                        }
-                    ],
+                    "subtitlesArray": [{"text": "must not be retained"}],
                 }
             },
             "detail-content",
@@ -454,21 +434,14 @@ async def test_bibi_client_writes_back_cookies(tmp_path) -> None:
             {
                 "videoDetail": {
                     "contentId": "video-detail-content",
-                    "subtitlesArray": [
-                        {
-                            "index": 9,
-                            "start": 5,
-                            "end": 6,
-                            "text": "Video detail subtitle",
-                        }
-                    ],
+                    "subtitlesArray": [{"text": "must not be retained"}],
                 }
             },
             "video-detail-content",
         ),
     ],
 )
-def test_summary_result_parses_content_id_and_embedded_subtitles(
+def test_summary_result_parses_content_id_without_retaining_embedded_subtitles(
     container: dict[str, Any],
     expected_content_id: str,
 ) -> None:
@@ -478,26 +451,37 @@ def test_summary_result_parses_content_id_and_embedded_subtitles(
     )
 
     assert result.content_id == expected_content_id
-    assert len(result.subtitles) == 1
-    assert result.subtitles[0].text in {
-        "Top subtitle",
-        "Detail subtitle",
-        "Video detail subtitle",
-    }
-    assert isinstance(result.subtitles[0].index, int)
-    assert isinstance(result.subtitles[0].start_time, float)
-    assert isinstance(result.subtitles[0].end_time, float)
+    assert not hasattr(result, "subtitles")
 
 
 @respx.mock
-async def test_fetch_cached_subtitles_prefers_embedded_without_request(tmp_path) -> None:
-    embedded = (
-        SubtitleSegment(
-            index=1,
-            start_time=0.0,
-            end_time=2.0,
-            text="Cached subtitle",
-        ),
+async def test_fetch_chapter_summary_web_uses_exact_timeline_query(tmp_path) -> None:
+    route = respx.get("https://aitodo.co/api/trpc/video.chapterSummary").mock(
+        return_value=httpx.Response(
+            200,
+            json=_trpc_json(
+                {
+                    "chapterSummary": " 视频总述 ",
+                    "chapters": [
+                        {
+                            "start": 0,
+                            "end": 266.8,
+                            "title": " 项目背景 ",
+                            "summary": " 介绍换挡器选择。 ",
+                            "text": "raw text must be ignored",
+                            "contents": [[0, 1, "raw subtitle must be ignored"]],
+                        },
+                        {
+                            "start": "266.8",
+                            "end": "602.32",
+                            "title": "台架测试",
+                            "summary": "说明测试过程。",
+                        },
+                    ],
+                    "subtitlesArray": [{"text": "raw subtitle must be ignored"}],
+                }
+            ),
+        )
     )
     settings = Settings(
         bibigpt_base_url="https://aitodo.co/zh",
@@ -505,105 +489,137 @@ async def test_fetch_cached_subtitles_prefers_embedded_without_request(tmp_path)
         platform_cookie_files={"bibigpt": str(tmp_path / "missing.txt")},
     )
 
-    result = await BibiClient(settings).fetch_cached_subtitles(
-        _summary_result(subtitles=embedded)
-    )
+    result = await BibiClient(settings).fetch_chapter_summary(_summary_result())
 
+    request = route.calls.last.request
+    request_input = json.loads(request.url.params["input"])
+    assert request.method == "GET"
+    assert request_input == {
+        "json": {
+            "contentId": "content-123",
+            "outputLanguage": "中文",
+            "summaryType": "timeline",
+        }
+    }
+    assert "retryFlag" not in request.url.params["input"]
     assert result.available is True
     assert result.status == "available"
-    assert result.source == "embedded"
-    assert result.subtitles == embedded
-    assert len(respx.calls) == 0
+    assert result.source == "video.chapterSummary"
+    assert result.introduction == "视频总述"
+    assert result.sections == (
+        ChapterSummarySection(
+            index=0,
+            start_time=0.0,
+            end_time=266.8,
+            title="项目背景",
+            summary="介绍换挡器选择。",
+        ),
+        ChapterSummarySection(
+            index=1,
+            start_time=266.8,
+            end_time=602.32,
+            title="台架测试",
+            summary="说明测试过程。",
+        ),
+    )
 
 
 @respx.mock
-async def test_fetch_cached_subtitles_web_reads_status_with_task_id(tmp_path) -> None:
-    status_route = respx.get(
-        "https://aitodo.co/api/trpc/content.subtitlesTaskStatus"
-    ).mock(
+async def test_fetch_chapter_summary_skips_invalid_top_level_sections(tmp_path) -> None:
+    respx.get("https://aitodo.co/api/trpc/video.chapterSummary").mock(
         return_value=httpx.Response(
             200,
             json=_trpc_json(
                 {
-                    "status": "completed",
-                    "subtitlesArray": [
+                    "chapterSummary": "总述",
+                    "chapters": [
                         {
-                            "index": 4,
-                            "startTime": 12.5,
-                            "end": 15.0,
-                            "text": "Status subtitle",
-                            "speaker_id": 1,
-                        }
+                            "start": 0,
+                            "end": 1,
+                            "title": "",
+                            "summary": "缺标题",
+                        },
+                        {
+                            "start": -1,
+                            "end": 1,
+                            "title": "负时间",
+                            "summary": "无效",
+                        },
+                        {
+                            "start": 8,
+                            "end": 4,
+                            "title": "倒序",
+                            "summary": "无效",
+                        },
+                        {
+                            "start": 12.5,
+                            "end": 15,
+                            "title": "有效章节",
+                            "summary": "有效摘要",
+                        },
                     ],
                 }
             ),
         )
     )
-    info_route = respx.get("https://aitodo.co/api/trpc/content.info").mock(
-        return_value=httpx.Response(200, json=_trpc_json({}))
-    )
     settings = Settings(
         bibigpt_base_url="https://aitodo.co/zh",
         cookie_file="",
         platform_cookie_files={"bibigpt": str(tmp_path / "missing.txt")},
     )
 
-    result = await BibiClient(settings).fetch_cached_subtitles(_summary_result())
+    result = await BibiClient(settings).fetch_chapter_summary(_summary_result())
 
-    request_input = json.loads(status_route.calls.last.request.url.params["input"])
-    assert request_input == {"json": {"taskId": "content-123"}}
-    assert status_route.calls.last.request.method == "GET"
-    assert info_route.called is False
-    assert result.status == "available"
-    assert result.source == "subtitles_task_status"
-    assert result.subtitles == (
-        SubtitleSegment(
-            index=4,
+    assert result.sections == (
+        ChapterSummarySection(
+            index=3,
             start_time=12.5,
             end_time=15.0,
-            text="Status subtitle",
-            speaker_id=1,
+            title="有效章节",
+            summary="有效摘要",
         ),
     )
 
 
-@respx.mock
-async def test_fetch_cached_subtitles_web_polls_then_reads_content_info(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    sleeps: list[float] = []
-
-    async def fake_sleep(delay: float) -> None:
-        sleeps.append(delay)
-
-    monkeypatch.setattr(bibi_client_module.asyncio, "sleep", fake_sleep)
-    status_route = respx.get(
-        "https://aitodo.co/api/trpc/content.subtitlesTaskStatus"
-    ).mock(
-        return_value=httpx.Response(
-            200,
-            json=_trpc_json({"status": "processing"}),
-        )
-    )
-    info_route = respx.get("https://aitodo.co/api/trpc/content.info").mock(
-        return_value=httpx.Response(
-            200,
-            json=_trpc_json(
-                {
-                    "videoDetail": {
-                        "subtitlesArray": [
-                            {
-                                "index": 6,
-                                "startTime": 20,
-                                "end": 21,
-                                "text": "Info subtitle",
-                            }
-                        ]
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"chapterSummary": "仅有总述", "chapters": []},
+        {
+            "detail": {
+                "chapterSummary": "嵌套总述不能读取",
+                "chapters": [
+                    {
+                        "start": 0,
+                        "end": 1,
+                        "title": "嵌套章节",
+                        "summary": "不能读取",
                     }
+                ],
+            }
+        },
+        {
+            "chapterSummary": "总述",
+            "chapters": [
+                {
+                    "start": 0,
+                    "end": 1,
+                    "title": "只有原文",
+                    "text": "不能代替 summary",
+                    "contents": [[0, 1, "不能读取"]],
                 }
-            ),
-        )
+            ],
+            "subtitlesArray": [{"text": "不能读取"}],
+        },
+    ],
+)
+@respx.mock
+async def test_fetch_chapter_summary_returns_unavailable_without_valid_top_level_section(
+    tmp_path,
+    payload: dict[str, Any],
+) -> None:
+    route = respx.get("https://aitodo.co/api/trpc/video.chapterSummary").mock(
+        return_value=httpx.Response(200, json=_trpc_json(payload))
     )
     settings = Settings(
         bibigpt_base_url="https://aitodo.co/zh",
@@ -611,98 +627,80 @@ async def test_fetch_cached_subtitles_web_polls_then_reads_content_info(
         platform_cookie_files={"bibigpt": str(tmp_path / "missing.txt")},
     )
 
-    result = await BibiClient(settings).fetch_cached_subtitles(_summary_result())
+    result = await BibiClient(settings).fetch_chapter_summary(_summary_result())
 
-    info_input = json.loads(info_route.calls.last.request.url.params["input"])
-    assert status_route.call_count == 3
-    assert sleeps == [2, 2]
-    assert info_route.calls.last.request.method == "GET"
-    assert info_input == {
-        "json": {
-            "url": "https://youtu.be/abc123",
-            "contentId": "content-123",
-            "skipSubtitleTask": True,
-            "isRefresh": False,
-        }
-    }
-    assert result.status == "available"
-    assert result.source == "content_info"
-    assert result.subtitles[0].text == "Info subtitle"
+    assert route.call_count == 1
+    assert result.available is False
+    assert result.status == "unavailable"
+    assert result.source == "none"
+    assert result.sections == ()
+    assert "no timeline chapter summary" in result.reason
 
 
 @respx.mock
-async def test_fetch_cached_subtitles_web_polls_null_status_before_content_info(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    sleeps: list[float] = []
-
-    async def fake_sleep(delay: float) -> None:
-        sleeps.append(delay)
-
-    monkeypatch.setattr(bibi_client_module.asyncio, "sleep", fake_sleep)
-    status_route = respx.get(
-        "https://aitodo.co/api/trpc/content.subtitlesTaskStatus"
-    ).mock(
+async def test_fetch_chapter_summary_returns_unavailable_for_null_payload(tmp_path) -> None:
+    route = respx.get("https://aitodo.co/api/trpc/video.chapterSummary").mock(
         return_value=httpx.Response(
             200,
             json={"result": {"data": {"json": None}}},
         )
     )
-    info_route = respx.get("https://aitodo.co/api/trpc/content.info").mock(
-        return_value=httpx.Response(200, json=_trpc_json({"detail": {}}))
-    )
     settings = Settings(
         bibigpt_base_url="https://aitodo.co/zh",
         cookie_file="",
         platform_cookie_files={"bibigpt": str(tmp_path / "missing.txt")},
     )
 
-    result = await BibiClient(settings).fetch_cached_subtitles(_summary_result())
+    result = await BibiClient(settings).fetch_chapter_summary(_summary_result())
 
-    assert status_route.call_count == 3
-    assert sleeps == [2, 2]
-    assert info_route.call_count == 1
+    assert route.call_count == 1
     assert result.status == "unavailable"
-    assert result.subtitles == ()
+    assert result.sections == ()
 
 
 @respx.mock
-async def test_fetch_cached_subtitles_returns_unavailable_when_cache_is_empty(tmp_path) -> None:
-    status_route = respx.get(
-        "https://aitodo.co/api/trpc/content.subtitlesTaskStatus"
-    ).mock(
-        return_value=httpx.Response(
-            200,
-            json=_trpc_json({"status": "completed"}),
-        )
-    )
-    info_route = respx.get("https://aitodo.co/api/trpc/content.info").mock(
-        return_value=httpx.Response(200, json=_trpc_json({"detail": {}}))
-    )
-    settings = Settings(
-        bibigpt_base_url="https://aitodo.co/zh",
-        cookie_file="",
-        platform_cookie_files={"bibigpt": str(tmp_path / "missing.txt")},
-    )
-
-    result = await BibiClient(settings).fetch_cached_subtitles(_summary_result())
-
-    assert status_route.call_count == 1
-    assert info_route.call_count == 1
-    assert result.available is False
-    assert result.status == "unavailable"
-    assert result.source == "none"
-    assert "no cached subtitles" in result.reason
-
-
-@respx.mock
-async def test_fetch_cached_subtitles_returns_error_instead_of_raising(tmp_path) -> None:
-    respx.get("https://aitodo.co/api/trpc/content.subtitlesTaskStatus").mock(
+async def test_fetch_chapter_summary_returns_error_instead_of_raising(tmp_path) -> None:
+    route = respx.get("https://aitodo.co/api/trpc/video.chapterSummary").mock(
         return_value=httpx.Response(503, text="signed-url-should-not-leak")
     )
-    respx.get("https://aitodo.co/api/trpc/content.info").mock(
-        return_value=httpx.Response(500, text="another-sensitive-body")
+    settings = Settings(
+        bibigpt_base_url="https://aitodo.co/zh",
+        cookie_file="",
+        platform_cookie_files={"bibigpt": str(tmp_path / "missing.txt")},
+    )
+
+    result = await BibiClient(settings).fetch_chapter_summary(_summary_result())
+
+    assert route.call_count == 1
+    assert result.available is False
+    assert result.status == "error"
+    assert result.source == "none"
+    assert result.sections == ()
+    assert "server error" in result.reason
+    assert "signed-url-should-not-leak" not in result.reason
+
+
+@respx.mock
+async def test_fetch_chapter_summary_explains_trpc_quota_error_without_leaking(
+    tmp_path,
+    caplog,
+) -> None:
+    route = respx.get("https://aitodo.co/api/trpc/video.chapterSummary").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "error": {
+                    "json": {
+                        "message": "Payment Required: signed-url-should-not-leak",
+                        "data": {
+                            "code": "PAYMENT_REQUIRED",
+                            "httpStatus": 402,
+                            "signedUrl": "https://private.example/token",
+                        },
+                    }
+                }
+            },
+        )
     )
     settings = Settings(
         bibigpt_base_url="https://aitodo.co/zh",
@@ -710,71 +708,89 @@ async def test_fetch_cached_subtitles_returns_error_instead_of_raising(tmp_path)
         platform_cookie_files={"bibigpt": str(tmp_path / "missing.txt")},
     )
 
-    result = await BibiClient(settings).fetch_cached_subtitles(_summary_result())
+    with caplog.at_level("WARNING"):
+        result = await BibiClient(settings).fetch_chapter_summary(_summary_result())
+
+    assert route.call_count == 1
+    assert result.status == "error"
+    assert result.reason == (
+        "BibiGPT chapter summary quota is exhausted or paid access is required."
+    )
+    assert "signed-url-should-not-leak" not in caplog.text
+    assert "private.example" not in caplog.text
+
+
+async def test_fetch_chapter_summary_authentication_error_is_returned(tmp_path) -> None:
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text(
+        "\n".join(
+            [
+                "# Netscape HTTP Cookie File",
+                "aitodo.co\tFALSE\t/\tFALSE\t2147483647\t"
+                "sb-hxtizkasyxsfnzgphrtk-auth-token.0\tbase64-abcde",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        bibigpt_base_url="https://aitodo.co/zh",
+        cookie_file=str(cookie_file),
+    )
+
+    result = await BibiClient(settings).fetch_chapter_summary(_summary_result())
 
     assert result.status == "error"
-    assert result.subtitles == ()
-    assert "signed-url-should-not-leak" not in result.reason
-    assert "another-sensitive-body" not in result.reason
+    assert result.sections == ()
+    assert result.reason == "BibiGPT authentication failed."
 
 
-async def test_fetch_cached_subtitles_missing_content_id_skips_lookup(tmp_path) -> None:
+@respx.mock
+async def test_fetch_chapter_summary_missing_content_id_skips_lookup(tmp_path) -> None:
     settings = Settings(
         bibigpt_base_url="https://aitodo.co/zh",
         cookie_file="",
         platform_cookie_files={"bibigpt": str(tmp_path / "missing.txt")},
     )
 
-    result = await BibiClient(settings).fetch_cached_subtitles(
-        _summary_result(content_id="")
-    )
+    result = await BibiClient(settings).fetch_chapter_summary(_summary_result(content_id=""))
 
     assert result.status == "unavailable"
     assert result.source == "none"
+    assert result.sections == ()
     assert "contentId" in result.reason
+    assert len(respx.calls) == 0
 
 
-async def test_fetch_cached_subtitles_browser_reuses_one_context_for_fallback(
+async def test_fetch_chapter_summary_browser_uses_profile_request(
     tmp_path,
     monkeypatch,
 ) -> None:
-    browser_context_entries = 0
-    requests: list[dict[str, Any]] = []
+    captured: dict[str, Any] = {}
 
-    class FakePage:
-        async def evaluate(self, script: str, request: dict[str, Any]) -> dict[str, Any]:
-            del script
-            requests.append(request)
-            url = httpx.URL(str(request["url"]))
-            if url.path.endswith("content.subtitlesTaskStatus"):
-                data = {"status": "completed"}
-            else:
-                data = {
-                    "detail": {
-                        "subtitlesArray": [
-                            {
-                                "index": 10,
-                                "startTime": 30,
-                                "end": 32,
-                                "text": "Browser subtitle",
-                            }
-                        ]
-                    }
-                }
-            return {
-                "status": 200,
-                "ok": True,
-                "text": json.dumps(_trpc_json(data)),
-            }
-
-    @asynccontextmanager
-    async def fake_browser_page(self: BibiClient):
-        nonlocal browser_context_entries
+    async def fake_browser_fetch(
+        self: BibiClient,
+        url: str,
+        body: dict[str, Any] | None,
+        *,
+        method: str = "POST",
+    ) -> Any:
         del self
-        browser_context_entries += 1
-        yield FakePage()
+        captured.update(url=url, body=body, method=method)
+        return _trpc_json(
+            {
+                "chapterSummary": "浏览器总述",
+                "chapters": [
+                    {
+                        "start": 30,
+                        "end": 32,
+                        "title": "浏览器章节",
+                        "summary": "浏览器摘要",
+                    }
+                ],
+            }
+        )
 
-    monkeypatch.setattr(BibiClient, "_browser_page", fake_browser_page)
+    monkeypatch.setattr(BibiClient, "_browser_fetch_json", fake_browser_fetch)
     settings = Settings(
         bibigpt_base_url="https://aitodo.co/zh",
         bibigpt_access_mode="browser",
@@ -782,17 +798,28 @@ async def test_fetch_cached_subtitles_browser_reuses_one_context_for_fallback(
         bibigpt_browser_profile_dir=str(tmp_path / "profile"),
     )
 
-    result = await BibiClient(settings).fetch_cached_subtitles(_summary_result())
+    result = await BibiClient(settings).fetch_chapter_summary(_summary_result())
 
-    status_input = json.loads(httpx.URL(str(requests[0]["url"])).params["input"])
-    info_input = json.loads(httpx.URL(str(requests[1]["url"])).params["input"])
-    assert browser_context_entries == 1
-    assert len(requests) == 2
-    assert all(request["method"] == "GET" for request in requests)
-    assert all(request["body"] is None for request in requests)
-    assert status_input == {"json": {"taskId": "content-123"}}
-    assert info_input["json"]["skipSubtitleTask"] is True
-    assert info_input["json"]["isRefresh"] is False
+    url = httpx.URL(captured["url"])
+    request_input = json.loads(url.params["input"])
+    assert url.path == "/api/trpc/video.chapterSummary"
+    assert captured["method"] == "GET"
+    assert captured["body"] is None
+    assert request_input == {
+        "json": {
+            "contentId": "content-123",
+            "outputLanguage": "中文",
+            "summaryType": "timeline",
+        }
+    }
     assert result.status == "available"
-    assert result.source == "content_info"
-    assert result.subtitles[0].text == "Browser subtitle"
+    assert result.introduction == "浏览器总述"
+    assert result.sections == (
+        ChapterSummarySection(
+            index=0,
+            start_time=30.0,
+            end_time=32.0,
+            title="浏览器章节",
+            summary="浏览器摘要",
+        ),
+    )

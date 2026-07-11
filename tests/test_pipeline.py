@@ -4,7 +4,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.bibi_client import AuthenticationError, BibiAPIError, TranscriptUnavailableError
-from src.bibi_models import SummaryResult, Usage
+from src.bibi_models import (
+    ChapterSummaryFetchResult,
+    ChapterSummarySection,
+    SummaryResult,
+    Usage,
+)
 from src.comment_analyzer import CommentAnalysisError
 from src.config import Settings
 from src.listener import CardActionEvent
@@ -32,6 +37,18 @@ def _summary_result() -> SummaryResult:
         from_cache=False,
         video_url="https://youtu.be/abc123",
         content_id="content-123",
+    )
+
+
+def _chapter_section(
+    *, title: str = "Original title", summary: str = "Original summary"
+) -> ChapterSummarySection:
+    return ChapterSummarySection(
+        index=0,
+        start_time=0.0,
+        end_time=266.8,
+        title=title,
+        summary=summary,
     )
 
 
@@ -158,36 +175,159 @@ def test_summary_failure_message_for_expired_login() -> None:
 
 
 @pytest.mark.asyncio
-async def test_summary_sends_only_summary_card() -> None:
+async def test_summary_sends_card_before_chapter_summary_card() -> None:
     pipeline = _prepare_summary_pipeline()
     summary = _summary_result()
+    section = _chapter_section()
+    formatted = _chapter_section(title="中文标题", summary="中文摘要")
+    timeline: list[str] = []
     pipeline._bibi_client.summarize = AsyncMock(return_value=summary)  # type: ignore[method-assign]
-    pipeline._bibi_client.fetch_cached_subtitles = AsyncMock()  # type: ignore[method-assign]
-    pipeline._translator.format_subtitles = AsyncMock()  # type: ignore[method-assign]
-    pipeline._sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    async def fetch_chapter_summary(
+        result: SummaryResult,
+    ) -> ChapterSummaryFetchResult:
+        assert result is summary
+        timeline.append("fetch")
+        return ChapterSummaryFetchResult(
+            introduction="Original introduction",
+            sections=(section,),
+            status="available",
+            source="video.chapterSummary",
+        )
+
+    async def format_chapter_summary(
+        introduction: str,
+        sections,
+        *,
+        content_id: str = "",
+    ):
+        assert introduction == "Original introduction"
+        assert sections == (section,)
+        assert content_id == "content-123"
+        timeline.append("format")
+        return "中文总述", (formatted,)
+
+    async def send(card_json: str, chat_id: str, message_id: str) -> bool:
+        card = json.loads(card_json)
+        title = card["header"]["title"]["content"]
+        timeline.append("summary" if title == "BibiGPT 总结" else "chapter")
+        assert chat_id == "oc_chat"
+        assert message_id == "om_summary"
+        return True
+
+    pipeline._bibi_client.fetch_chapter_summary = fetch_chapter_summary  # type: ignore[method-assign]
+    pipeline._translator.format_chapter_summary = format_chapter_summary  # type: ignore[method-assign]
+    pipeline._sender.send = send  # type: ignore[method-assign]
 
     await pipeline._try_send_bibigpt_summary(summary.video_url, _summary_event())
 
-    pipeline._sender.send.assert_awaited_once()
-    card = json.loads(pipeline._sender.send.await_args.args[0])
-    assert card["header"]["title"]["content"] == "BibiGPT 总结"
-    pipeline._bibi_client.fetch_cached_subtitles.assert_not_called()
-    pipeline._translator.format_subtitles.assert_not_called()
+    assert timeline == ["summary", "fetch", "format", "chapter"]
 
 
 @pytest.mark.asyncio
-async def test_summary_send_failure_does_not_lookup_subtitles() -> None:
+async def test_summary_reports_unavailable_chapter_summary_without_formatting() -> None:
     pipeline = _prepare_summary_pipeline()
     summary = _summary_result()
     pipeline._bibi_client.summarize = AsyncMock(return_value=summary)  # type: ignore[method-assign]
-    pipeline._bibi_client.fetch_cached_subtitles = AsyncMock()  # type: ignore[method-assign]
+    pipeline._bibi_client.fetch_chapter_summary = AsyncMock(  # type: ignore[method-assign]
+        return_value=ChapterSummaryFetchResult(
+            introduction="",
+            sections=(),
+            status="unavailable",
+            source="none",
+            reason="No chapter summary.",
+        )
+    )
+    pipeline._translator.format_chapter_summary = AsyncMock()  # type: ignore[method-assign]
+    pipeline._sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    pipeline._text_sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    await pipeline._try_send_bibigpt_summary(summary.video_url, _summary_event())
+
+    pipeline._translator.format_chapter_summary.assert_not_called()
+    pipeline._text_sender.send.assert_awaited_once_with(
+        "BibiGPT 字幕总结暂不可用: 没有获取到章节总结。",
+        "oc_chat",
+        "om_summary",
+    )
+
+
+@pytest.mark.asyncio
+async def test_summary_send_failure_does_not_lookup_chapter_summary() -> None:
+    pipeline = _prepare_summary_pipeline()
+    summary = _summary_result()
+    pipeline._bibi_client.summarize = AsyncMock(return_value=summary)  # type: ignore[method-assign]
+    pipeline._bibi_client.fetch_chapter_summary = AsyncMock()  # type: ignore[method-assign]
     pipeline._sender.send = AsyncMock(return_value=False)  # type: ignore[method-assign]
     pipeline._text_sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
 
     await pipeline._try_send_bibigpt_summary(summary.video_url, _summary_event())
 
-    pipeline._bibi_client.fetch_cached_subtitles.assert_not_called()
+    pipeline._bibi_client.fetch_chapter_summary.assert_not_called()
     pipeline._text_sender.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_summary_generation_failure_does_not_lookup_chapter_summary() -> None:
+    pipeline = _prepare_summary_pipeline()
+    pipeline._bibi_client.summarize = AsyncMock(  # type: ignore[method-assign]
+        side_effect=BibiAPIError(500, "temporary failure")
+    )
+    pipeline._bibi_client.fetch_chapter_summary = AsyncMock()  # type: ignore[method-assign]
+    pipeline._sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    pipeline._text_sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    await pipeline._try_send_bibigpt_summary(
+        "https://youtu.be/abc123",
+        _summary_event(),
+    )
+
+    pipeline._bibi_client.fetch_chapter_summary.assert_not_called()
+    pipeline._sender.send.assert_not_called()
+    pipeline._text_sender.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_chapter_summary_send_failure_stops_later_parts_and_reports_progress(
+    monkeypatch,
+) -> None:
+    pipeline = _prepare_summary_pipeline()
+    summary = _summary_result()
+    section = _chapter_section()
+    pipeline._bibi_client.summarize = AsyncMock(return_value=summary)  # type: ignore[method-assign]
+    pipeline._bibi_client.fetch_chapter_summary = AsyncMock(  # type: ignore[method-assign]
+        return_value=ChapterSummaryFetchResult(
+            introduction="Overview",
+            sections=(section,),
+            status="available",
+            source="video.chapterSummary",
+        )
+    )
+    pipeline._translator.format_chapter_summary = AsyncMock(  # type: ignore[method-assign]
+        return_value=("总述", (section,))
+    )
+    pipeline._sender.send = AsyncMock(side_effect=[True, True, False])  # type: ignore[method-assign]
+    pipeline._text_sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "src.pipeline.build_chapter_summary_cards",
+        lambda introduction, sections: ["chapter-card-1", "chapter-card-2", "chapter-card-3"],
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.pipeline.asyncio.sleep", sleep)
+
+    await pipeline._try_send_bibigpt_summary(summary.video_url, _summary_event())
+
+    assert pipeline._sender.send.await_count == 3
+    sent_cards = [call.args[0] for call in pipeline._sender.send.await_args_list]
+    assert sent_cards[1:] == ["chapter-card-1", "chapter-card-2"]
+    for call in pipeline._sender.send.await_args_list:
+        assert call.args[1:] == ("oc_chat", "om_summary")
+    sleep.assert_awaited_once_with(0.25)
+    pipeline._text_sender.send.assert_awaited_once_with(
+        "BibiGPT 字幕总结发送不完整: 已发送 1/3 段, 可重试。",
+        "oc_chat",
+        "om_summary",
+    )
 
 
 @pytest.mark.asyncio

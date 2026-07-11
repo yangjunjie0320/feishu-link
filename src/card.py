@@ -6,7 +6,7 @@ import unicodedata
 from collections.abc import Callable, Sequence
 from html import escape
 
-from .bibi_models import SubtitleSegment
+from .bibi_models import ChapterSummarySection
 from .parsers.base import LinkMetadata, MediaType
 
 _SOURCE_COLORS = {
@@ -19,8 +19,8 @@ _SOURCE_COLORS = {
     "tiktok": "grey",
 }
 
-_SUBTITLE_CARD_TARGET_BYTES = 24 * 1024
-_SUBTITLE_CARD_HARD_LIMIT_BYTES = 30 * 1024
+_CHAPTER_SUMMARY_CARD_TARGET_BYTES = 24 * 1024
+_CHAPTER_SUMMARY_CARD_HARD_LIMIT_BYTES = 30 * 1024
 _FEISHU_RECEIVE_ID_SIZE_BUDGET = 256
 
 
@@ -143,52 +143,95 @@ def card_message_wire_size(card_json: str) -> int:
     )
 
 
-def build_subtitle_cards(segments: Sequence[SubtitleSegment]) -> list[str]:
-    """Render timestamped subtitles into size-safe, collapsed Feishu cards."""
-    if not segments:
+def build_chapter_summary_cards(
+    introduction: str,
+    sections: Sequence[ChapterSummarySection],
+) -> list[str]:
+    """Render BibiGPT's timeline summary into size-safe Feishu cards."""
+    if not sections:
         return []
 
-    single_content = "\n\n".join(_format_subtitle_segment(segment) for segment in segments)
-    single_card = _build_subtitle_card(single_content, panel_title="完整字幕")
-    if card_message_wire_size(single_card) <= _SUBTITLE_CARD_TARGET_BYTES:
+    content_units = [
+        *([introduction.strip()] if introduction.strip() else []),
+        *(_format_chapter_summary_section(section) for section in sections),
+    ]
+    single_content = "\n\n".join(content_units)
+    single_card = _build_chapter_summary_card(single_content, panel_title="字幕总结")
+    if card_message_wire_size(single_card) <= _CHAPTER_SUMMARY_CARD_TARGET_BYTES:
         return [single_card]
 
-    sizing_title = "完整字幕（1/1）"
+    sizing_title = "字幕总结（1/1）"
     while True:
-        contents = _partition_subtitle_contents(segments, panel_title=sizing_title)
+        contents = _partition_chapter_summary_contents(
+            introduction,
+            sections,
+            panel_title=sizing_title,
+        )
         total = len(contents)
-        next_sizing_title = f"完整字幕（{total}/{total}）"
+        next_sizing_title = f"字幕总结（{total}/{total}）"
         if len(next_sizing_title.encode("utf-8")) == len(sizing_title.encode("utf-8")):
             break
         sizing_title = next_sizing_title
 
     cards = [
-        _build_subtitle_card(content, panel_title=f"完整字幕（{index}/{total}）")
+        _build_chapter_summary_card(
+            content,
+            panel_title=f"字幕总结（{index}/{total}）",
+        )
         for index, content in enumerate(contents, start=1)
     ]
-    if any(card_message_wire_size(card) >= _SUBTITLE_CARD_HARD_LIMIT_BYTES for card in cards):
-        raise ValueError("subtitle card exceeds Feishu's hard message size limit")
+    if any(
+        card_message_wire_size(card) >= _CHAPTER_SUMMARY_CARD_HARD_LIMIT_BYTES
+        for card in cards
+    ):
+        raise ValueError("chapter summary card exceeds Feishu's hard message size limit")
     return cards
 
 
-def _partition_subtitle_contents(
-    segments: Sequence[SubtitleSegment],
+def _partition_chapter_summary_contents(
+    introduction: str,
+    sections: Sequence[ChapterSummarySection],
     *,
     panel_title: str,
 ) -> list[str]:
     units: list[str] = []
-    for segment in segments:
-        rendered = _format_subtitle_segment(segment)
-        if _subtitle_content_fits(rendered, panel_title=panel_title):
+    normalized_introduction = introduction.strip()
+    if normalized_introduction:
+        if _chapter_summary_content_fits(
+            normalized_introduction,
+            panel_title=panel_title,
+        ):
+            units.append(normalized_introduction)
+        else:
+            units.extend(
+                _split_oversized_chapter_text(
+                    normalized_introduction,
+                    first_prefix="",
+                    continuation_prefix="（续）",
+                    panel_title=panel_title,
+                )
+            )
+
+    for section in sections:
+        rendered = _format_chapter_summary_section(section)
+        if _chapter_summary_content_fits(rendered, panel_title=panel_title):
             units.append(rendered)
         else:
-            units.extend(_split_oversized_subtitle_segment(segment, panel_title=panel_title))
+            units.extend(
+                _split_oversized_chapter_section(
+                    section,
+                    panel_title=panel_title,
+                )
+            )
 
     contents: list[str] = []
     current: list[str] = []
     for unit in units:
         candidate = "\n\n".join([*current, unit])
-        if current and not _subtitle_content_fits(candidate, panel_title=panel_title):
+        if current and not _chapter_summary_content_fits(
+            candidate,
+            panel_title=panel_title,
+        ):
             contents.append("\n\n".join(current))
             current = [unit]
         else:
@@ -199,21 +242,70 @@ def _partition_subtitle_contents(
     return contents
 
 
-def _split_oversized_subtitle_segment(
-    segment: SubtitleSegment,
+def _split_oversized_chapter_section(
+    section: ChapterSummarySection,
     *,
     panel_title: str,
 ) -> list[str]:
-    prefix = _subtitle_segment_prefix(segment)
-    remaining = segment.text
+    prefix = _chapter_summary_section_prefix(section)
+    if not _chapter_summary_content_fits(prefix, panel_title=panel_title):
+        return _split_oversized_chapter_title_and_summary(
+            section,
+            panel_title=panel_title,
+        )
+    return _split_oversized_chapter_text(
+        section.summary,
+        first_prefix=prefix,
+        continuation_prefix=f"{prefix}（续）",
+        panel_title=panel_title,
+    )
+
+
+def _split_oversized_chapter_title_and_summary(
+    section: ChapterSummarySection,
+    *,
+    panel_title: str,
+) -> list[str]:
+    start = _fmt_chapter_summary_timestamp(section.start_time)
+    end = _fmt_chapter_summary_timestamp(section.end_time)
+    timeline_prefix = f"**[{start}–{end}] "
+    title_fragments = _split_oversized_chapter_text(
+        section.title,
+        first_prefix=timeline_prefix,
+        continuation_prefix=f"{timeline_prefix}（标题续）",
+        suffix="**\n",
+        panel_title=panel_title,
+    )
+    summary_fragments = _split_oversized_chapter_text(
+        section.summary,
+        first_prefix=f"{timeline_prefix}（摘要）**\n",
+        continuation_prefix=f"{timeline_prefix}（摘要续）**\n",
+        panel_title=panel_title,
+    )
+    return [*title_fragments, *summary_fragments]
+
+
+def _split_oversized_chapter_text(
+    text: str,
+    *,
+    first_prefix: str,
+    continuation_prefix: str,
+    suffix: str = "",
+    panel_title: str,
+) -> list[str]:
+    remaining = text
     fragments: list[str] = []
     first = True
 
     while remaining:
-        continuation = "" if first else "（续）"
+        prefix = first_prefix if first else continuation_prefix
 
-        def render(text: str, marker: str = continuation) -> str:
-            return f"{prefix}{marker}{text}"
+        def render(
+            fragment: str,
+            current_prefix: str = prefix,
+            current_suffix: str = suffix,
+        ) -> str:
+            return f"{current_prefix}{fragment}{current_suffix}"
 
         fragment_length = _largest_fitting_prefix(
             remaining,
@@ -221,13 +313,13 @@ def _split_oversized_subtitle_segment(
             panel_title=panel_title,
         )
         if fragment_length == 0:
-            raise ValueError("subtitle card metadata leaves no room for subtitle text")
+            raise ValueError("chapter summary card metadata leaves no room for content")
         fragments.append(render(remaining[:fragment_length]))
         remaining = remaining[fragment_length:]
         first = False
 
     if not fragments:
-        fragments.append(prefix)
+        fragments.append(f"{first_prefix}{suffix}")
     return fragments
 
 
@@ -243,31 +335,80 @@ def _largest_fitting_prefix(
     while low <= high:
         middle = (low + high) // 2
         candidate = render(text[:middle])
-        if _subtitle_content_fits(candidate, panel_title=panel_title):
+        if _chapter_summary_content_fits(candidate, panel_title=panel_title):
             best = middle
             low = middle + 1
         else:
             high = middle - 1
-    return best
+    if best == 0 or best == len(text):
+        return best
+    safe_boundary = _previous_unicode_text_boundary(text, best)
+    return safe_boundary or best
 
 
-def _subtitle_content_fits(content: str, *, panel_title: str) -> bool:
-    card = _build_subtitle_card(content, panel_title=panel_title)
-    return card_message_wire_size(card) <= _SUBTITLE_CARD_TARGET_BYTES
+def _previous_unicode_text_boundary(text: str, boundary: int) -> int:
+    """Move a split point left so the next fragment does not start mid-grapheme."""
+    candidate = min(max(boundary, 0), len(text))
+    while 0 < candidate < len(text):
+        left = text[candidate - 1]
+        right = text[candidate]
+        if _is_safe_unicode_text_boundary(text, candidate, left, right):
+            break
+        candidate -= 1
+    return candidate
 
 
-def _format_subtitle_segment(segment: SubtitleSegment) -> str:
-    return f"{_subtitle_segment_prefix(segment)}{segment.text}"
+def _is_safe_unicode_text_boundary(
+    text: str,
+    boundary: int,
+    left: str,
+    right: str,
+) -> bool:
+    if left == "\r" and right == "\n":
+        return False
+    if left == "\u200d" or right == "\u200d":
+        return False
+    if _is_unicode_grapheme_extension(right):
+        return False
+    if _is_regional_indicator(left) and _is_regional_indicator(right):
+        preceding_indicators = 0
+        position = boundary - 1
+        while position >= 0 and _is_regional_indicator(text[position]):
+            preceding_indicators += 1
+            position -= 1
+        return preceding_indicators % 2 == 0
+    return True
 
 
-def _subtitle_segment_prefix(segment: SubtitleSegment) -> str:
-    start = _fmt_subtitle_timestamp(segment.start_time)
-    end = _fmt_subtitle_timestamp(segment.end_time)
-    speaker = f"说话人 {segment.speaker_id}：" if segment.speaker_id is not None else ""
-    return f"**[{start}–{end}]** {speaker}"
+def _is_unicode_grapheme_extension(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        unicodedata.category(character) in {"Mc", "Me", "Mn"}
+        or 0x1F3FB <= codepoint <= 0x1F3FF
+        or 0xE0020 <= codepoint <= 0xE007F
+    )
 
 
-def _fmt_subtitle_timestamp(seconds: float) -> str:
+def _is_regional_indicator(character: str) -> bool:
+    return 0x1F1E6 <= ord(character) <= 0x1F1FF
+
+
+def _chapter_summary_content_fits(content: str, *, panel_title: str) -> bool:
+    card = _build_chapter_summary_card(content, panel_title=panel_title)
+    return card_message_wire_size(card) <= _CHAPTER_SUMMARY_CARD_TARGET_BYTES
+
+
+def _format_chapter_summary_section(section: ChapterSummarySection) -> str:
+    return f"{_chapter_summary_section_prefix(section)}{section.summary}"
+
+
+def _chapter_summary_section_prefix(section: ChapterSummarySection) -> str:
+    start = _fmt_chapter_summary_timestamp(section.start_time)
+    end = _fmt_chapter_summary_timestamp(section.end_time)
+    return f"**[{start}–{end}] {section.title}**\n"
+
+
+def _fmt_chapter_summary_timestamp(seconds: float) -> str:
     total_seconds = max(0, int(seconds))
     hours, remainder = divmod(total_seconds, 3600)
     minutes, secs = divmod(remainder, 60)
@@ -276,11 +417,11 @@ def _fmt_subtitle_timestamp(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def _build_subtitle_card(content: str, *, panel_title: str) -> str:
+def _build_chapter_summary_card(content: str, *, panel_title: str) -> str:
     card: dict[str, object] = {
         "schema": "2.0",
         "header": {
-            "title": {"tag": "plain_text", "content": "BibiGPT 字幕"},
+            "title": {"tag": "plain_text", "content": "BibiGPT 字幕总结"},
             "template": "blue",
         },
         "body": {

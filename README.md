@@ -11,7 +11,7 @@ The project is designed for personal or team link collection workflows: send a s
 - Multi-platform parsing for YouTube, Instagram, TikTok, Bilibili, X/Twitter, and normal web pages.
 - Video metrics when available: views, likes, comments, and reposts.
 - Optional short-video append. Videos up to 180 seconds are downloaded, converted to Feishu-friendly MP4, uploaded, and sent after the card.
-- **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube or Bilibili link to receive an AI-generated summary.
+- **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube or Bilibili link to receive an AI-generated summary followed by BibiGPT's timeline chapter summary in collapsed Feishu cards.
 - Manual download command: mention the bot and send `下载 <link>` to force video download instead of summarization, without the automatic short-video duration cap.
 - Card action buttons: supported video cards include `总结视频`, `分析评论`, and `下载视频` actions.
 - Optional title translation through DeepSeek. Non-Chinese titles are translated and shown together with the original title.
@@ -165,14 +165,14 @@ See `config.example.yaml` for the full reference. Common settings:
 | `cookie_file` | `cookies/cookies.txt` | Unified Netscape cookie file path |
 | `bibigpt_access_mode` | `web` | `web` uses the normal BibiGPT web app quota via tRPC; `browser` sends the same request from persisted Chromium |
 | `bibigpt_base_url` | `https://bibigpt.co` | Base URL for BibiGPT. Use `https://aitodo.co/zh` for the international/overseas route. |
-| `bibigpt_timeout` | `120.0` | Timeout in seconds for BibiGPT summary requests |
+| `bibigpt_timeout` | `120.0` | Timeout in seconds for BibiGPT summary and chapter-summary requests |
 | `bibigpt_browser_profile_dir` | `browser-data/bibigpt` | Chromium profile path for BibiGPT browser mode |
 | `bibigpt_browser_headless` | `true` | Run Chromium headless in browser mode |
-| `bibigpt_browser_timeout` | `120.0` | Timeout in seconds for browser startup, navigation, and summary fetch |
+| `bibigpt_browser_timeout` | `120.0` | Timeout in seconds for browser startup, navigation, and BibiGPT requests |
 | `bibigpt_default_prompt` | Empty | Optional default custom prompt. Leave empty to use BibiGPT's built-in prompt |
-| `deepseek_api_key` | Empty | Enables title translation, BibiGPT summary rewriting, and faithful Chinese transcript formatting; transcript formatting falls back to the stored original when unavailable |
+| `deepseek_api_key` | Empty | Enables title translation, BibiGPT summary rewriting, and faithful Chinese formatting of BibiGPT chapter summaries; chapter formatting falls back to the BibiGPT original when unavailable |
 | `deepseek_base_url` | DeepSeek API | Optional compatible API endpoint |
-| `deepseek_model` | `deepseek-v4-flash` | DeepSeek model used for translation, summary rewriting, comment analysis, and transcript formatting; explicit configuration overrides this default |
+| `deepseek_model` | `deepseek-v4-flash` | DeepSeek model used for translation, summary rewriting, comment analysis, and chapter-summary formatting; explicit configuration overrides this default |
 | `enable_title_translation` | `false` | Translate non-Chinese titles when true |
 | `cookie_refresh_enabled` | `true` | Refresh expiring platform cookies from a persistent Chromium profile |
 | `cookie_refresh_platforms` | `["bilibili"]` | Platforms whose cookies are refreshed before yt-dlp parse/download |
@@ -259,11 +259,11 @@ Manual downloads bypass BibiGPT summaries and the automatic short-video duration
 
 Supported video cards also include action buttons:
 
-- `总结视频` triggers the same BibiGPT summary path as mentioning the bot with a YouTube or Bilibili URL.
+- `总结视频` triggers the same BibiGPT summary-and-chapter-summary path as mentioning the bot with a YouTube or Bilibili URL.
 - `分析评论` fetches up to 200 comments, ranks comments by likes and replies, translates the top 3, and sends a fixed-template comment analysis card with total-comment and sample counts.
 - `下载视频` triggers the same manual-download path and sends the result as a reply to the card message.
 
-BibiGPT summary output is treated as draft material. When `deepseek_api_key` is configured, the bot sends that output through DeepSeek with fixed Chinese Markdown output requirements before rendering the Feishu card.
+BibiGPT summary output is treated as draft material. When `deepseek_api_key` is configured, the bot sends that output through DeepSeek with fixed Chinese Markdown output requirements before rendering the Feishu card. After the summary card succeeds, the bot requests BibiGPT's `timeline` chapter summary using the returned content ID and appends a collapsed `字幕总结` card. DeepSeek may translate and proofread the chapter introduction, titles, and summaries, but timestamps remain code-owned and raw subtitles are never sent or used as a fallback. If the BibiGPT account cannot generate chapter summaries, the original summary remains available and the bot reports that the chapter summary is unavailable.
 
 ## Development
 
@@ -312,6 +312,10 @@ Try providing platform cookies in Netscape format. Private, deleted, region-rest
 For the aitodo overseas route, set `bibigpt_base_url: "https://aitodo.co/zh"`. Start with `bibigpt_access_mode: "web"` when a complete Netscape cookie export works. If direct HTTP returns server errors, use `bibigpt_access_mode: "browser"` so the request is sent from a persisted Chromium profile in `browser-data/`.
 
 Browser mode can import valid cookies, but if the local cookie file is incomplete or corrupted it skips that file and relies on the Chromium profile. Do not paste only part of split Supabase auth cookies like `*-auth-token.0` / `*-auth-token.1`; export the whole `aitodo.co` cookie set again when seeding from a file.
+
+### BibiGPT summary is sent but the chapter summary is unavailable
+
+The ordinary summary is intentionally sent first. The chapter request reuses its content ID and the existing BibiGPT login state, but chapter summaries may consume BibiGPT quota or require a paid account. Check logs for the lookup status and reason. The service does not fall back to a complete transcript, start a transcription task, or extract subtitles with yt-dlp.
 
 ### Feishu video preview shows the wrong duration
 

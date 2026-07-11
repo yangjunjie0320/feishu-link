@@ -4,12 +4,12 @@ import json
 import logging
 import re
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
 
-from .bibi_models import SubtitleSegment
+from .bibi_models import ChapterSummarySection
 from .config import Settings
 from .parsers.base import LinkMetadata, MediaType
 
@@ -27,24 +27,32 @@ _SUMMARY_REWRITE_PROMPT = """\
 - 标签：从内容中提取 3-8 个关键标签，格式为 "`#标签`"，用空格分隔，作为单独一行放在所有章节之前。
 - 章节排列顺序：总结/概述 → 要点/亮点 → 详细内容/章节细分 → 问题/FAQ → 词汇/术语/补充。
 - 不得合并或重命名章节；原文中没有对应内容的章节直接省略，不要写"无"或任何占位符。"""
-_SUBTITLE_FORMAT_SYSTEM_PROMPT = """\
-你是视频字幕校对与翻译助手。必须只输出一个有效的 JSON 对象，格式为
-{"items":[{"id":数字,"text":"字幕文本"}]}。
-逐条忠实处理输入字幕：非中文翻译为简体中文，只修正标点、断句和明显错别字。
-不得总结、删减、合并、拆分、补充事实或改变原意；必须保留每一条输入的 id、顺序和数量。
-text 必须是非空字符串。不要输出时间戳、Markdown、解释或 JSON 之外的内容。"""
-_SUBTITLE_BATCH_MAX_ITEMS = 80
-_SUBTITLE_BATCH_MAX_CHARACTERS = 6000
-_SUBTITLE_MAX_TOKENS = 8192
-_SUBTITLE_RESPONSE_ATTEMPTS = 2
+_CHAPTER_SUMMARY_FORMAT_SYSTEM_PROMPT = """\
+你是视频章节总结校对与翻译助手。必须只输出一个有效的 JSON 对象，格式为
+{"items":[{"id":"稳定 ID","title":"章节标题","summary":"章节总结"}]}。
+逐条忠实处理输入内容：非中文翻译为简体中文，只修正标点、断句、明显错别字和不自然表达。
+不得进一步总结、删减、合并、拆分、补充事实或改变原意；必须保留每一条输入的 id、顺序和数量。
+章节 title 和所有 summary 必须是非空字符串。不要输出时间戳、Markdown、解释或 JSON 之外的内容。"""
+_CHAPTER_SUMMARY_BATCH_MAX_ITEMS = 80
+_CHAPTER_SUMMARY_BATCH_MAX_CHARACTERS = 6000
+_CHAPTER_SUMMARY_MAX_TOKENS = 8192
+_CHAPTER_SUMMARY_RESPONSE_ATTEMPTS = 2
 
 
-class _SubtitleResponseError(ValueError):
-    """DeepSeek returned a response that cannot safely replace a subtitle batch."""
+class _ChapterSummaryResponseError(ValueError):
+    """DeepSeek returned a response that cannot safely replace a chapter batch."""
 
 
-class _SubtitleServiceError(RuntimeError):
-    """DeepSeek could not serve a subtitle formatting request."""
+class _ChapterSummaryServiceError(RuntimeError):
+    """DeepSeek could not serve a chapter summary formatting request."""
+
+
+@dataclass(frozen=True)
+class _ChapterSummaryItem:
+    id: str
+    title: str
+    summary: str
+    section_position: int | None
 
 
 def contains_chinese(text: str) -> bool:
@@ -115,12 +123,7 @@ class TitleTranslator:
             result = await self._translate_text(
                 content,
                 system_prompt=system_prompt,
-                user_prompt=(
-                    "重写要求:\n"
-                    f"{prompt}\n\n"
-                    "BibiGPT 原始返回:\n"
-                    f"{content}"
-                ),
+                user_prompt=(f"重写要求:\n{prompt}\n\nBibiGPT 原始返回:\n{content}"),
                 max_tokens=1200,
                 preserve_linebreaks=True,
                 timeout=rewrite_timeout,
@@ -140,7 +143,7 @@ class TitleTranslator:
                 user_prompt=(
                     "重写要求:\n"
                     f"{prompt}\n\n"
-                    "注意：每个章节标题必须格式为 \"- **标题**\"，不要用纯文字标题。\n\n"
+                    '注意：每个章节标题必须格式为 "- **标题**"，不要用纯文字标题。\n\n'
                     "BibiGPT 原始返回:\n"
                     f"{content}"
                 ),
@@ -153,35 +156,40 @@ class TitleTranslator:
 
         return result
 
-    async def format_subtitles(
+    async def format_chapter_summary(
         self,
-        subtitles: Sequence[SubtitleSegment],
+        introduction: str,
+        sections: Sequence[ChapterSummarySection],
         *,
         content_id: str = "",
-    ) -> tuple[SubtitleSegment, ...]:
-        """Translate and proofread subtitles without exposing their timing to the model."""
-        original = tuple(subtitles)
-        if not original:
-            return ()
+    ) -> tuple[str, tuple[ChapterSummarySection, ...]]:
+        """Translate and proofread BibiGPT chapter summaries without exposing timing."""
+        original_sections = tuple(sections)
+        items = _build_chapter_summary_items(introduction, original_sections)
+        if not items:
+            return introduction, original_sections
+        batches = _build_chapter_summary_batches(items)
         if not self._settings.deepseek_api_key:
             logger.warning(
-                "subtitle formatting skipped because deepseek_api_key is empty: "
-                "content_id=%s segments=%d",
+                "chapter summary formatting skipped because deepseek_api_key is empty: "
+                "content_id=%s sections=%d batches=%d fallback_batches=%d",
                 content_id,
-                len(original),
+                len(original_sections),
+                len(batches),
+                len(batches),
             )
-            return original
+            return introduction, original_sections
 
-        batches = _build_subtitle_batches(original)
-        formatted: list[SubtitleSegment] = []
+        formatted: list[_ChapterSummaryItem] = []
         fallback_batches = 0
 
         for batch_number, batch in enumerate(batches, start=1):
-            character_count = sum(len(segment.text) for segment in batch)
-            if character_count > _SUBTITLE_BATCH_MAX_CHARACTERS:
+            character_count = sum(len(item.title) + len(item.summary) for item in batch)
+            if character_count > _CHAPTER_SUMMARY_BATCH_MAX_CHARACTERS:
                 logger.warning(
-                    "subtitle batch exceeds formatting character limit, using original text: "
-                    "content_id=%s batch=%d/%d segments=%d characters=%d",
+                    "chapter summary batch exceeds formatting character limit, "
+                    "using original content: "
+                    "content_id=%s batch=%d/%d items=%d characters=%d",
                     content_id,
                     batch_number,
                     len(batches),
@@ -192,15 +200,15 @@ class TitleTranslator:
                 fallback_batches += 1
                 continue
 
-            batch_result: tuple[SubtitleSegment, ...] | None = None
-            for attempt in range(1, _SUBTITLE_RESPONSE_ATTEMPTS + 1):
+            batch_result: tuple[_ChapterSummaryItem, ...] | None = None
+            for attempt in range(1, _CHAPTER_SUMMARY_RESPONSE_ATTEMPTS + 1):
                 try:
-                    batch_result = await self._format_subtitle_batch(batch)
+                    batch_result = await self._format_chapter_summary_batch(batch)
                     break
-                except _SubtitleResponseError as error:
-                    if attempt < _SUBTITLE_RESPONSE_ATTEMPTS:
+                except _ChapterSummaryResponseError as error:
+                    if attempt < _CHAPTER_SUMMARY_RESPONSE_ATTEMPTS:
                         logger.warning(
-                            "subtitle formatting response invalid, retrying: "
+                            "chapter summary formatting response invalid, retrying: "
                             "content_id=%s batch=%d/%d attempt=%d error=%s",
                             content_id,
                             batch_number,
@@ -210,7 +218,7 @@ class TitleTranslator:
                         )
                         continue
                     logger.warning(
-                        "subtitle formatting response invalid, using original batch: "
+                        "chapter summary formatting response invalid, using original batch: "
                         "content_id=%s batch=%d/%d attempts=%d error=%s",
                         content_id,
                         batch_number,
@@ -220,7 +228,8 @@ class TitleTranslator:
                     )
                 except Exception as error:
                     logger.warning(
-                        "subtitle formatting service failed, using original remaining batches: "
+                        "chapter summary formatting service failed, "
+                        "using original remaining batches: "
                         "content_id=%s batch=%d/%d error=%s",
                         content_id,
                         batch_number,
@@ -231,15 +240,16 @@ class TitleTranslator:
                     for remaining_batch in batches[batch_number:]:
                         formatted.extend(remaining_batch)
                     fallback_batches += len(batches) - batch_number + 1
+                    result = _restore_chapter_summary(introduction, original_sections, formatted)
                     logger.info(
-                        "subtitle formatting completed with service fallback: "
-                        "content_id=%s segments=%d batches=%d fallback_batches=%d",
+                        "chapter summary formatting completed with service fallback: "
+                        "content_id=%s sections=%d batches=%d fallback_batches=%d",
                         content_id,
-                        len(original),
+                        len(original_sections),
                         len(batches),
                         fallback_batches,
                     )
-                    return tuple(formatted)
+                    return result
 
             if batch_result is None:
                 formatted.extend(batch)
@@ -248,28 +258,31 @@ class TitleTranslator:
                 formatted.extend(batch_result)
 
         logger.info(
-            "subtitle formatting completed: "
-            "content_id=%s segments=%d batches=%d fallback_batches=%d",
+            "chapter summary formatting completed: "
+            "content_id=%s sections=%d batches=%d fallback_batches=%d",
             content_id,
-            len(original),
+            len(original_sections),
             len(batches),
             fallback_batches,
         )
-        return tuple(formatted)
+        return _restore_chapter_summary(introduction, original_sections, formatted)
 
-    async def _format_subtitle_batch(
-        self, batch: Sequence[SubtitleSegment]
-    ) -> tuple[SubtitleSegment, ...]:
-        input_items = [{"id": segment.index, "text": segment.text} for segment in batch]
+    async def _format_chapter_summary_batch(
+        self, batch: Sequence[_ChapterSummaryItem]
+    ) -> tuple[_ChapterSummaryItem, ...]:
+        input_items = [
+            {"id": item.id, "title": item.title, "summary": item.summary} for item in batch
+        ]
         payload = self._build_chat_payload(
-            _SUBTITLE_FORMAT_SYSTEM_PROMPT,
+            _CHAPTER_SUMMARY_FORMAT_SYSTEM_PROMPT,
             (
-                "请按系统要求处理下面的 JSON 字幕。只返回 JSON 对象：\n"
+                "请按系统要求处理下面的 JSON 章节总结。只返回 JSON 对象：\n"
                 + json.dumps({"items": input_items}, ensure_ascii=False, separators=(",", ":"))
             ),
-            _SUBTITLE_MAX_TOKENS,
+            _CHAPTER_SUMMARY_MAX_TOKENS,
         )
         payload["thinking"] = {"type": "disabled"}
+        payload.pop("reasoning_effort", None)
         payload["response_format"] = {"type": "json_object"}
 
         endpoint = self._settings.deepseek_base_url.rstrip("/") + "/chat/completions"
@@ -283,10 +296,10 @@ class TitleTranslator:
             timeout=self._settings.summary_rewrite_timeout,
         )
         if not 200 <= response.status_code < 300:
-            raise _SubtitleServiceError(f"DeepSeek HTTP {response.status_code}")
+            raise _ChapterSummaryServiceError(f"DeepSeek HTTP {response.status_code}")
 
-        content = _extract_subtitle_response_content(response)
-        return _parse_formatted_subtitle_batch(content, batch)
+        content = _extract_chapter_summary_response_content(response)
+        return _parse_formatted_chapter_summary_batch(content, batch)
 
     def _build_chat_payload(
         self, system_prompt: str, user_prompt: str, max_tokens: int
@@ -385,83 +398,142 @@ class TitleTranslator:
             meta.translated_description = translated
 
 
-def _build_subtitle_batches(
-    subtitles: Sequence[SubtitleSegment],
-) -> tuple[tuple[SubtitleSegment, ...], ...]:
-    batches: list[tuple[SubtitleSegment, ...]] = []
-    current: list[SubtitleSegment] = []
+def _build_chapter_summary_items(
+    introduction: str,
+    sections: Sequence[ChapterSummarySection],
+) -> tuple[_ChapterSummaryItem, ...]:
+    items: list[_ChapterSummaryItem] = []
+    if introduction.strip():
+        items.append(
+            _ChapterSummaryItem(
+                id="overview",
+                title="总述",
+                summary=introduction.strip(),
+                section_position=None,
+            )
+        )
+    items.extend(
+        _ChapterSummaryItem(
+            id=f"section:{section.index}",
+            title=section.title,
+            summary=section.summary,
+            section_position=position,
+        )
+        for position, section in enumerate(sections)
+    )
+    return tuple(items)
+
+
+def _build_chapter_summary_batches(
+    items: Sequence[_ChapterSummaryItem],
+) -> tuple[tuple[_ChapterSummaryItem, ...], ...]:
+    batches: list[tuple[_ChapterSummaryItem, ...]] = []
+    current: list[_ChapterSummaryItem] = []
     current_characters = 0
 
-    for segment in subtitles:
-        segment_characters = len(segment.text)
-        would_exceed_items = len(current) >= _SUBTITLE_BATCH_MAX_ITEMS
+    for item in items:
+        item_characters = len(item.title) + len(item.summary)
+        would_exceed_items = len(current) >= _CHAPTER_SUMMARY_BATCH_MAX_ITEMS
         would_exceed_characters = (
             bool(current)
-            and current_characters + segment_characters > _SUBTITLE_BATCH_MAX_CHARACTERS
+            and current_characters + item_characters > _CHAPTER_SUMMARY_BATCH_MAX_CHARACTERS
         )
         if would_exceed_items or would_exceed_characters:
             batches.append(tuple(current))
             current = []
             current_characters = 0
 
-        current.append(segment)
-        current_characters += segment_characters
+        current.append(item)
+        current_characters += item_characters
 
     if current:
         batches.append(tuple(current))
     return tuple(batches)
 
 
-def _extract_subtitle_response_content(response: httpx.Response) -> str:
+def _extract_chapter_summary_response_content(response: httpx.Response) -> str:
     try:
         data = response.json()
     except ValueError as error:
-        raise _SubtitleResponseError("response body is not valid JSON") from error
+        raise _ChapterSummaryResponseError("response body is not valid JSON") from error
     if not isinstance(data, dict):
-        raise _SubtitleResponseError("response body is not a JSON object")
+        raise _ChapterSummaryResponseError("response body is not a JSON object")
 
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise _SubtitleResponseError("response has no valid choices")
+        raise _ChapterSummaryResponseError("response has no valid choices")
     message = choices[0].get("message")
     if not isinstance(message, dict):
-        raise _SubtitleResponseError("response choice has no valid message")
+        raise _ChapterSummaryResponseError("response choice has no valid message")
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
-        raise _SubtitleResponseError("response message has empty content")
+        raise _ChapterSummaryResponseError("response message has empty content")
     return content.strip()
 
 
-def _parse_formatted_subtitle_batch(
-    content: str, batch: Sequence[SubtitleSegment]
-) -> tuple[SubtitleSegment, ...]:
+def _parse_formatted_chapter_summary_batch(
+    content: str,
+    batch: Sequence[_ChapterSummaryItem],
+) -> tuple[_ChapterSummaryItem, ...]:
     try:
         data = json.loads(content)
     except json.JSONDecodeError as error:
-        raise _SubtitleResponseError("message content is not valid JSON") from error
+        raise _ChapterSummaryResponseError("message content is not valid JSON") from error
     if not isinstance(data, dict):
-        raise _SubtitleResponseError("message content is not a JSON object")
+        raise _ChapterSummaryResponseError("message content is not a JSON object")
     items = data.get("items")
     if not isinstance(items, list):
-        raise _SubtitleResponseError("message content has no items array")
+        raise _ChapterSummaryResponseError("message content has no items array")
     if len(items) != len(batch):
-        raise _SubtitleResponseError("message item count does not match input")
+        raise _ChapterSummaryResponseError("message item count does not match input")
 
-    formatted: list[SubtitleSegment] = []
-    for item, segment in zip(items, batch, strict=True):
+    formatted: list[_ChapterSummaryItem] = []
+    for item, original in zip(items, batch, strict=True):
         if not isinstance(item, dict):
-            raise _SubtitleResponseError("message item is not a JSON object")
+            raise _ChapterSummaryResponseError("message item is not a JSON object")
         item_id = item.get("id")
-        if type(item_id) is not int or item_id != segment.index:
-            raise _SubtitleResponseError("message item ids do not match input order")
-        text = item.get("text")
-        if not isinstance(text, str):
-            raise _SubtitleResponseError("message item text is not a string")
-        cleaned_text = " ".join(text.split())
-        if not cleaned_text:
-            raise _SubtitleResponseError("message item text is empty")
-        formatted.append(replace(segment, text=cleaned_text))
+        if not isinstance(item_id, str) or item_id != original.id:
+            raise _ChapterSummaryResponseError("message item ids do not match input order")
+
+        summary = item.get("summary")
+        if not isinstance(summary, str):
+            raise _ChapterSummaryResponseError("message item summary is not a string")
+        cleaned_summary = " ".join(summary.split())
+        if not cleaned_summary:
+            raise _ChapterSummaryResponseError("message item summary is empty")
+
+        title = item.get("title")
+        cleaned_title = " ".join(title.split()) if isinstance(title, str) else ""
+        if original.section_position is not None and not cleaned_title:
+            raise _ChapterSummaryResponseError("message section title is empty")
+        formatted.append(
+            replace(
+                original,
+                title=cleaned_title or original.title,
+                summary=cleaned_summary,
+            )
+        )
     return tuple(formatted)
+
+
+def _restore_chapter_summary(
+    introduction: str,
+    sections: Sequence[ChapterSummarySection],
+    items: Sequence[_ChapterSummaryItem],
+) -> tuple[str, tuple[ChapterSummarySection, ...]]:
+    formatted_introduction = introduction
+    formatted_sections = list(sections)
+    for item in items:
+        if item.section_position is None:
+            formatted_introduction = item.summary
+            continue
+        original = formatted_sections[item.section_position]
+        formatted_sections[item.section_position] = replace(
+            original,
+            title=item.title,
+            summary=item.summary,
+        )
+    return formatted_introduction, tuple(formatted_sections)
 
 
 def _clean_translation(text: str) -> str:

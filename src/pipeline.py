@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import OrderedDict
@@ -13,9 +14,12 @@ from .bibi_client import (
     BibiClient,
     TranscriptUnavailableError,
 )
+from .bibi_models import SummaryResult
 from .card import (
     build_card,
+    build_chapter_summary_cards,
     build_markdown_card,
+    card_message_wire_size,
 )
 from .comment_analyzer import CommentAnalysisError, CommentAnalyzer
 from .config import Settings
@@ -32,6 +36,7 @@ from .url_extract import extract_prompt, extract_urls, is_manual_download_comman
 logger = logging.getLogger(__name__)
 
 _SEEN_CAPACITY = 500
+_CHAPTER_SUMMARY_SEND_INTERVAL_SECONDS = 0.25
 
 
 class Pipeline:
@@ -395,6 +400,127 @@ class Pipeline:
                 )
                 return
 
+            await self._try_send_bibigpt_chapter_summary(event, result)
+
+    async def _try_send_bibigpt_chapter_summary(
+        self,
+        event: MessageEvent | CardActionEvent,
+        result: SummaryResult,
+    ) -> None:
+        try:
+            chapter_result = await self._bibi_client.fetch_chapter_summary(result)
+        except Exception as e:
+            logger.warning(
+                "chapter summary lookup failed unexpectedly: content_id=%s "
+                "message_id=%s error=%s",
+                result.content_id,
+                event.message_id,
+                e,
+            )
+            await self._text_sender.send(
+                "BibiGPT 字幕总结暂不可用: 没有获取到章节总结。",
+                event.chat_id,
+                event.message_id,
+            )
+            return
+
+        sections = chapter_result.sections
+        logger.info(
+            "chapter summary lookup complete: content_id=%s source=%s status=%s "
+            "sections=%d message_id=%s reason=%s",
+            result.content_id,
+            chapter_result.source,
+            chapter_result.status,
+            len(sections),
+            event.message_id,
+            chapter_result.reason or "(none)",
+        )
+        if not sections:
+            await self._text_sender.send(
+                "BibiGPT 字幕总结暂不可用: 没有获取到章节总结。",
+                event.chat_id,
+                event.message_id,
+            )
+            return
+
+        try:
+            introduction, formatted_sections = (
+                await self._translator.format_chapter_summary(
+                    chapter_result.introduction,
+                    sections,
+                    content_id=result.content_id,
+                )
+            )
+        except Exception as e:
+            logger.warning(
+                "chapter summary formatting failed unexpectedly, using BibiGPT text: "
+                "content_id=%s sections=%d message_id=%s error=%s",
+                result.content_id,
+                len(sections),
+                event.message_id,
+                e,
+            )
+            introduction = chapter_result.introduction
+            formatted_sections = sections
+
+        try:
+            cards = build_chapter_summary_cards(introduction, formatted_sections)
+        except Exception as e:
+            logger.error(
+                "chapter summary card build failed: content_id=%s sections=%d "
+                "message_id=%s error=%s",
+                result.content_id,
+                len(formatted_sections),
+                event.message_id,
+                e,
+            )
+            await self._text_sender.send(
+                "BibiGPT 字幕总结暂不可用: 卡片生成失败。",
+                event.chat_id,
+                event.message_id,
+            )
+            return
+
+        total = len(cards)
+        logger.info(
+            "chapter summary cards ready: content_id=%s sections=%d cards=%d "
+            "message_id=%s",
+            result.content_id,
+            len(formatted_sections),
+            total,
+            event.message_id,
+        )
+        for part_index, card_json in enumerate(cards, start=1):
+            if part_index > 1:
+                await asyncio.sleep(_CHAPTER_SUMMARY_SEND_INTERVAL_SECONDS)
+            wire_bytes = card_message_wire_size(card_json)
+            card_sent = await self._sender.send(card_json, event.chat_id, event.message_id)
+            if not card_sent:
+                logger.error(
+                    "chapter summary card send failed: content_id=%s part=%d/%d "
+                    "wire_bytes=%d message_id=%s",
+                    result.content_id,
+                    part_index,
+                    total,
+                    wire_bytes,
+                    event.message_id,
+                )
+                await self._text_sender.send(
+                    "BibiGPT 字幕总结发送不完整: "
+                    f"已发送 {part_index - 1}/{total} 段, 可重试。",
+                    event.chat_id,
+                    event.message_id,
+                )
+                return
+            logger.info(
+                "chapter summary card sent: content_id=%s part=%d/%d "
+                "wire_bytes=%d message_id=%s",
+                result.content_id,
+                part_index,
+                total,
+                wire_bytes,
+                event.message_id,
+            )
 
     async def _try_send_comment_analysis(
         self,
