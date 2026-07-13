@@ -4,6 +4,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from html import escape
 
 from .bibi_models import ChapterSummarySection
@@ -151,6 +152,16 @@ def build_chapter_summary_cards(
     if not sections:
         return []
 
+    introduction = _strip_emoji_symbols(introduction)
+    sections = [
+        replace(
+            section,
+            title=_strip_emoji_symbols(section.title).strip() or "章节",
+            summary=_strip_emoji_symbols(section.summary).strip() or "（无内容）",
+        )
+        for section in sections
+    ]
+
     content_units = [
         *([introduction.strip()] if introduction.strip() else []),
         *(_format_chapter_summary_section(section) for section in sections),
@@ -181,8 +192,7 @@ def build_chapter_summary_cards(
         for index, content in enumerate(contents, start=1)
     ]
     if any(
-        card_message_wire_size(card) >= _CHAPTER_SUMMARY_CARD_HARD_LIMIT_BYTES
-        for card in cards
+        card_message_wire_size(card) >= _CHAPTER_SUMMARY_CARD_HARD_LIMIT_BYTES for card in cards
     ):
         raise ValueError("chapter summary card exceeds Feishu's hard message size limit")
     return cards
@@ -724,7 +734,7 @@ def _is_emoji_or_modifier(ch: str) -> bool:
     return (
         unicodedata.category(ch) == "So"
         or 0x1F3FB <= codepoint <= 0x1F3FF
-        or codepoint in {0x200D, 0xFE0E, 0xFE0F}
+        or codepoint in {0x200D, 0xFE0E, 0xFE0F, 0x20E3}
     )
 
 

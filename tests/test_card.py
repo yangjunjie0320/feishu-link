@@ -63,14 +63,44 @@ def test_chapter_summary_card_renders_introduction_and_timeline_section() -> Non
         {
             "tag": "markdown",
             "content": (
-                "这是视频的时间线总述。\n\n"
-                "**[00:04–00:08] 项目背景**\n"
-                "介绍项目的目标和设计思路。"
+                "这是视频的时间线总述。\n\n**[00:04–00:08] 项目背景**\n介绍项目的目标和设计思路。"
             ),
         }
     ]
     assert "card_link" not in card
     assert "打开视频" not in cards[0]
+
+
+def test_chapter_summary_card_strips_emoji_from_all_fields() -> None:
+    cards = build_chapter_summary_cards(
+        "🔥 这是视频的时间线总述。✨",
+        (
+            ChapterSummarySection(
+                index=0,
+                start_time=4,
+                end_time=8,
+                title="🚀 项目背景 1️⃣",
+                summary="介绍项目的目标和设计思路。👍🏻",
+            ),
+            ChapterSummarySection(
+                index=1,
+                start_time=8,
+                end_time=12,
+                title="💯",
+                summary="🎉🎉",
+            ),
+        ),
+    )
+
+    assert len(cards) == 1
+    content = json.loads(cards[0])["body"]["elements"][0]["elements"][0]["content"]
+    assert "这是视频的时间线总述。" in content
+    assert "**[00:04–00:08] 项目背景 1**" in content
+    assert "介绍项目的目标和设计思路。" in content
+    assert "**[00:08–00:12] 章节**" in content
+    assert "（无内容）" in content
+    assert not any(ord(ch) > 0x1F000 for ch in content)
+    assert "✨" not in content and "1️⃣"[1:] not in content
 
 
 def test_chapter_summary_card_renders_hour_timestamp() -> None:
@@ -157,9 +187,9 @@ def test_chapter_summary_cards_split_oversized_section_without_losing_unicode() 
     assert "".join(reconstructed) == original
 
 
-def test_chapter_summary_cards_do_not_split_emoji_zwj_sequence() -> None:
-    family = "👨‍👩‍👧‍👦"
-    original = family * 6_000
+def test_chapter_summary_cards_do_not_split_combining_mark_grapheme() -> None:
+    grapheme = "é"
+    original = grapheme * 12_000
     cards = build_chapter_summary_cards(
         "",
         [
@@ -180,10 +210,10 @@ def test_chapter_summary_cards_do_not_split_emoji_zwj_sequence() -> None:
         fragment = content.removeprefix(prefix)
         if index:
             fragment = fragment.removeprefix("（续）")
-        assert not fragment.startswith("\u200d")
-        assert not fragment.endswith("\u200d")
+        assert not fragment.startswith("\u0301")
         reconstructed.append(fragment)
 
+    assert len(cards) > 1
     assert "".join(reconstructed) == original
 
 
@@ -305,9 +335,7 @@ def test_split_markdown_extracts_preamble() -> None:
 
 def test_build_markdown_card_sectioned_renders_preamble_inline() -> None:
     markdown = "`#AI` `#技术`\n\n- **总结**\n    - 内容\n- **亮点**\n    - 亮点1"
-    card = json.loads(
-        build_markdown_card("Title", markdown, collapsed=True, sectioned=True)
-    )
+    card = json.loads(build_markdown_card("Title", markdown, collapsed=True, sectioned=True))
     elements = card["body"]["elements"]
 
     assert elements[0]["tag"] == "markdown"
@@ -446,9 +474,7 @@ def test_card_with_youtube_metadata() -> None:
         "action": "download_video",
         "url": "https://youtu.be/abc123",
     }
-    body_text = next(
-        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
-    )
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
     assert "5:05" in body_text
     assert "Great Channel" in body_text
     assert "<font color='red'>[YouTube]</font>" in body_text
@@ -471,9 +497,15 @@ def test_card_actions_prefer_canonical_url() -> None:
     action_block = next(e for e in card["elements"] if e.get("tag") == "action")
 
     assert action_block["actions"][0]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
-    assert action_block["actions"][1]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
-    assert action_block["actions"][2]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
-    assert action_block["actions"][3]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
+    assert (
+        action_block["actions"][1]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
+    )
+    assert (
+        action_block["actions"][2]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
+    )
+    assert (
+        action_block["actions"][3]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
+    )
 
 
 def test_video_card_omits_summary_button_for_unsupported_platform() -> None:
@@ -522,9 +554,7 @@ def test_video_card_omits_description_even_if_translated() -> None:
         media_type=MediaType.VIDEO,
     )
     card = json.loads(build_card(meta))
-    body_text = next(
-        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
-    )
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
     assert "Useful Video Title" in body_text
     assert "30%" not in body_text
     assert "赞助文案" not in body_text
@@ -538,9 +568,7 @@ def test_card_with_parse_warning() -> None:
         parse_warnings=["instagram 内容受限或需要 cookie, 已先发送卡片"],
     )
     card = json.loads(build_card(meta))
-    body_text = next(
-        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
-    )
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
     assert "需要 cookie" in body_text
 
 
@@ -552,9 +580,7 @@ def test_card_with_translated_title_keeps_original() -> None:
         site_name="TikTok",
     )
     card = json.loads(build_card(meta))
-    body_text = next(
-        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
-    )
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
     assert "**兄弟, 我们快要造出超级反派了**" in body_text
     assert "原标题: Bro we boutta get some super villains" in body_text
 
@@ -569,9 +595,7 @@ def test_card_with_translated_description_keeps_original() -> None:
         platform="instagram",
     )
     card = json.loads(build_card(meta))
-    body_text = next(
-        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
-    )
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
     assert "BMW M1 宽体车" in body_text
     assert "原文: BMW M1 widebody" in body_text
     assert "Post by beccu.studio" not in body_text
@@ -589,9 +613,7 @@ def test_article_description_removes_newlines_and_emoji() -> None:
         media_type=MediaType.ARTICLE,
     )
     card = json.loads(build_card(meta))
-    body_text = next(
-        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
-    )
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
 
     assert "🤌" not in body_text
     assert "🏽" not in body_text
@@ -611,9 +633,7 @@ def test_article_description_without_translation_removes_newlines_and_emoji() ->
         media_type=MediaType.ARTICLE,
     )
     card = json.loads(build_card(meta))
-    body_text = next(
-        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
-    )
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
 
     assert "✌" not in body_text
     assert "🏼" not in body_text
@@ -631,9 +651,7 @@ def test_social_image_card_does_not_show_technical_warning() -> None:
         parse_warnings=[],
     )
     card = json.loads(build_card(meta))
-    body_text = next(
-        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
-    )
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
     assert "未尝试下载视频" not in body_text
     assert "图文内容已发送卡片" not in body_text
 
@@ -648,9 +666,7 @@ def test_other_social_article_card_uses_description_as_primary() -> None:
         platform="tiktok",
     )
     card = json.loads(build_card(meta))
-    body_text = next(
-        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
-    )
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
     assert body_text.startswith("一个摆着三台复古显示器的小桌面布置。")
     assert "原文: A tiny desk setup" in body_text
     assert "TikTok Post" not in body_text
@@ -666,9 +682,7 @@ def test_web_article_card_keeps_title_primary() -> None:
         platform="web",
     )
     card = json.loads(build_card(meta))
-    body_text = next(
-        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
-    )
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
     assert body_text.startswith("**Article Title**")
     assert "一段短文章摘要。" in body_text
 
@@ -683,8 +697,6 @@ def test_instagram_article_card_uses_description_as_primary() -> None:
         media_type=MediaType.ARTICLE,
     )
     card = json.loads(build_card(meta))
-    body_text = next(
-        e["text"]["content"] for e in card["elements"] if e.get("tag") == "div"
-    )
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
     assert body_text.startswith("<font color='grey'>这是 Instagram 图文帖正文。</font>")
     assert "Post by someuser" not in body_text
