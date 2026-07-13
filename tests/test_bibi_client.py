@@ -41,16 +41,16 @@ def _trpc_json(data: dict[str, Any]) -> dict[str, Any]:
 async def test_bibi_client_routes_locale_base_url_to_origin_web(tmp_path) -> None:
     cookie_file = tmp_path / "cookies.txt"
     cookie_file.write_text(
-        "\n".join([
-            "# Netscape HTTP Cookie File",
-            ".aitodo.co\tTRUE\t/\tFALSE\t2147483647\tsession\tabc123",
-            ".bibigpt.co\tTRUE\t/\tFALSE\t2147483647\tsession\twrong",
-        ]),
+        "\n".join(
+            [
+                "# Netscape HTTP Cookie File",
+                ".aitodo.co\tTRUE\t/\tFALSE\t2147483647\tsession\tabc123",
+                ".bibigpt.co\tTRUE\t/\tFALSE\t2147483647\tsession\twrong",
+            ]
+        ),
         encoding="utf-8",
     )
-    route = respx.post(
-        "https://aitodo.co/api/trpc/video.summaryBySetting?batch=1"
-    ).mock(
+    route = respx.post("https://aitodo.co/api/trpc/video.summaryBySetting?batch=1").mock(
         return_value=httpx.Response(
             200,
             json=[
@@ -89,9 +89,7 @@ async def test_bibi_client_routes_locale_base_url_to_origin_web(tmp_path) -> Non
 
 @respx.mock
 async def test_bibi_client_uses_web_summary_by_default(tmp_path) -> None:
-    route = respx.post(
-        "https://aitodo.co/api/trpc/video.summaryBySetting?batch=1"
-    ).mock(
+    route = respx.post("https://aitodo.co/api/trpc/video.summaryBySetting?batch=1").mock(
         return_value=httpx.Response(
             200,
             json=[
@@ -166,9 +164,10 @@ def test_resolve_routes_root_base_url() -> None:
 
 
 def test_source_url_for_log_removes_query_and_fragment() -> None:
-    assert _source_url_for_log(
-        "https://cdn.example.test/video/1?token=secret#fragment"
-    ) == "https://cdn.example.test/video/1"
+    assert (
+        _source_url_for_log("https://cdn.example.test/video/1?token=secret#fragment")
+        == "https://cdn.example.test/video/1"
+    )
 
 
 def test_bibi_api_error_summarizes_html_body() -> None:
@@ -194,8 +193,7 @@ async def test_bibi_client_rejects_missing_transcript_response(tmp_path) -> None
                         "data": {
                             "json": {
                                 "summary": (
-                                    "Please provide the transcript you would like me "
-                                    "to summarize!"
+                                    "Please provide the transcript you would like me to summarize!"
                                 ),
                                 "fromCache": False,
                             }
@@ -276,6 +274,7 @@ async def test_bibi_client_browser_mode_uses_web_endpoint_with_profile(
                         "json": {
                             "summary": "- Browser point",
                             "fromCache": False,
+                            "contentId": "content-123",
                         }
                     }
                 }
@@ -306,9 +305,7 @@ async def test_bibi_client_browser_mode_uses_web_endpoint_with_profile(
 
 @respx.mock
 async def test_bibi_client_passes_model_to_promptconfig(tmp_path) -> None:
-    route = respx.post(
-        "https://aitodo.co/api/trpc/video.summaryBySetting?batch=1"
-    ).mock(
+    route = respx.post("https://aitodo.co/api/trpc/video.summaryBySetting?batch=1").mock(
         return_value=httpx.Response(
             200,
             json=[{"result": {"data": {"json": {"summary": "- Point", "fromCache": False}}}}],
@@ -342,7 +339,19 @@ async def test_bibi_client_browser_passes_model_to_promptconfig(
 
     async def fake_browser_fetch(self, url, body, *, method="POST"):
         captured["body"] = body
-        return [{"result": {"data": {"json": {"summary": "- Point", "fromCache": False}}}}]
+        return [
+            {
+                "result": {
+                    "data": {
+                        "json": {
+                            "summary": "- Point",
+                            "fromCache": False,
+                            "contentId": "content-123",
+                        }
+                    }
+                }
+            }
+        ]
 
     monkeypatch.setattr(BibiClient, "_browser_fetch_json", fake_browser_fetch)
 
@@ -351,6 +360,63 @@ async def test_bibi_client_browser_passes_model_to_promptconfig(
     body = captured["body"]
     assert isinstance(body, dict)
     assert body["0"]["json"]["promptConfig"]["model"] == "deepseek-v4-pro"  # type: ignore[index]
+
+
+async def test_bibi_client_browser_recovers_missing_content_id(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = Settings(
+        bibigpt_base_url="https://aitodo.co/zh",
+        bibigpt_access_mode="browser",
+        cookie_file="",
+        bibigpt_browser_profile_dir=str(tmp_path / "profile"),
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def fake_browser_fetch(self, url, body, *, method="POST"):
+        calls.append(body)
+        payload: dict[str, Any] = {"summary": "- Point", "fromCache": False}
+        if len(calls) > 1:
+            payload["contentId"] = "recovered-456"
+        return [{"result": {"data": {"json": payload}}}]
+
+    monkeypatch.setattr(BibiClient, "_browser_fetch_json", fake_browser_fetch)
+    monkeypatch.setattr("src.bibi_client._CONTENT_ID_RECOVERY_DELAYS", (0.0,))
+
+    result = await BibiClient(settings).summarize("https://youtu.be/abc123")
+
+    assert result.content_id == "recovered-456"
+    assert result.content == "- Point"
+    assert len(calls) == 2
+    assert calls[0]["0"]["json"]["promptConfig"]["isRefresh"] is True
+    assert calls[1]["0"]["json"]["promptConfig"]["isRefresh"] is False
+
+
+async def test_bibi_client_browser_content_id_recovery_exhausts_retries(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = Settings(
+        bibigpt_base_url="https://aitodo.co/zh",
+        bibigpt_access_mode="browser",
+        cookie_file="",
+        bibigpt_browser_profile_dir=str(tmp_path / "profile"),
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def fake_browser_fetch(self, url, body, *, method="POST"):
+        calls.append(body)
+        return [{"result": {"data": {"json": {"summary": "- Point", "fromCache": False}}}}]
+
+    monkeypatch.setattr(BibiClient, "_browser_fetch_json", fake_browser_fetch)
+    monkeypatch.setattr("src.bibi_client._CONTENT_ID_RECOVERY_DELAYS", (0.0, 0.0))
+
+    result = await BibiClient(settings).summarize("https://youtu.be/abc123")
+
+    assert result.content_id == ""
+    assert result.content == "- Point"
+    assert len(calls) == 3
 
 
 async def test_bibi_client_browser_user_probe_reports_missing_login(

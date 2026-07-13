@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -7,7 +8,7 @@ import re
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 )
+_CONTENT_ID_RECOVERY_DELAYS: tuple[float, ...] = (3.0, 8.0)
 _OUTPUT_INSTRUCTIONS = """\
 
 输出要求:
@@ -119,8 +121,41 @@ class BibiClient:
         effective_prompt = _with_output_instructions(base_prompt) if base_prompt else ""
 
         if self._settings.bibigpt_access_mode == "browser":
-            return await self._summarize_browser(video_url, effective_prompt)
+            result = await self._summarize_browser(video_url, effective_prompt)
+            if not result.content_id:
+                result = await self._recover_content_id(result, effective_prompt)
+            return result
         return await self._summarize_web(video_url, effective_prompt)
+
+    async def _recover_content_id(
+        self,
+        result: SummaryResult,
+        prompt: str,
+    ) -> SummaryResult:
+        """补取 contentId：isRefresh=true 首次生成的响应常缺 contentId（记录异步落库），
+        用相同 promptConfig、isRefresh=false 重查已落库记录，不触发重新生成。"""
+        for delay in _CONTENT_ID_RECOVERY_DELAYS:
+            await asyncio.sleep(delay)
+            try:
+                lookup = await self._summarize_browser(
+                    result.video_url,
+                    prompt,
+                    refresh=False,
+                )
+            except Exception as exc:
+                logger.warning("BibiGPT contentId recovery lookup failed: %s", exc)
+                continue
+            if lookup.content_id:
+                logger.info(
+                    "BibiGPT contentId recovered via cache lookup (content_id=%s)",
+                    lookup.content_id,
+                )
+                return replace(result, content_id=lookup.content_id)
+        logger.warning(
+            "BibiGPT contentId recovery exhausted retries for %s",
+            _source_url_for_log(result.video_url),
+        )
+        return result
 
     async def fetch_chapter_summary(
         self,
@@ -223,7 +258,13 @@ class BibiClient:
         raw_data = await self._browser_fetch_json(url, None, method="GET")
         return _extract_optional_trpc_data(raw_data)
 
-    async def _summarize_browser(self, video_url: str, prompt: str) -> SummaryResult:
+    async def _summarize_browser(
+        self,
+        video_url: str,
+        prompt: str,
+        *,
+        refresh: bool = True,
+    ) -> SummaryResult:
         body: dict[str, Any] = {
             "0": {
                 "json": {
@@ -231,7 +272,7 @@ class BibiClient:
                     "promptConfig": _web_prompt_config(
                         prompt,
                         model=self._settings.bibigpt_model,
-                        refresh=True,
+                        refresh=refresh,
                     ),
                 }
             }
