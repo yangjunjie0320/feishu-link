@@ -185,7 +185,7 @@ async def test_ensure_chinese_markdown_summary_rewrites_existing_chinese() -> No
     assert "不要信任输入的语言和排版" in system_prompt
     assert "输出要求:" in user_prompt
     assert "必须用简体中文输出, 非中文内容要翻译成中文。" in user_prompt
-    assert "不要使用 emoji。" in user_prompt
+    assert "严禁在任何地方使用任何 emoji。" in user_prompt
     assert "使用 Markdown，尽量保留原有结构。" in user_prompt
     assert "Markdown 各级标题都改成无序列表+加粗。" in user_prompt
     assert "允许使用多级无序列表，用缩进表达层级。" in user_prompt

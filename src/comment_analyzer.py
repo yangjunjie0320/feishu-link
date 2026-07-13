@@ -676,7 +676,8 @@ class CommentAnalyzer:
                     "role": "system",
                     "content": (
                         "你是社交媒体评论区分析助手。只输出严格 JSON, 不要输出 Markdown。"
-                        "所有字段必须使用简体中文。保持简洁, 不要使用 emoji, 不要编造评论。"
+                        "所有字段必须使用简体中文。保持简洁, 不要编造评论。"
+                        "严禁在任何地方使用任何 emoji。"
                     ),
                 },
                 {

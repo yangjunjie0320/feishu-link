@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 _CJK_RE = re.compile(r"[\u3400-\u9fff]")
 _SUMMARY_REWRITE_PROMPT = """\
 输出要求:
-- 必须用简体中文输出, 非中文内容要翻译成中文。不要使用 emoji。
+- 必须用简体中文输出, 非中文内容要翻译成中文。严禁在任何地方使用任何 emoji。
 - 使用 Markdown，尽量保留原有结构。
 - Markdown 各级标题都改成无序列表+加粗。
 - 允许使用多级无序列表，用缩进表达层级。
@@ -32,7 +32,8 @@ _CHAPTER_SUMMARY_FORMAT_SYSTEM_PROMPT = """\
 {"items":[{"id":"稳定 ID","title":"章节标题","summary":"章节总结"}]}。
 逐条忠实处理输入内容：非中文翻译为简体中文，只修正标点、断句、明显错别字和不自然表达。
 不得进一步总结、删减、合并、拆分、补充事实或改变原意；必须保留每一条输入的 id、顺序和数量。
-章节 title 和所有 summary 必须是非空字符串。不要输出时间戳、Markdown、解释或 JSON 之外的内容。"""
+章节 title 和所有 summary 必须是非空字符串。不要输出时间戳、Markdown、解释或 JSON 之外的内容。
+严禁在任何地方使用任何 emoji。"""
 _CHAPTER_SUMMARY_BATCH_MAX_ITEMS = 80
 _CHAPTER_SUMMARY_BATCH_MAX_CHARACTERS = 6000
 _CHAPTER_SUMMARY_MAX_TOKENS = 8192
@@ -80,7 +81,8 @@ class TitleTranslator:
             system_prompt=(
                 "Translate social media video titles into concise "
                 "Simplified Chinese. "
-                "Return only the translated title. Do not add explanations."
+                "Return only the translated title. Do not add explanations. "
+                "严禁在任何地方使用任何 emoji。"
             ),
             user_prompt=f"Translate this title to Simplified Chinese:\n{title}",
             max_tokens=120,
@@ -92,7 +94,8 @@ class TitleTranslator:
             system_prompt=(
                 "Translate social media captions into natural, concise "
                 "Simplified Chinese. Preserve names, handles, hashtags, and "
-                "meaning. Return only the translation."
+                "meaning. Return only the translation. "
+                "严禁在任何地方使用任何 emoji。"
             ),
             user_prompt=f"Translate this caption to Simplified Chinese:\n{description}",
             max_tokens=220,
@@ -116,7 +119,7 @@ class TitleTranslator:
         system_prompt = (
             "你是视频总结重写助手。不要信任输入的语言和排版。"
             "按用户给定要求把 BibiGPT 原始返回重写为最终内容。"
-            "只返回重写后的正文。"
+            "只返回重写后的正文。严禁在任何地方使用任何 emoji。"
         )
         rewrite_timeout = self._settings.summary_rewrite_timeout
         try:
