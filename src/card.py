@@ -25,7 +25,7 @@ _CHAPTER_SUMMARY_CARD_HARD_LIMIT_BYTES = 30 * 1024
 _FEISHU_RECEIVE_ID_SIZE_BUDGET = 256
 
 
-def _fmt_duration(seconds: int) -> str:
+def fmt_duration(seconds: int) -> str:
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     if h:
@@ -462,7 +462,7 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
     if meta.channel:
         meta_parts.append(meta.channel)
     if meta.duration_seconds is not None:
-        meta_parts.append(_fmt_duration(meta.duration_seconds))
+        meta_parts.append(fmt_duration(meta.duration_seconds))
 
     description_block = _format_description_block(meta)
     if _description_should_be_primary(meta, description_block):

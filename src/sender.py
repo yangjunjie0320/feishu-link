@@ -188,10 +188,7 @@ class CardSender:
             ReplyMessageRequest.builder()
             .message_id(message_id)
             .request_body(
-                ReplyMessageRequestBody.builder()
-                .msg_type("interactive")
-                .content(card_json)
-                .build()
+                ReplyMessageRequestBody.builder().msg_type("interactive").content(card_json).build()
             )
             .build()
         )
@@ -206,12 +203,39 @@ class CardSender:
     async def _send_to_archive(self, card_json: str) -> None:
         if not self._settings.archive_chat_id:
             raise SendError("archive_chat_id not configured for mode B")
+        await self._create_to_chat(card_json, self._settings.archive_chat_id)
+
+    async def send_to_chat(self, card_json: str, chat_id: str) -> bool:
+        """Send an interactive card to an arbitrary chat, with the same retry
+        policy as send(). Used by flows that target a specific chat regardless
+        of mode (e.g. the daily report)."""
+
+        @tenacity.retry(
+            stop=tenacity.stop_after_attempt(self._settings.send_retry_attempts),
+            wait=tenacity.wait_exponential(multiplier=1, min=1, max=9),
+            reraise=True,
+        )
+        async def _attempt() -> None:
+            await self._create_to_chat(card_json, chat_id)
+
+        try:
+            await _attempt()
+        except Exception as e:
+            logger.critical(
+                "card send to chat exhausted all retries: chat_id=%s error=%s",
+                chat_id,
+                e,
+            )
+            return False
+        return True
+
+    async def _create_to_chat(self, card_json: str, chat_id: str) -> None:
         request = (
             CreateMessageRequest.builder()
             .receive_id_type("chat_id")
             .request_body(
                 CreateMessageRequestBody.builder()
-                .receive_id(self._settings.archive_chat_id)
+                .receive_id(chat_id)
                 .msg_type("interactive")
                 .content(card_json)
                 .build()
@@ -224,7 +248,7 @@ class CardSender:
         )
         if not response.success():
             raise SendError(f"create failed: code={response.code} msg={response.msg}")
-        logger.info("card sent to archive: chat_id=%s", self._settings.archive_chat_id)
+        logger.info("card sent to chat: chat_id=%s", chat_id)
 
 
 class VideoSender:
@@ -293,9 +317,7 @@ class VideoSender:
                 return self._upload_raw_sync(path, file_name, duration_ms)
 
             if not response.success():
-                raise SendError(
-                    f"video upload failed: code={response.code} msg={response.msg}"
-                )
+                raise SendError(f"video upload failed: code={response.code} msg={response.msg}")
             file_key = getattr(response.data, "file_key", "")
             if not file_key:
                 raise SendError("video upload failed: response missing file_key")
@@ -382,10 +404,7 @@ class VideoSender:
             ReplyMessageRequest.builder()
             .message_id(message_id)
             .request_body(
-                ReplyMessageRequestBody.builder()
-                .msg_type("media")
-                .content(content)
-                .build()
+                ReplyMessageRequestBody.builder().msg_type("media").content(content).build()
             )
             .build()
         )
@@ -488,10 +507,7 @@ class TextSender:
             ReplyMessageRequest.builder()
             .message_id(message_id)
             .request_body(
-                ReplyMessageRequestBody.builder()
-                .msg_type("text")
-                .content(content)
-                .build()
+                ReplyMessageRequestBody.builder().msg_type("text").content(content).build()
             )
             .build()
         )

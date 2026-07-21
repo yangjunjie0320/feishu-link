@@ -4,23 +4,23 @@ import unicodedata
 from src.bibi_models import ChapterSummarySection
 from src.card import (
     _fmt_count,
-    _fmt_duration,
     _format_source_tag,
     _split_markdown,
     build_card,
     build_chapter_summary_cards,
     build_markdown_card,
     card_message_wire_size,
+    fmt_duration,
 )
 from src.parsers.base import LinkMetadata, MediaType
 
 
 def test_fmt_duration_short() -> None:
-    assert _fmt_duration(90) == "1:30"
+    assert fmt_duration(90) == "1:30"
 
 
 def test_fmt_duration_long() -> None:
-    assert _fmt_duration(3661) == "1:01:01"
+    assert fmt_duration(3661) == "1:01:01"
 
 
 def test_format_source_tag_youtube_is_red() -> None:

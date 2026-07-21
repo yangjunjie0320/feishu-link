@@ -6,7 +6,7 @@ import httpx
 import respx
 
 from src.config import Settings
-from src.sender import TypingReactionSender, VideoSender, build_media_content
+from src.sender import CardSender, TypingReactionSender, VideoSender, build_media_content
 
 
 class _FakeResponse:
@@ -160,3 +160,39 @@ async def test_video_upload_falls_back_to_raw_http_when_sdk_parse_fails(tmp_path
     assert upload_route.calls.last.request.headers["Authorization"] == (
         "Bearer tenant-token"
     )
+
+
+class _FakeMessageService:
+    def __init__(self, fail_times: int = 0) -> None:
+        self.create_requests = []
+        self._fail_times = fail_times
+
+    def create(self, request):
+        self.create_requests.append(request)
+        if len(self.create_requests) <= self._fail_times:
+            return _FakeResponse(success=False)
+        return _FakeResponse()
+
+
+def _card_sender_with(service: _FakeMessageService, **settings_kwargs):
+    client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=service)))
+    return CardSender(Settings(**settings_kwargs), client)
+
+
+async def test_send_to_chat_targets_given_chat() -> None:
+    service = _FakeMessageService()
+    sender = _card_sender_with(service)
+
+    assert await sender.send_to_chat('{"card": 1}', "oc_target") is True
+    assert len(service.create_requests) == 1
+    body = service.create_requests[0].request_body
+    assert body.receive_id == "oc_target"
+    assert body.msg_type == "interactive"
+
+
+async def test_send_to_chat_returns_false_after_retries_exhausted() -> None:
+    service = _FakeMessageService(fail_times=10)
+    sender = _card_sender_with(service, send_retry_attempts=2)
+
+    assert await sender.send_to_chat('{"card": 1}', "oc_target") is False
+    assert len(service.create_requests) == 2
