@@ -216,6 +216,110 @@ async def test_download_video_ensures_fresh_cookies_before_download(
         video.cleanup()
 
 
+@pytest.mark.asyncio
+async def test_download_video_refreshes_and_retries_on_cookie_invalidation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    attempts: list[dict[str, object]] = []
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self._options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def download(self, urls):
+            attempts.append(self._options)
+            if len(attempts) == 1:
+                # The invalidation notice arrives via logger.warning, not the
+                # raised exception, mirroring yt-dlp's real behavior.
+                self._options["logger"].warning(
+                    "The provided YouTube account cookies are no longer valid"
+                )
+                raise RuntimeError("Unable to download video data")
+            output = Path(self._options["outtmpl"]).parent / "video.mp4"
+            output.write_bytes(b"fake mp4")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "yt_dlp",
+        SimpleNamespace(YoutubeDL=FakeYoutubeDL),
+    )
+    monkeypatch.setattr("src.ytdlp_options.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        media_downloader,
+        "_make_feishu_mp4",
+        lambda path, temp_dir, duration_seconds, max_file_mb: path,
+    )
+    monkeypatch.setattr(media_downloader, "_probe_duration_ms", lambda path: 1234)
+
+    refreshed: list[str] = []
+
+    async def fake_force_refresh(platform, settings):
+        refreshed.append(platform)
+        return True
+
+    monkeypatch.setattr(media_downloader, "force_refresh", fake_force_refresh)
+
+    meta = _video_meta(source_url="https://www.youtube.com/watch?v=abc")
+    settings = Settings(cookie_file="", video_temp_dir=str(tmp_path))
+
+    video = await media_downloader.download_video(meta, settings)
+    try:
+        assert refreshed == ["youtube"]
+        assert len(attempts) == 2
+        assert attempts[0]["logger"] is not attempts[1]["logger"]
+    finally:
+        video.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_download_video_keeps_failure_when_refresh_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    attempts: list[dict[str, object]] = []
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self._options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def download(self, urls):
+            attempts.append(self._options)
+            raise RuntimeError("Sign in to confirm you're not a bot")
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "yt_dlp",
+        SimpleNamespace(YoutubeDL=FakeYoutubeDL),
+    )
+    monkeypatch.setattr("src.ytdlp_options.shutil.which", lambda name: None)
+
+    async def fake_force_refresh(platform, settings):
+        return False
+
+    monkeypatch.setattr(media_downloader, "force_refresh", fake_force_refresh)
+
+    meta = _video_meta(source_url="https://www.youtube.com/watch?v=abc")
+    settings = Settings(cookie_file="", video_temp_dir=str(tmp_path))
+
+    with pytest.raises(media_downloader.VideoDownloadError, match="not a bot"):
+        await media_downloader.download_video(meta, settings)
+
+    assert len(attempts) == 1
+
+
 def test_file_name_strips_symbol_characters() -> None:
     source = "video-" + chr(0x1F600) + ".mp4"
     assert _file_name(Path(source)) == "video-.mp4"

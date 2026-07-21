@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     cookie_refresh_browser_timeout: float = 60.0
     cookie_refresh_stale_before_seconds: int = 86400
     cookie_refresh_min_interval_seconds: int = 600
+    # Auxiliary pre-emptive trigger: refresh when the cookie file is older than
+    # this even if its nominal expiry is far off (0 disables).
+    cookie_refresh_max_age_seconds: int = 43200
+    # Cooldown for the reactive (failure-driven) refresh path.
+    cookie_refresh_reactive_cooldown_seconds: int = 60
 
     youtube_api_key: str = ""
     link_allowlist: list[str] = []

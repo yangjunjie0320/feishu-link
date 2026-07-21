@@ -113,6 +113,8 @@ cookie_refresh_browser_channel: ""            # e.g. "chrome" to launch real Chr
 cookie_refresh_browser_timeout: 60.0
 cookie_refresh_stale_before_seconds: 86400   # refresh if expiring within 1 day
 cookie_refresh_min_interval_seconds: 600     # in-process throttle per platform
+cookie_refresh_max_age_seconds: 43200        # also refresh if cookie file older than 12h (0 disables)
+cookie_refresh_reactive_cooldown_seconds: 60 # cooldown for failure-driven refresh
 
 # Optional title translation. Only non-Chinese titles are translated.
 title_translation_enabled: false

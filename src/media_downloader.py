@@ -11,22 +11,22 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .cookie_refresh import ensure_fresh_cookies
+from .cookie_refresh import ensure_fresh_cookies, force_refresh
 from .cookie_utils import temporary_cookie_file
 from .parsers.base import LinkMetadata, MediaType
-from .ytdlp_options import apply_ytdlp_runtime
+from .ytdlp_options import (
+    YtDlpSignalLogger,
+    apply_ytdlp_runtime,
+    looks_like_cookie_invalidation,
+)
 
 logger = logging.getLogger(__name__)
 
 _YTDLP_VIDEO_FORMAT = (
-    "worst[ext=mp4]/"
-    "worstvideo[ext=mp4]+worstaudio[ext=m4a]/"
-    "worstvideo+worstaudio/"
-    "worst"
+    "worst[ext=mp4]/worstvideo[ext=mp4]+worstaudio[ext=m4a]/worstvideo+worstaudio/worst"
 )
 _TIKTOK_YTDLP_VIDEO_FORMAT = (
-    "worst[ext=mp4][format_id!=download][format_id!=download_addr]/"
-    f"{_YTDLP_VIDEO_FORMAT}"
+    f"worst[ext=mp4][format_id!=download][format_id!=download_addr]/{_YTDLP_VIDEO_FORMAT}"
 )
 
 
@@ -107,7 +107,7 @@ async def download_video(
     temp_root.mkdir(parents=True, exist_ok=True)
     temp_dir = Path(tempfile.mkdtemp(prefix="video-", dir=temp_root))
 
-    def _download() -> Path:
+    def _download(signal_logger: YtDlpSignalLogger) -> Path:
         try:
             import yt_dlp
         except ModuleNotFoundError as e:
@@ -122,7 +122,7 @@ async def download_video(
             "no_warnings": True,
             "noprogress": True,
             "socket_timeout": 30,
-            "logger": _YtDlpLogger(),
+            "logger": signal_logger,
         }
         apply_ytdlp_runtime(options, meta.platform)
 
@@ -151,7 +151,18 @@ async def download_video(
 
     loop = asyncio.get_running_loop()
     try:
-        path = await loop.run_in_executor(None, _download)
+        first_logger = YtDlpSignalLogger(logger)
+        try:
+            path = await loop.run_in_executor(None, _download, first_logger)
+        except VideoDownloadError as e:
+            # Same reactive-refresh contract as the yt-dlp comment fetch: the
+            # invalidation notice arrives via logger.warning, not the raised
+            # exception, so check both. Refresh from the live browser and retry
+            # once; if refresh is unavailable, keep the original failure.
+            invalid = first_logger.cookie_invalid or looks_like_cookie_invalidation(str(e))
+            if not invalid or not await force_refresh(meta.platform, settings):
+                raise
+            path = await loop.run_in_executor(None, _download, YtDlpSignalLogger(logger))
         path = await loop.run_in_executor(
             None,
             lambda: _make_feishu_mp4(
@@ -223,16 +234,18 @@ def _make_feishu_mp4(
     ]
     if target_bitrates:
         video_kbps, audio_kbps = target_bitrates
-        cmd.extend([
-            "-b:v",
-            f"{video_kbps}k",
-            "-maxrate",
-            f"{max(video_kbps, int(video_kbps * 1.2))}k",
-            "-bufsize",
-            f"{max(160, video_kbps * 2)}k",
-            "-b:a",
-            f"{audio_kbps}k",
-        ])
+        cmd.extend(
+            [
+                "-b:v",
+                f"{video_kbps}k",
+                "-maxrate",
+                f"{max(video_kbps, int(video_kbps * 1.2))}k",
+                "-bufsize",
+                f"{max(160, video_kbps * 2)}k",
+                "-b:a",
+                f"{audio_kbps}k",
+            ]
+        )
     else:
         cmd.extend(["-crf", "23", "-b:a", "128k"])
     cmd.append(str(output))
@@ -285,17 +298,3 @@ def _probe_duration_ms(path: Path) -> int:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as e:
         raise VideoDownloadError(f"ffprobe duration failed: {e}") from e
     return max(1, round(seconds * 1000))
-
-
-class _YtDlpLogger:
-    def debug(self, msg: str) -> None:
-        logger.debug("yt-dlp: %s", msg)
-
-    def info(self, msg: str) -> None:
-        logger.info("yt-dlp: %s", msg)
-
-    def warning(self, msg: str) -> None:
-        logger.warning("yt-dlp: %s", msg)
-
-    def error(self, msg: str) -> None:
-        logger.error("yt-dlp: %s", msg)

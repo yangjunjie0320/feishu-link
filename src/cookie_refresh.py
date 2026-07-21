@@ -55,6 +55,10 @@ _PROFILES: dict[str, RefreshProfile] = {
 # browser repeatedly. Keyed by platform, monotonic timestamps.
 _last_refresh: dict[str, float] = {}
 
+# Separate throttle for the reactive (failure-driven) refresh path so a burst of
+# failed requests does not stampede the (seconds-costly) Chrome extraction.
+_last_force: dict[str, float] = {}
+
 # How long --browser-login waits for the human to finish logging in.
 _LOGIN_WAIT_SECONDS = 300
 _LOGIN_POLL_SECONDS = 2
@@ -90,8 +94,20 @@ def _resolve_target(platform: str, settings: Settings) -> str | None:
     return str(Path("cookies") / f"{platform}.txt")
 
 
-def cookie_is_stale(cookie_file: str, platform: str, stale_before_seconds: int) -> bool:
-    """True if the platform's required cookies are missing or near expiry."""
+def cookie_is_stale(
+    cookie_file: str,
+    platform: str,
+    stale_before_seconds: int,
+    max_age_seconds: int | None = None,
+) -> bool:
+    """True if the platform's required cookies are missing or near expiry.
+
+    ``max_age_seconds`` is an auxiliary trigger: even when the nominal expiry is
+    far off (YouTube auth cookies nominally last ~2 years yet get rotated
+    server-side well before that), a cookie file older than this many seconds is
+    treated as stale so the pre-emptive refresh has a chance to swap in a fresh
+    session before YouTube rotates it. ``None``/``0`` disables this trigger.
+    """
     profile = _PROFILES.get(platform)
     if profile is None:
         return False
@@ -99,6 +115,14 @@ def cookie_is_stale(cookie_file: str, platform: str, stale_before_seconds: int) 
     path = Path(cookie_file)
     if not path.exists():
         return True
+
+    if max_age_seconds:
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            return True
+        if age >= max_age_seconds:
+            return True
 
     jar = MozillaCookieJar(str(path))
     try:
@@ -297,7 +321,12 @@ async def ensure_fresh_cookies(platform: str, settings: Settings) -> None:
     target = _resolve_target(platform, settings)
     if not target:
         return
-    if not cookie_is_stale(target, platform, settings.cookie_refresh_stale_before_seconds):
+    if not cookie_is_stale(
+        target,
+        platform,
+        settings.cookie_refresh_stale_before_seconds,
+        settings.cookie_refresh_max_age_seconds,
+    ):
         return
 
     now = time.monotonic()
@@ -307,6 +336,33 @@ async def ensure_fresh_cookies(platform: str, settings: Settings) -> None:
     _last_refresh[platform] = now
 
     await refresh_cookies(platform, settings, target=target)
+
+
+async def force_refresh(platform: str, settings: Settings) -> bool:
+    """Reactively re-export cookies after a runtime "cookies invalid" signal.
+
+    Unlike ``ensure_fresh_cookies`` this ignores nominal-expiry staleness (the
+    whole point is that the cookies look valid by expiry yet were rotated). A
+    short per-platform cooldown still guards against a burst of failed requests
+    stampeding the Chrome extraction. Returns True only if fresh cookies were
+    written; failures are logged and swallowed by ``refresh_cookies``.
+    """
+    if not settings.cookie_refresh_enabled:
+        return False
+    if platform not in settings.cookie_refresh_platforms or platform not in _PROFILES:
+        return False
+
+    target = _resolve_target(platform, settings)
+    if not target:
+        return False
+
+    now = time.monotonic()
+    last = _last_force.get(platform)
+    if last is not None and now - last < settings.cookie_refresh_reactive_cooldown_seconds:
+        return False
+    _last_force[platform] = now
+
+    return await refresh_cookies(platform, settings, target=target)
 
 
 def _is_closed_error(exc: Exception) -> bool:

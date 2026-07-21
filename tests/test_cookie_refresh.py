@@ -1,3 +1,4 @@
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import ClassVar
@@ -10,6 +11,7 @@ from src.cookie_refresh import (
     browser_login,
     cookie_is_stale,
     ensure_fresh_cookies,
+    force_refresh,
     refresh_cookies,
 )
 from src.cookie_utils import get_cookie_header
@@ -109,6 +111,26 @@ def test_cookie_is_stale_true_when_youtube_anchor_missing(tmp_path) -> None:
     )
 
     assert cookie_is_stale(str(target), "youtube", 86400) is True
+
+
+def test_cookie_is_stale_when_file_older_than_max_age(tmp_path) -> None:
+    # YouTube rotates the session server-side long before the ~2-year nominal
+    # expiry, so file age must be able to trigger a refresh on its own.
+    target = tmp_path / "youtube.txt"
+    far_future = time.time() + 30 * 86400
+    cookie_refresh.write_netscape(
+        [
+            _playwright_cookie("SAPISID", "fresh", far_future, domain=".youtube.com"),
+            _playwright_cookie("__Secure-3PSID", "fresh", far_future, domain=".youtube.com"),
+        ],
+        str(target),
+    )
+    old = time.time() - 13 * 3600
+    os.utime(target, (old, old))
+
+    assert cookie_is_stale(str(target), "youtube", 86400) is False
+    assert cookie_is_stale(str(target), "youtube", 86400, max_age_seconds=0) is False
+    assert cookie_is_stale(str(target), "youtube", 86400, max_age_seconds=43200) is True
 
 
 def test_write_netscape_roundtrips_through_reader(tmp_path) -> None:
@@ -280,6 +302,89 @@ async def test_ensure_fresh_cookies_refreshes_when_stale(monkeypatch, tmp_path) 
 
     assert called_with["platform"] == "bilibili"
     assert called_with["target"] == str(target)
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_ignores_nominal_expiry(monkeypatch, tmp_path) -> None:
+    cookie_refresh._last_force.clear()
+    target = tmp_path / "youtube.txt"
+    far_future = time.time() + 30 * 86400
+    cookie_refresh.write_netscape(
+        [
+            _playwright_cookie("SAPISID", "rotated", far_future, domain=".youtube.com"),
+            _playwright_cookie("__Secure-3PSID", "rotated", far_future, domain=".youtube.com"),
+        ],
+        str(target),
+    )
+    calls: list[str] = []
+
+    async def fake_refresh(platform, settings, *, target=None):
+        calls.append(platform)
+        return True
+
+    monkeypatch.setattr(cookie_refresh, "refresh_cookies", fake_refresh)
+
+    settings = Settings(
+        cookie_refresh_enabled=True,
+        cookie_refresh_platforms=["youtube"],
+        platform_cookie_files={"youtube": str(target)},
+    )
+
+    # Nominally fresh by expiry, yet the reactive path must still refresh.
+    assert await force_refresh("youtube", settings) is True
+    assert calls == ["youtube"]
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_throttled_by_reactive_cooldown(monkeypatch, tmp_path) -> None:
+    cookie_refresh._last_force.clear()
+    calls: list[str] = []
+
+    async def fake_refresh(platform, settings, *, target=None):
+        calls.append(platform)
+        return True
+
+    monkeypatch.setattr(cookie_refresh, "refresh_cookies", fake_refresh)
+
+    settings = Settings(
+        cookie_refresh_enabled=True,
+        cookie_refresh_platforms=["youtube"],
+        cookie_refresh_reactive_cooldown_seconds=60,
+        platform_cookie_files={"youtube": str(tmp_path / "youtube.txt")},
+    )
+
+    assert await force_refresh("youtube", settings) is True
+    assert await force_refresh("youtube", settings) is False
+    assert calls == ["youtube"]
+
+
+@pytest.mark.asyncio
+async def test_force_refresh_noop_when_disabled_or_unlisted(monkeypatch, tmp_path) -> None:
+    cookie_refresh._last_force.clear()
+    called = False
+
+    async def fake_refresh(*args, **kwargs):
+        nonlocal called
+        called = True
+        return True
+
+    monkeypatch.setattr(cookie_refresh, "refresh_cookies", fake_refresh)
+    cookie_files = {"youtube": str(tmp_path / "youtube.txt")}
+
+    disabled = Settings(
+        cookie_refresh_enabled=False,
+        cookie_refresh_platforms=["youtube"],
+        platform_cookie_files=cookie_files,
+    )
+    unlisted = Settings(
+        cookie_refresh_enabled=True,
+        cookie_refresh_platforms=["bilibili"],
+        platform_cookie_files=cookie_files,
+    )
+
+    assert await force_refresh("youtube", disabled) is False
+    assert await force_refresh("youtube", unlisted) is False
+    assert called is False
 
 
 @pytest.mark.asyncio

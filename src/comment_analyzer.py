@@ -18,12 +18,18 @@ from typing import Any
 import httpx
 
 from .config import Settings
+from .cookie_refresh import force_refresh
 from .cookie_utils import cookie_value, get_cookie_header, temporary_cookie_file
 from .parsers.instagram_media_info import _shortcode_from_url, _shortcode_to_media_id
 from .parsers.og_meta import _USER_AGENT, _request_headers
 from .parsers.x_graphql import tweet_id_from_url, x_api_headers, x_graphql_endpoint
 from .platforms import detect_platform
-from .ytdlp_options import apply_ytdlp_runtime
+from .ytdlp_options import (
+    YtDlpSignalLogger,
+    apply_ytdlp_runtime,
+    looks_like_cookie_invalidation,
+    looks_like_rate_limit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -592,7 +598,7 @@ class CommentAnalyzer:
         platform: str,
         max_comments: int,
     ) -> FetchedComments:
-        def _extract() -> FetchedComments:
+        def _extract(signal_logger: YtDlpSignalLogger) -> FetchedComments:
             try:
                 import yt_dlp
             except ModuleNotFoundError as e:
@@ -608,7 +614,7 @@ class CommentAnalyzer:
                 "socket_timeout": 30,
                 "extractor_retries": 2,
                 "source_address": "0.0.0.0",
-                "logger": _YtDlpCommentLogger(),
+                "logger": signal_logger,
             }
             # Cap total comments and skip reply threads so pagination terminates in
             # bounded time; the wall-clock timeout in analyze() is the real guard,
@@ -659,7 +665,29 @@ class CommentAnalyzer:
             )
 
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._comment_executor, _extract)
+
+        first_logger = YtDlpSignalLogger(logger, prefix="yt-dlp comments: ")
+        try:
+            return await loop.run_in_executor(self._comment_executor, _extract, first_logger)
+        except CommentAnalysisError as e:
+            # YouTube rotates session cookies server-side; the only reliable
+            # "cookies are dead" signal is what yt-dlp reports at runtime. The
+            # invalidation notice arrives via logger.warning, not the exception,
+            # so check both. Refresh from the live browser and retry once.
+            invalid = first_logger.cookie_invalid or looks_like_cookie_invalidation(str(e))
+            if not invalid:
+                raise
+            if not await force_refresh(platform, self._settings):
+                if first_logger.rate_limited or looks_like_rate_limit(str(e)):
+                    raise CommentAnalysisError("YouTube 暂时限流，请稍后再试。") from e
+                raise
+            retry_logger = YtDlpSignalLogger(logger, prefix="yt-dlp comments: ")
+            try:
+                return await loop.run_in_executor(self._comment_executor, _extract, retry_logger)
+            except CommentAnalysisError as retry_error:
+                if retry_logger.rate_limited or looks_like_rate_limit(str(retry_error)):
+                    raise CommentAnalysisError("YouTube 暂时限流，请稍后再试。") from retry_error
+                raise
 
     def _build_comment_llm_payload(
         self,
@@ -1270,17 +1298,3 @@ def _as_optional_int(value: object) -> int | None:
         return max(0, int(float(str(value).replace(",", ""))))
     except (TypeError, ValueError):
         return None
-
-
-class _YtDlpCommentLogger:
-    def debug(self, msg: str) -> None:
-        logger.debug("yt-dlp comments: %s", msg)
-
-    def info(self, msg: str) -> None:
-        logger.info("yt-dlp comments: %s", msg)
-
-    def warning(self, msg: str) -> None:
-        logger.warning("yt-dlp comments: %s", msg)
-
-    def error(self, msg: str) -> None:
-        logger.error("yt-dlp comments: %s", msg)
