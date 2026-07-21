@@ -61,6 +61,17 @@ class Settings(BaseSettings):
     # Cooldown for the reactive (failure-driven) refresh path.
     cookie_refresh_reactive_cooldown_seconds: int = 60
 
+    # Bitable archive: append one row per successfully sent link card.
+    bitable_enabled: bool = False
+    bitable_app_token: str = ""
+    bitable_table_id: str = ""
+
+    # Daily report: digest card of the day's archived links.
+    report_enabled: bool = False
+    report_time: str = "22:00"
+    report_timezone: str = "Asia/Shanghai"
+    report_chat_id: str = ""  # empty falls back to archive_chat_id
+
     youtube_api_key: str = ""
     link_allowlist: list[str] = []
     link_blacklist: list[str] = []
@@ -113,6 +124,14 @@ class Settings(BaseSettings):
             return [s.strip() for s in v.split(",") if s.strip()]
         return v  # type: ignore[return-value]
 
+    @field_validator("report_time")
+    @classmethod
+    def _parse_report_time(cls, v: Any) -> str:
+        value = str(v).strip()
+        if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", value):
+            raise ValueError("report_time must be HH:MM (24-hour)")
+        return value
+
     @field_validator("bibigpt_access_mode")
     @classmethod
     def _parse_bibigpt_access_mode(cls, v: Any) -> str:
@@ -144,6 +163,9 @@ class Settings(BaseSettings):
 
     def is_blacklisted(self, url: str) -> bool:
         return any(p.search(url) for p in self._blacklist_patterns)
+
+    def effective_report_chat_id(self) -> str:
+        return self.report_chat_id or self.archive_chat_id
 
     def cookie_file_for_platform(self, platform: str) -> str:
         normalized = platform.strip().lower()

@@ -11,6 +11,20 @@ mode: A
 # Required only for mode B: the chat_id of your archive channel (oc_xxx)
 archive_chat_id: ""
 
+# Bitable archive: append one row per successfully sent link card.
+# Create the base/table once with `python main.py --init-bitable`, then fill in
+# the printed tokens. Requires app scopes: bitable:app, drive:drive (bootstrap
+# sharing only), im:chat:readonly (resolving sender/chat names).
+bitable_enabled: false
+bitable_app_token: ""
+bitable_table_id: ""
+
+# Daily report: one digest card of the day's archived links, sent at report_time.
+report_enabled: false
+report_time: "22:00"
+report_timezone: "Asia/Shanghai"
+report_chat_id: ""   # empty falls back to archive_chat_id
+
 # Optional: YouTube Data API v3 key (for duration + channel info)
 # Without this, falls back to OG scraping (no duration).
 youtube_api_key: ""

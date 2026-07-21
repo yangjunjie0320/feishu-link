@@ -88,3 +88,30 @@ def test_bibigpt_defaults() -> None:
 def test_deepseek_model_defaults_to_v4_flash_and_allows_override() -> None:
     assert Settings().deepseek_model == "deepseek-v4-flash"
     assert Settings(deepseek_model="deepseek-v4-pro").deepseek_model == "deepseek-v4-pro"
+
+
+def test_bitable_and_report_defaults() -> None:
+    settings = Settings()
+
+    assert settings.bitable_enabled is False
+    assert settings.bitable_app_token == ""
+    assert settings.bitable_table_id == ""
+    assert settings.report_enabled is False
+    assert settings.report_time == "22:00"
+    assert settings.report_timezone == "Asia/Shanghai"
+    assert settings.report_chat_id == ""
+
+
+def test_report_time_rejects_invalid_format() -> None:
+    with pytest.raises(ValidationError, match="report_time"):
+        Settings(report_time="9:60")
+    with pytest.raises(ValidationError, match="report_time"):
+        Settings(report_time="2200")
+
+
+def test_effective_report_chat_id_falls_back_to_archive() -> None:
+    assert Settings(archive_chat_id="oc_a").effective_report_chat_id() == "oc_a"
+    assert (
+        Settings(archive_chat_id="oc_a", report_chat_id="oc_r").effective_report_chat_id()
+        == "oc_r"
+    )
