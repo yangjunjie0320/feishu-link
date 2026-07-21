@@ -8,9 +8,12 @@ import sys
 import lark_oapi as lark
 
 from src import log
+from src.archive_store import BitableArchive, ChatDirectory
 from src.config import Settings
+from src.daily_report import DailyReporter
 from src.listener import LarkEventListener, ListenerEvent
 from src.pipeline import Pipeline
+from src.sender import CardSender
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +36,29 @@ async def _run(settings: Settings) -> None:
     )
 
     listener = LarkEventListener(settings)
-    pipeline = Pipeline(settings, lark_client)
+
+    tasks: set[asyncio.Task[None]] = set()
+
+    archive = None
+    if settings.bitable_enabled:
+        archive = BitableArchive(settings, lark_client, ChatDirectory(lark_client))
+        consumer = asyncio.create_task(archive.run())
+        tasks.add(consumer)
+        consumer.add_done_callback(tasks.discard)
+
+    pipeline = Pipeline(settings, lark_client, archive=archive)
+
+    if settings.report_enabled:
+        if archive is None:
+            raise RuntimeError("report_enabled requires bitable_enabled")
+        reporter = DailyReporter(settings, archive, CardSender(settings, lark_client))
+        report_task = asyncio.create_task(reporter.run())
+        tasks.add(report_task)
+        report_task.add_done_callback(tasks.discard)
 
     logger.info("feishu-link started (mode=%s)", settings.mode.value)
     # Each event runs as its own task so a slow handler (comment analysis,
     # summary, download) never head-of-line blocks other messages.
-    tasks: set[asyncio.Task[None]] = set()
     async for event in listener.listen():
         task = asyncio.create_task(_handle_safely(pipeline, event))
         tasks.add(task)

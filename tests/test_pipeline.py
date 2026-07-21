@@ -12,7 +12,8 @@ from src.bibi_models import (
 )
 from src.comment_analyzer import CommentAnalysisError
 from src.config import Settings
-from src.listener import CardActionEvent
+from src.listener import CardActionEvent, MessageEvent
+from src.parsers.base import LinkMetadata
 from src.pipeline import (
     Pipeline,
     _comment_analysis_failure_message,
@@ -357,3 +358,69 @@ async def test_pipeline_silently_ignores_unsupported_platform_url() -> None:
 
     dispatcher_parse.assert_not_called()
     sender_send.assert_not_called()
+
+
+def _link_message_event() -> MessageEvent:
+    return MessageEvent(
+        message_id="msg_arch",
+        chat_id="oc_chat",
+        sender_id="ou_sender",
+        chat_type="group",
+        timestamp_utc=0,
+        message_type="text",
+        content='{"text":"https://youtu.be/abc123"}',
+        mentions=[],
+    )
+
+
+def _prepare_card_pipeline(archive) -> Pipeline:
+    pipeline = Pipeline(Settings(), MagicMock(), archive=archive)
+    pipeline._typing_sender.hold = MagicMock(return_value=_NoopHold())  # type: ignore[method-assign]
+    meta = LinkMetadata(
+        source_url="https://youtu.be/abc123",
+        title="Original title",
+        translated_title="翻译标题",
+        canonical_url="https://www.youtube.com/watch?v=abc123",
+        platform="youtube",
+        channel="Some Channel",
+        duration_seconds=90,
+    )
+    pipeline._dispatcher.parse = AsyncMock(return_value=meta)  # type: ignore[method-assign]
+    pipeline._translator.translate_metadata = AsyncMock()  # type: ignore[method-assign]
+    pipeline._sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    pipeline._try_send_video = AsyncMock()  # type: ignore[method-assign]
+    return pipeline
+
+
+async def test_process_url_enqueues_archive_entry_after_card_sent() -> None:
+    archive = MagicMock()
+    pipeline = _prepare_card_pipeline(archive)
+
+    await pipeline._process_url("https://youtu.be/abc123", _link_message_event(), False, False)
+
+    archive.enqueue.assert_called_once()
+    entry = archive.enqueue.call_args.args[0]
+    assert entry.title == "翻译标题"
+    assert entry.url == "https://www.youtube.com/watch?v=abc123"
+    assert entry.platform == "youtube"
+    assert entry.sender_open_id == "ou_sender"
+    assert entry.chat_id == "oc_chat"
+    assert entry.chat_type == "group"
+
+
+async def test_process_url_does_not_enqueue_when_card_send_fails() -> None:
+    archive = MagicMock()
+    pipeline = _prepare_card_pipeline(archive)
+    pipeline._sender.send = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    await pipeline._process_url("https://youtu.be/abc123", _link_message_event(), False, False)
+
+    archive.enqueue.assert_not_called()
+
+
+async def test_process_url_without_archive_still_works() -> None:
+    pipeline = _prepare_card_pipeline(None)
+
+    await pipeline._process_url("https://youtu.be/abc123", _link_message_event(), False, False)
+
+    pipeline._sender.send.assert_awaited_once()

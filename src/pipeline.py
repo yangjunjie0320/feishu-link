@@ -8,6 +8,7 @@ from collections import OrderedDict
 import httpx
 import lark_oapi as lark
 
+from .archive_store import ArchiveEntry, BitableArchive
 from .bibi_client import (
     AuthenticationError,
     BibiAPIError,
@@ -40,8 +41,14 @@ _CHAPTER_SUMMARY_SEND_INTERVAL_SECONDS = 0.25
 
 
 class Pipeline:
-    def __init__(self, settings: Settings, lark_client: lark.Client) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        lark_client: lark.Client,
+        archive: BitableArchive | None = None,
+    ) -> None:
         self._settings = settings
+        self._archive = archive
         self._http = httpx.AsyncClient(timeout=settings.request_timeout)
         self._dispatcher = Dispatcher(settings, self._http)
         self._translator = TitleTranslator(settings, self._http)
@@ -209,6 +216,20 @@ class Pipeline:
                 meta.title[:50] if meta.title else "",
                 event.message_id,
             )
+
+            if self._archive is not None:
+                self._archive.enqueue(
+                    ArchiveEntry(
+                        title=meta.translated_title or meta.title,
+                        url=meta.canonical_url or meta.source_url,
+                        platform=meta.platform,
+                        channel=meta.channel or "",
+                        duration_seconds=meta.duration_seconds,
+                        sender_open_id=event.sender_id,
+                        chat_id=event.chat_id,
+                        chat_type=event.chat_type,
+                    )
+                )
 
         domain = ""
         url_lower = url.lower()
@@ -411,8 +432,7 @@ class Pipeline:
             chapter_result = await self._bibi_client.fetch_chapter_summary(result)
         except Exception as e:
             logger.warning(
-                "chapter summary lookup failed unexpectedly: content_id=%s "
-                "message_id=%s error=%s",
+                "chapter summary lookup failed unexpectedly: content_id=%s message_id=%s error=%s",
                 result.content_id,
                 event.message_id,
                 e,
@@ -444,12 +464,10 @@ class Pipeline:
             return
 
         try:
-            introduction, formatted_sections = (
-                await self._translator.format_chapter_summary(
-                    chapter_result.introduction,
-                    sections,
-                    content_id=result.content_id,
-                )
+            introduction, formatted_sections = await self._translator.format_chapter_summary(
+                chapter_result.introduction,
+                sections,
+                content_id=result.content_id,
             )
         except Exception as e:
             logger.warning(
@@ -483,8 +501,7 @@ class Pipeline:
 
         total = len(cards)
         logger.info(
-            "chapter summary cards ready: content_id=%s sections=%d cards=%d "
-            "message_id=%s",
+            "chapter summary cards ready: content_id=%s sections=%d cards=%d message_id=%s",
             result.content_id,
             len(formatted_sections),
             total,
@@ -506,15 +523,13 @@ class Pipeline:
                     event.message_id,
                 )
                 await self._text_sender.send(
-                    "BibiGPT 字幕总结发送不完整: "
-                    f"已发送 {part_index - 1}/{total} 段, 可重试。",
+                    f"BibiGPT 字幕总结发送不完整: 已发送 {part_index - 1}/{total} 段, 可重试。",
                     event.chat_id,
                     event.message_id,
                 )
                 return
             logger.info(
-                "chapter summary card sent: content_id=%s part=%d/%d "
-                "wire_bytes=%d message_id=%s",
+                "chapter summary card sent: content_id=%s part=%d/%d wire_bytes=%d message_id=%s",
                 result.content_id,
                 part_index,
                 total,
