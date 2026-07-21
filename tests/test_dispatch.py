@@ -199,3 +199,49 @@ def test_normalize_x_post_drops_placeholder_page() -> None:
     assert meta.title == "X Post"
     assert meta.description == ""
     assert meta.parse_warnings == ["X 内容受限或需要 cookie, 无法获取正文, 已先发送卡片"]
+
+
+async def test_youtube_merges_channel_from_ytdlp_when_api_lacks_it() -> None:
+    async with httpx.AsyncClient() as client:
+        dispatcher = Dispatcher(Settings(), client)
+        url = "https://youtu.be/abc123def45"
+        api_meta = LinkMetadata(
+            source_url=url,
+            title="Some video",
+            platform="youtube",
+            channel=None,
+            duration_seconds=None,
+        )
+        ytdlp_meta = LinkMetadata(
+            source_url=url,
+            title="Some video",
+            platform="youtube",
+            channel="Uploader Name",
+            duration_seconds=120,
+            media_type=MediaType.VIDEO,
+        )
+        dispatcher._youtube = _StaticParser(api_meta)
+        dispatcher._ytdlp = _StaticParser(ytdlp_meta)
+
+        meta = await dispatcher.parse("https://www.youtube.com/watch?v=abc123def45")
+
+    assert meta.channel == "Uploader Name"
+    assert meta.duration_seconds == 120
+
+
+async def test_youtube_keeps_api_channel_over_ytdlp() -> None:
+    async with httpx.AsyncClient() as client:
+        dispatcher = Dispatcher(Settings(), client)
+        url = "https://youtu.be/abc123def45"
+        api_meta = LinkMetadata(
+            source_url=url, title="Some video", platform="youtube", channel="API Channel"
+        )
+        ytdlp_meta = LinkMetadata(
+            source_url=url, title="Some video", platform="youtube", channel="Uploader Name"
+        )
+        dispatcher._youtube = _StaticParser(api_meta)
+        dispatcher._ytdlp = _StaticParser(ytdlp_meta)
+
+        meta = await dispatcher.parse("https://www.youtube.com/watch?v=abc123def45")
+
+    assert meta.channel == "API Channel"

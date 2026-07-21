@@ -117,6 +117,8 @@ class Dispatcher:
             meta.canonical_url = media_meta.canonical_url
         if meta.duration_seconds is None:
             meta.duration_seconds = media_meta.duration_seconds
+        if not meta.channel:
+            meta.channel = media_meta.channel
         if meta.view_count is None:
             meta.view_count = media_meta.view_count
         if meta.like_count is None:
