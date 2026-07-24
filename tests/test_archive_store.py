@@ -5,6 +5,8 @@ from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import lark_oapi as lark
+
 from src.archive_store import (
     ArchiveEntry,
     BitableArchive,
@@ -84,16 +86,73 @@ def test_encode_fields_fallbacks() -> None:
 async def test_process_one_creates_record_with_resolved_chat_name() -> None:
     client = _client(
         _api_response({"name": "链接群"}),
+        _api_response({"items": [], "has_more": False}),
         _api_response({"record": {"record_id": "rec1"}}),
     )
     archive = _archive(client)
 
     await archive._process_one(_entry())
 
-    create_request = client.arequest.call_args_list[1].args[0]
+    create_request = client.arequest.call_args_list[2].args[0]
     assert create_request.uri == "/open-apis/bitable/v1/apps/app_x/tables/tbl_x/records"
     assert create_request.body["fields"]["发送人"] == [{"id": "ou_sender"}]
     assert create_request.body["fields"]["发送的群"] == "链接群"
+
+
+async def test_process_one_deletes_stale_duplicate_after_creating_new_row() -> None:
+    client = _client(
+        _api_response({"name": "链接群"}),
+        _api_response(
+            {
+                "items": [
+                    {
+                        "record_id": "rec_old",
+                        "fields": {"链接": {"link": "https://youtu.be/abc?si=track"}},
+                    },
+                    {
+                        "record_id": "rec_other",
+                        "fields": {"链接": {"link": "https://youtu.be/xyz"}},
+                    },
+                ],
+                "has_more": False,
+            }
+        ),
+        _api_response({"record": {"record_id": "rec_new"}}),
+        _api_response({"deleted": True, "record_id": "rec_old"}),
+    )
+    archive = _archive(client)
+
+    await archive._process_one(_entry())
+
+    calls = client.arequest.call_args_list
+    create_request = calls[2].args[0]
+    delete_request = calls[3].args[0]
+    assert create_request.uri == "/open-apis/bitable/v1/apps/app_x/tables/tbl_x/records"
+    assert delete_request.uri == "/open-apis/bitable/v1/apps/app_x/tables/tbl_x/records/rec_old"
+    assert delete_request.http_method == lark.HttpMethod.DELETE
+
+
+async def test_process_one_no_duplicate_skips_delete() -> None:
+    client = _client(
+        _api_response({"name": "链接群"}),
+        _api_response({"items": [], "has_more": False}),
+        _api_response({"record": {"record_id": "rec_new"}}),
+    )
+    archive = _archive(client)
+
+    await archive._process_one(_entry())
+
+    assert client.arequest.await_count == 3
+
+
+async def test_delete_record_failure_logs_warning_and_does_not_raise(caplog) -> None:
+    client = SimpleNamespace(arequest=AsyncMock(side_effect=RuntimeError("boom")))
+    archive = _archive(client)
+
+    with caplog.at_level(logging.WARNING):
+        await archive._delete_record("rec_old")
+
+    assert any("failed to delete stale duplicate row" in r.message for r in caplog.records)
 
 
 async def test_run_drops_failed_entries_with_warning(caplog) -> None:

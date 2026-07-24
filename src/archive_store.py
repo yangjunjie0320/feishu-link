@@ -11,6 +11,7 @@ import tenacity
 
 from .card import fmt_duration
 from .config import Settings
+from .platforms import normalize_url
 from .time_utils import format_beijing, now_utc
 
 logger = logging.getLogger(__name__)
@@ -161,7 +162,13 @@ class BitableArchive:
 
     async def _process_one(self, entry: ArchiveEntry) -> None:
         entry.chat_name = await self._directory.chat_name(entry.chat_id, entry.chat_type)
+        normalized = normalize_url(entry.url)
+        stale_ids = await self._find_record_ids_by_normalized_url(normalized)
+        # Create the new row before deleting the stale one(s): if create fails
+        # and raises, the old row is still there instead of both being gone.
         await self._create_record(entry)
+        for record_id in stale_ids:
+            await self._delete_record(record_id)
         logger.info(
             "archived: url=%s platform=%s chat=%s", entry.url, entry.platform, entry.chat_name
         )
@@ -182,6 +189,53 @@ class BitableArchive:
             )
 
         await _attempt()
+
+    async def _find_record_ids_by_normalized_url(self, normalized: str) -> list[str]:
+        """Full-table scan for rows whose "链接" normalizes to the same key.
+
+        The stored URL string varies by share-tracking params, so the server
+        can't filter by the normalized value directly; this fetches only
+        record_id + the URL field (cheap payload) and compares client-side,
+        the same fetch-all-then-filter approach `fetch_day` already uses for
+        the same reason (unreliable server-side filtering).
+        """
+        uri = (
+            f"/open-apis/bitable/v1/apps/{self._settings.bitable_app_token}"
+            f"/tables/{self._settings.bitable_table_id}/records/search"
+        )
+        body = {"field_names": [_DISPLAY["url"]], "automatic_fields": False}
+        matches: list[str] = []
+        page_token = ""
+        while True:
+            queries: list[tuple[str, str]] = [("page_size", "500")]
+            if page_token:
+                queries.append(("page_token", page_token))
+            data = await _bitable_request(
+                self._client, lark.HttpMethod.POST, uri, body=body, queries=queries
+            )
+            for item in data.get("items") or []:
+                url_value = (item.get("fields") or {}).get(_DISPLAY["url"])
+                url = str(url_value.get("link") or "") if isinstance(url_value, dict) else ""
+                record_id = str(item.get("record_id") or "")
+                if record_id and url and normalize_url(url) == normalized:
+                    matches.append(record_id)
+            page_token = str(data.get("page_token") or "")
+            if not data.get("has_more") or not page_token:
+                break
+        return matches
+
+    async def _delete_record(self, record_id: str) -> None:
+        try:
+            await _bitable_request(
+                self._client,
+                lark.HttpMethod.DELETE,
+                f"/open-apis/bitable/v1/apps/{self._settings.bitable_app_token}"
+                f"/tables/{self._settings.bitable_table_id}/records/{record_id}",
+            )
+        except Exception as e:
+            logger.warning(
+                "failed to delete stale duplicate row: record_id=%s error=%s", record_id, e
+            )
 
     def _encode_fields(self, entry: ArchiveEntry) -> dict[str, object]:
         url = entry.url
