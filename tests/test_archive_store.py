@@ -54,7 +54,7 @@ def _archive(client) -> BitableArchive:
 
 def test_encode_fields_shapes() -> None:
     archive = _archive(_client())
-    entry = _entry(sender_name="张三", chat_name="链接群")
+    entry = _entry(chat_name="链接群")
 
     fields = archive._encode_fields(entry)
 
@@ -62,10 +62,11 @@ def test_encode_fields_shapes() -> None:
     assert fields["链接"] == {"link": "https://youtu.be/abc", "text": "https://youtu.be/abc"}
     assert fields["平台"] == "youtube"
     assert fields["时长"] == "1:30"
-    assert fields["发送人"] == "张三"
+    assert fields["发送人"] == [{"id": "ou_sender"}]
     assert fields["发送的群"] == "链接群"
-    # 2026-07-21 14:30 UTC == 22:30 Beijing
-    assert fields["记录时间"] == "2026-07-21 22:30"
+    # 2026-07-21 14:30 UTC == 22:30 Beijing, stored as epoch ms for the
+    # bitable DateTime field.
+    assert fields["记录时间"] == 1784644200000
 
 
 def test_encode_fields_fallbacks() -> None:
@@ -76,13 +77,12 @@ def test_encode_fields_fallbacks() -> None:
 
     assert fields["标题"] == "https://youtu.be/abc"
     assert fields["时长"] == ""
-    assert fields["发送人"] == "ou_sender"
+    assert fields["发送人"] == [{"id": "ou_sender"}]
     assert fields["发送的群"] == "oc_chat"
 
 
-async def test_process_one_creates_record_with_resolved_names() -> None:
+async def test_process_one_creates_record_with_resolved_chat_name() -> None:
     client = _client(
-        _api_response({"items": [{"member_id": "ou_sender", "name": "张三"}]}),
         _api_response({"name": "链接群"}),
         _api_response({"record": {"record_id": "rec1"}}),
     )
@@ -90,9 +90,9 @@ async def test_process_one_creates_record_with_resolved_names() -> None:
 
     await archive._process_one(_entry())
 
-    create_request = client.arequest.call_args_list[2].args[0]
+    create_request = client.arequest.call_args_list[1].args[0]
     assert create_request.uri == "/open-apis/bitable/v1/apps/app_x/tables/tbl_x/records"
-    assert create_request.body["fields"]["发送人"] == "张三"
+    assert create_request.body["fields"]["发送人"] == [{"id": "ou_sender"}]
     assert create_request.body["fields"]["发送的群"] == "链接群"
 
 
@@ -109,7 +109,8 @@ async def test_run_drops_failed_entries_with_warning(caplog) -> None:
     assert any("row dropped" in r.message for r in caplog.records)
 
 
-async def test_fetch_day_paginates_and_prefix_filters() -> None:
+async def test_fetch_day_paginates_and_filters_client_side() -> None:
+    # Epoch ms for 2026-07-21 09:00, 2026-07-20 23:59 and 2026-07-21 00:00 Beijing.
     page1 = {
         "items": [
             {
@@ -121,7 +122,7 @@ async def test_fetch_day_paginates_and_prefix_filters() -> None:
                     "时长": "3:05",
                     "发送人": "张三",
                     "发送的群": "链接群",
-                    "记录时间": [{"text": "2026-07-21 09:00", "type": "text"}],
+                    "记录时间": 1784595600000,
                 }
             }
         ],
@@ -135,7 +136,7 @@ async def test_fetch_day_paginates_and_prefix_filters() -> None:
                     "标题": "视频B",
                     "链接": {"link": "https://b"},
                     "平台": "bilibili",
-                    "记录时间": "2026-07-20 23:59",
+                    "记录时间": 1784563140000,
                 }
             },
             {
@@ -143,7 +144,7 @@ async def test_fetch_day_paginates_and_prefix_filters() -> None:
                     "标题": "视频C",
                     "链接": {"link": "https://c"},
                     "平台": "x",
-                    "记录时间": "2026-07-21 00:00",
+                    "记录时间": 1784563200000,
                 }
             },
         ],
@@ -158,36 +159,42 @@ async def test_fetch_day_paginates_and_prefix_filters() -> None:
     assert rows[1].url == "https://a"
     assert rows[1].duration == "3:05"
     first_request = client.arequest.call_args_list[0].args[0]
-    condition = first_request.body["filter"]["conditions"][0]
-    assert condition == {
-        "field_name": "记录时间",
-        "operator": "contains",
-        "value": ["2026-07-21"],
-    }
+    assert "filter" not in first_request.body
 
 
-def test_decode_row_handles_segment_lists_and_plain_strings() -> None:
+def test_decode_row_handles_segment_lists_epoch_ms_and_legacy_text() -> None:
     row = _decode_row(
         {
             "标题": [{"text": "分段", "type": "text"}, {"text": "标题", "type": "text"}],
             "链接": {"link": "https://x"},
-            "记录时间": "2026-07-21 10:00",
+            "记录时间": 1784595600000,
         }
     )
 
     assert row.title == "分段标题"
     assert row.url == "https://x"
-    assert row.recorded_at == "2026-07-21 10:00"
+    assert row.recorded_at == "2026-07-21 09:00"
 
 
-async def test_chat_directory_caches_member_lookup() -> None:
+def test_decode_row_reads_sender_from_people_field() -> None:
+    row = _decode_row({"发送人": [{"id": "ou_sender", "name": "张三", "en_name": "Zhang San"}]})
+    assert row.sender == "张三"
+
+    legacy_row = _decode_row({"发送人": "张三"})
+    assert legacy_row.sender == "张三"
+
+    legacy_row = _decode_row({"记录时间": "2026-07-21 10:00"})
+    assert legacy_row.recorded_at == "2026-07-21 10:00"
+
+
+async def test_chat_directory_caches_chat_name_lookup() -> None:
     client = _client(
-        _api_response({"items": [{"member_id": "ou_sender", "name": "张三"}]}),
+        _api_response({"name": "链接群"}),
     )
     directory = ChatDirectory(client)
 
-    assert await directory.member_name("oc_chat", "ou_sender") == "张三"
-    assert await directory.member_name("oc_chat", "ou_sender") == "张三"
+    assert await directory.chat_name("oc_chat", "group") == "链接群"
+    assert await directory.chat_name("oc_chat", "group") == "链接群"
     assert client.arequest.await_count == 1
 
 
@@ -197,8 +204,8 @@ async def test_chat_directory_p2p_and_degradation(caplog) -> None:
 
     assert await directory.chat_name("oc_p2p", "p2p") == "私聊"
     with caplog.at_level(logging.WARNING):
-        assert await directory.member_name("oc_chat", "ou_a") == "ou_a"
-        assert await directory.member_name("oc_chat", "ou_a") == "ou_a"
+        assert await directory.chat_name("oc_chat", "group") == "oc_chat"
+        assert await directory.chat_name("oc_chat", "group") == "oc_chat"
 
-    warnings = [r for r in caplog.records if "resolve member name" in r.message]
+    warnings = [r for r in caplog.records if "resolve chat name" in r.message]
     assert len(warnings) == 1

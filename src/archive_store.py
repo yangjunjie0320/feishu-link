@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 import lark_oapi as lark
 import tenacity
@@ -20,15 +20,17 @@ logger = logging.getLogger(__name__)
 _TEXT = 1
 _SINGLE_SELECT = 3
 _URL = 15
+_DATE_TIME = 5
+_USER = 11
 _FIELDS: tuple[tuple[str, str, int], ...] = (
     ("title", "标题", _TEXT),
     ("url", "链接", _URL),
     ("platform", "平台", _SINGLE_SELECT),
     ("channel", "频道", _TEXT),
     ("duration", "时长", _TEXT),
-    ("sender", "发送人", _TEXT),
-    ("chat", "发送的群", _TEXT),
-    ("recorded_at", "记录时间", _TEXT),
+    ("sender", "发送人", _USER),
+    ("chat", "发送的群", _SINGLE_SELECT),
+    ("recorded_at", "记录时间", _DATE_TIME),
 )
 _DISPLAY = {logical: display for logical, display, _ in _FIELDS}
 
@@ -53,7 +55,6 @@ class ArchiveEntry:
     chat_type: str
     recorded_at_utc: datetime = field(default_factory=now_utc)
     # Resolved by the consumer coroutine, never by the send hot path.
-    sender_name: str = ""
     chat_name: str = ""
 
 
@@ -95,15 +96,17 @@ async def _bitable_request(
 
 
 class ChatDirectory:
-    """Resolves open_id/chat_id to human-readable names via the chats the bot
+    """Resolves chat_id to a human-readable group name via the chats the bot
     is already in (no contact-scope needed). Failures degrade to the raw id
     with a single warning per id; results are cached for the process lifetime.
+    Sender identity is no longer resolved here: the archive's "发送人" column
+    is a bitable People field keyed by open_id, resolved to a display name by
+    Feishu itself.
     """
 
     def __init__(self, client: lark.Client) -> None:
         self._client = client
         self._chat_names: dict[str, str] = {}
-        self._member_names: dict[str, str] = {}
         self._warned: set[str] = set()
 
     async def chat_name(self, chat_id: str, chat_type: str) -> str:
@@ -122,45 +125,6 @@ class ChatDirectory:
             return chat_id
         self._chat_names[chat_id] = name
         return name
-
-    async def member_name(self, chat_id: str, open_id: str) -> str:
-        cached = self._member_names.get(open_id)
-        if cached is not None:
-            return cached
-        try:
-            name = await self._find_member(chat_id, open_id)
-        except Exception as e:
-            self._warn_once(
-                open_id,
-                f"failed to resolve member name: chat_id={chat_id} open_id={open_id} error={e}",
-            )
-            return open_id
-        if not name:
-            return open_id
-        self._member_names[open_id] = name
-        return name
-
-    async def _find_member(self, chat_id: str, open_id: str) -> str:
-        page_token = ""
-        while True:
-            queries: list[tuple[str, str]] = [
-                ("member_id_type", "open_id"),
-                ("page_size", "100"),
-            ]
-            if page_token:
-                queries.append(("page_token", page_token))
-            data = await _bitable_request(
-                self._client,
-                lark.HttpMethod.GET,
-                f"/open-apis/im/v1/chats/{chat_id}/members",
-                queries=queries,
-            )
-            for item in data.get("items") or []:
-                if item.get("member_id") == open_id:
-                    return str(item.get("name") or "")
-            page_token = str(data.get("page_token") or "")
-            if not data.get("has_more") or not page_token:
-                return ""
 
     def _warn_once(self, key: str, message: str) -> None:
         if key in self._warned:
@@ -196,7 +160,6 @@ class BitableArchive:
                 logger.warning("bitable archive failed, row dropped: url=%s error=%s", entry.url, e)
 
     async def _process_one(self, entry: ArchiveEntry) -> None:
-        entry.sender_name = await self._directory.member_name(entry.chat_id, entry.sender_open_id)
         entry.chat_name = await self._directory.chat_name(entry.chat_id, entry.chat_type)
         await self._create_record(entry)
         logger.info(
@@ -230,12 +193,21 @@ class BitableArchive:
             _DISPLAY["platform"]: entry.platform,
             _DISPLAY["channel"]: entry.channel,
             _DISPLAY["duration"]: duration,
-            _DISPLAY["sender"]: entry.sender_name or entry.sender_open_id,
+            # Bitable User fields take a list of {"id": open_id}; the display
+            # name/avatar is resolved server-side, so no name lookup is needed here.
+            _DISPLAY["sender"]: [{"id": entry.sender_open_id}],
             _DISPLAY["chat"]: entry.chat_name or entry.chat_id,
-            _DISPLAY["recorded_at"]: format_beijing(entry.recorded_at_utc, _RECORDED_AT_FMT),
+            # Bitable DateTime fields take a UTC epoch-millisecond int on write.
+            _DISPLAY["recorded_at"]: int(entry.recorded_at_utc.timestamp() * 1000),
         }
 
     async def fetch_day(self, day: date) -> list[ArchivedRow]:
+        """ "记录时间" is a bitable DateTime field (epoch ms). Its range-filter
+        operators (isGreater/isGreaterEqual with an exact-day boundary) proved
+        unreliable in practice — silently returning zero rows even for correct
+        boundaries — so this fetches every row unfiltered and matches the day
+        client-side against the decoded Beijing-time prefix instead.
+        """
         prefix = day.isoformat()
         uri = (
             f"/open-apis/bitable/v1/apps/{self._settings.bitable_app_token}"
@@ -243,16 +215,6 @@ class BitableArchive:
         )
         body = {
             "field_names": [display for _, display, _ in _FIELDS],
-            "filter": {
-                "conjunction": "and",
-                "conditions": [
-                    {
-                        "field_name": _DISPLAY["recorded_at"],
-                        "operator": "contains",
-                        "value": [prefix],
-                    }
-                ],
-            },
             "automatic_fields": False,
         }
         rows: list[ArchivedRow] = []
@@ -266,8 +228,6 @@ class BitableArchive:
             )
             for item in data.get("items") or []:
                 row = _decode_row(item.get("fields") or {})
-                # The server-side contains-filter is trusted but re-checked here:
-                # prefix match on the zero-padded Beijing time string is exact.
                 if row.recorded_at.startswith(prefix):
                     rows.append(row)
             page_token = str(data.get("page_token") or "")
@@ -305,7 +265,7 @@ class BitableArchive:
                     "name": "链接存档",
                     "default_view_name": "全部",
                     "fields": [
-                        {"field_name": display, "type": ftype} for _, display, ftype in _FIELDS
+                        _bootstrap_field_spec(display, ftype) for _, display, ftype in _FIELDS
                     ],
                 }
             },
@@ -341,6 +301,15 @@ class BitableArchive:
         return app_token, table_id
 
 
+def _bootstrap_field_spec(display: str, ftype: int) -> dict[str, object]:
+    spec: dict[str, object] = {"field_name": display, "type": ftype}
+    if ftype == _DATE_TIME:
+        spec["property"] = {"date_formatter": "yyyy/MM/dd", "auto_fill": False}
+    elif ftype == _USER:
+        spec["property"] = {"multiple": True}
+    return spec
+
+
 def _decode_row(fields: dict[str, object]) -> ArchivedRow:
     def text(logical: str) -> str:
         return _flatten_value(fields.get(_DISPLAY[logical]))
@@ -356,10 +325,29 @@ def _decode_row(fields: dict[str, object]) -> ArchivedRow:
         platform=text("platform"),
         channel=text("channel"),
         duration=text("duration"),
-        sender=text("sender"),
+        sender=_decode_sender(fields.get(_DISPLAY["sender"])),
         chat=text("chat"),
-        recorded_at=text("recorded_at"),
+        recorded_at=_decode_recorded_at(fields.get(_DISPLAY["recorded_at"])),
     )
+
+
+def _decode_sender(value: object) -> str:
+    """The field is a bitable People field: a list of user objects with a
+    server-resolved display name. Older rows written back when it was still
+    a text field may still hold a plain string, so that shape is handled too."""
+    if isinstance(value, list) and value and isinstance(value[0], dict) and "id" in value[0]:
+        first = value[0]
+        return str(first.get("name") or first.get("en_name") or first.get("id") or "")
+    return _flatten_value(value)
+
+
+def _decode_recorded_at(value: object) -> str:
+    """The field is a bitable DateTime (epoch ms as int/float); older rows
+    written back when it was still a text field may still hold a plain
+    "YYYY-MM-DD HH:MM" string, so both shapes are handled defensively."""
+    if isinstance(value, int | float):
+        return format_beijing(datetime.fromtimestamp(value / 1000, tz=UTC), _RECORDED_AT_FMT)
+    return _flatten_value(value)
 
 
 def _flatten_value(value: object) -> str:
