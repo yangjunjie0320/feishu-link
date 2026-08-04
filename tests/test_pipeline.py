@@ -424,3 +424,46 @@ async def test_process_url_without_archive_still_works() -> None:
     await pipeline._process_url("https://youtu.be/abc123", _link_message_event(), False, False)
 
     pipeline._sender.send.assert_awaited_once()
+
+
+def _multi_link_event(text: str, message_id: str = "msg_multi") -> MessageEvent:
+    return MessageEvent(
+        message_id=message_id,
+        chat_id="oc_chat",
+        sender_id="ou_sender",
+        chat_type="group",
+        timestamp_utc=0,
+        message_type="text",
+        content=json.dumps({"text": text}),
+        mentions=[],
+    )
+
+
+async def test_handle_skips_message_with_multiple_urls() -> None:
+    pipeline = Pipeline(Settings(), MagicMock())
+    pipeline._process_url = AsyncMock()  # type: ignore[method-assign]
+
+    event = _multi_link_event("https://youtu.be/abc123 https://youtu.be/def456")
+    await pipeline.handle(event)
+
+    pipeline._process_url.assert_not_called()
+
+
+async def test_handle_processes_single_url_message() -> None:
+    pipeline = Pipeline(Settings(), MagicMock())
+    pipeline._process_url = AsyncMock()  # type: ignore[method-assign]
+
+    event = _multi_link_event("https://youtu.be/abc123", message_id="msg_single")
+    await pipeline.handle(event)
+
+    pipeline._process_url.assert_awaited_once()
+
+
+async def test_handle_processes_duplicate_url_message() -> None:
+    pipeline = Pipeline(Settings(), MagicMock())
+    pipeline._process_url = AsyncMock()  # type: ignore[method-assign]
+
+    event = _multi_link_event("https://youtu.be/abc123 https://youtu.be/abc123", "msg_dup")
+    await pipeline.handle(event)
+
+    pipeline._process_url.assert_awaited_once()

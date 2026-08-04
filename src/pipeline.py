@@ -86,6 +86,13 @@ class Pipeline:
         if not urls:
             logger.debug("skip: no URLs in message_id=%s", event.message_id)
             return
+        if len(urls) > 1:
+            logger.info(
+                "skip: %d URLs in one message, message_id=%s",
+                len(urls),
+                event.message_id,
+            )
+            return
 
         manual_download = is_bot_mentioned and is_manual_download_command(
             event.message_type,
