@@ -49,6 +49,14 @@ _PROFILES: dict[str, RefreshProfile] = {
         cookie_domain="youtube.com",
         required_names=frozenset({"SAPISID", "__Secure-3PSID"}),
     ),
+    # TikTok serves 200 with an empty body for content APIs (comment/list,
+    # related/item_list) to logged-out clients, so comment analysis needs a
+    # session; signing itself works fine without one.
+    "tiktok": RefreshProfile(
+        site_url="https://www.tiktok.com/",
+        cookie_domain="tiktok.com",
+        required_names=frozenset({"sessionid"}),
+    ),
 }
 
 # Per-process throttle so a burst of stale-cookie requests does not launch the

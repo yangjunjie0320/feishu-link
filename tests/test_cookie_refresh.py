@@ -389,7 +389,13 @@ async def test_force_refresh_noop_when_disabled_or_unlisted(monkeypatch, tmp_pat
 
 @pytest.mark.asyncio
 async def test_browser_login_rejects_unknown_platform() -> None:
-    assert await browser_login("tiktok", Settings()) is False
+    assert await browser_login("douyin", Settings()) is False
+
+
+def test_tiktok_refresh_profile_registered() -> None:
+    profile = cookie_refresh._PROFILES["tiktok"]
+    assert profile.cookie_domain == "tiktok.com"
+    assert "sessionid" in profile.required_names
 
 
 @pytest.mark.asyncio
