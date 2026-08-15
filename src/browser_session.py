@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
+import signal
+import subprocess
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -24,6 +28,13 @@ _LAUNCH_ARGS = [
 # Lock files Chromium writes into a persistent profile. A crashed run leaves them
 # behind and blocks the next launch, so they are cleared before each launch.
 _SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+
+# A context that never closes cleanly (agent SIGKILLed, Playwright driver lost)
+# leaves Chromium running forever; production accumulated five such processes
+# alive for 21 days. Reaped before launch, and close() is capped so a hung
+# teardown cannot create the next one.
+_CLOSE_TIMEOUT_SECONDS = 15.0
+_ORPHAN_TERM_GRACE_SECONDS = 2.0
 
 _locks: dict[str, asyncio.Lock] = {}
 
@@ -49,6 +60,99 @@ def _clear_singleton_locks(profile_path: Path) -> None:
             logger.warning("Failed to clear stale %s in %s: %s", name, profile_path, exc)
 
 
+def _user_data_dir_markers(profile_path: Path) -> tuple[str, ...]:
+    """The --user-data-dir spellings a process may have been launched with.
+
+    launch_persistent_context receives str(profile_path) verbatim, so a relative
+    config value shows up relative in ps output; resolve() covers the rest.
+    """
+    markers = {f"--user-data-dir={profile_path}"}
+    with contextlib.suppress(OSError):
+        markers.add(f"--user-data-dir={profile_path.resolve()}")
+    return tuple(markers)
+
+
+def _command_uses_profile(command: str, markers: tuple[str, ...]) -> bool:
+    """Whole-token match only: browser-data/tiktok must not match tiktok-probe."""
+    for marker in markers:
+        index = command.find(marker)
+        while index != -1:
+            end = index + len(marker)
+            if end == len(command) or command[end].isspace():
+                return True
+            index = command.find(marker, end)
+    return False
+
+
+def _orphan_pids(profile_path: Path) -> list[tuple[int, str]]:
+    """Chromium processes for this profile that init has adopted.
+
+    ppid == 1 is the only safe signal that the agent which launched them is gone:
+    the per-profile asyncio.Lock serializes this process only, so a live parent
+    may be another instance or a maintenance probe using the same profile.
+    """
+    markers = _user_data_dir_markers(profile_path)
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,etime=,command="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "Failed to list processes while reaping orphans in %s: %s", profile_path, exc
+        )
+        return []
+
+    orphans: list[tuple[int, str]] = []
+    for line in result.stdout.splitlines():
+        fields = line.split(maxsplit=3)
+        if len(fields) < 4:
+            continue
+        pid_text, ppid_text, etime, command = fields
+        if ppid_text != "1" or not _command_uses_profile(command, markers):
+            continue
+        try:
+            orphans.append((int(pid_text), etime))
+        except ValueError:
+            continue
+    return orphans
+
+
+async def _reap_orphans(profile_path: Path) -> None:
+    """SIGTERM then SIGKILL orphaned Chromium processes for this profile.
+
+    Best effort: any failure is logged and ignored, never blocking the launch.
+    """
+    orphans = _orphan_pids(profile_path)
+    if not orphans:
+        return
+
+    for pid, etime in orphans:
+        logger.warning(
+            "Reaping orphan Chromium pid=%d etime=%s profile=%s", pid, etime, profile_path
+        )
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError as exc:
+            logger.warning("SIGTERM failed for orphan Chromium pid=%d: %s", pid, exc)
+
+    await asyncio.sleep(_ORPHAN_TERM_GRACE_SECONDS)
+
+    for pid, _etime in orphans:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            logger.warning("Orphan Chromium pid=%d ignored SIGTERM, sent SIGKILL", pid)
+        except OSError as exc:
+            logger.warning("SIGKILL failed for orphan Chromium pid=%d: %s", pid, exc)
+
+
 @asynccontextmanager
 async def persistent_context(
     profile_dir: str,
@@ -61,10 +165,10 @@ async def persistent_context(
 ) -> AsyncIterator[Any]:
     """Launch a persistent Chromium profile and yield its browser context.
 
-    Serializes access per profile directory, clears stale singleton locks before
-    launch, and guarantees the context is closed on exit. Playwright runtime
-    errors propagate to the caller; a missing Playwright install raises
-    BrowserUnavailableError.
+    Serializes access per profile directory, reaps orphaned Chromium processes
+    and clears stale singleton locks before launch, and guarantees the context is
+    closed on exit. Playwright runtime errors propagate to the caller; a missing
+    Playwright install raises BrowserUnavailableError.
     """
     try:
         from playwright.async_api import async_playwright
@@ -75,6 +179,7 @@ async def persistent_context(
 
     path = Path(profile_dir)
     path.mkdir(parents=True, exist_ok=True)
+    await _reap_orphans(path)
     _clear_singleton_locks(path)
 
     launch_kwargs: dict[str, Any] = {
@@ -98,4 +203,16 @@ async def persistent_context(
         try:
             yield context
         finally:
-            await context.close()
+            # A hung close() would otherwise leave Chromium behind and mask the
+            # real error; swallowing it lets async_playwright().__aexit__ still
+            # tear the driver down.
+            try:
+                await asyncio.wait_for(context.close(), timeout=_CLOSE_TIMEOUT_SECONDS)
+            except TimeoutError:
+                logger.warning(
+                    "Browser context close timed out after %.0fs for %s",
+                    _CLOSE_TIMEOUT_SECONDS,
+                    path,
+                )
+            except Exception as exc:
+                logger.warning("Browser context close failed for %s: %s", path, exc)
