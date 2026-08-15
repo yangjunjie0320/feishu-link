@@ -24,6 +24,7 @@ from .parsers.instagram_media_info import _shortcode_from_url, _shortcode_to_med
 from .parsers.og_meta import _USER_AGENT, _request_headers
 from .parsers.x_graphql import tweet_id_from_url, x_api_headers, x_graphql_endpoint
 from .platforms import detect_platform
+from .tiktok_comments import TikTokCommentClient, TikTokCommentError, resolve_tiktok_url
 from .ytdlp_options import (
     YtDlpSignalLogger,
     apply_ytdlp_runtime,
@@ -223,7 +224,7 @@ class CommentAnalyzer:
         try:
             fetched = await asyncio.wait_for(
                 self.fetch_comment_page(url),
-                timeout=self._settings.comment_fetch_timeout,
+                timeout=self._settings.comment_fetch_timeout_for(detect_platform(url)),
             )
         except TimeoutError as e:
             raise CommentAnalysisError("评论抓取超时，请稍后重试。") from e
@@ -287,6 +288,12 @@ class CommentAnalyzer:
                     return fetched
             except CommentAnalysisError as e:
                 logger.info("bilibili comment endpoint failed, falling back to yt-dlp: %s", e)
+
+        if platform == "tiktok":
+            # No yt-dlp fallback on purpose: its TikTok extractor yields no
+            # comments at all, so the fallback would only replace an explainable
+            # error with "没有获取到评论内容。"
+            return await self._fetch_tiktok_comments(url, max_comments)
 
         try:
             return await self._fetch_ytdlp_comments(url, platform, max_comments)
@@ -445,6 +452,24 @@ class CommentAnalyzer:
             data, tweet_id, max_comments=max_comments
         )
         return FetchedComments(comments=comments, total_count=total_count)
+
+    async def _fetch_tiktok_comments(self, url: str, max_comments: int) -> FetchedComments:
+        if not self._settings.tiktok_comment_fetch_enabled:
+            raise CommentAnalysisError("TikTok 评论抓取当前已关闭。")
+
+        resolved = await resolve_tiktok_url(url, self._client)
+        deadline = time.monotonic() + self._settings.tiktok_comment_fetch_timeout
+        try:
+            raw_comments, total_count = await TikTokCommentClient(self._settings).fetch_comments(
+                resolved, max_comments=max_comments, deadline=deadline
+            )
+        except TikTokCommentError as e:
+            raise CommentAnalysisError(str(e)) from e
+
+        return FetchedComments(
+            comments=comments_from_raw(raw_comments, max_comments=max_comments),
+            total_count=total_count,
+        )
 
     async def _resolve_bilibili_url(self, url: str) -> str:
         if "b23.tv" not in url:

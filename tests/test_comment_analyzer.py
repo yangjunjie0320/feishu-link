@@ -1,5 +1,6 @@
 import sys
 import types
+from contextlib import asynccontextmanager
 
 import httpx
 import pytest
@@ -22,6 +23,7 @@ from src.comment_analyzer import (
 from src.config import Settings
 from src.cookie_utils import get_cookie_header
 from src.parsers.instagram_media_info import _shortcode_to_media_id
+from src.tiktok_comments import TikTokCommentClient, TikTokCommentError
 
 
 def test_comments_from_raw_cleans_dedupes_and_counts_replies() -> None:
@@ -841,3 +843,102 @@ def _x_tweet(
             "in_reply_to_status_id_str": parent_id,
         },
     }
+
+
+def _tiktok_page(comments: list[dict[str, object]], *, cursor: int, has_more: int) -> dict:
+    return {
+        "status_code": 0,
+        "comments": comments,
+        "cursor": cursor,
+        "has_more": has_more,
+        "total": 42,
+    }
+
+
+def _fake_json_fetcher(pages: list[dict]):
+    """asynccontextmanager standing in for the Playwright boundary."""
+
+    @asynccontextmanager
+    async def fake_fetcher(self, page_url: str):
+        calls = {"n": 0}
+
+        async def fetch_json(url: str):
+            page = pages[min(calls["n"], len(pages) - 1)]
+            calls["n"] += 1
+            return page
+
+        yield fetch_json
+
+    return fake_fetcher
+
+
+def _exploding_ytdlp(monkeypatch) -> None:
+    """Any yt-dlp use must fail loudly: TikTok is not allowed to fall back."""
+
+    class ForbiddenYoutubeDL:
+        def __init__(self, options: dict[str, object]) -> None:
+            raise AssertionError("tiktok comment fetch must not fall back to yt-dlp")
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=ForbiddenYoutubeDL))
+
+
+async def test_fetch_comment_page_routes_tiktok_to_browser_client(monkeypatch) -> None:
+    _exploding_ytdlp(monkeypatch)
+    monkeypatch.setattr(
+        TikTokCommentClient,
+        "_browser_json_fetcher",
+        _fake_json_fetcher(
+            [
+                _tiktok_page(
+                    [
+                        {
+                            "cid": "1",
+                            "text": "great",
+                            "digg_count": 9,
+                            "reply_comment_total": 2,
+                            "user": {"nickname": "Ada", "unique_id": "ada_l"},
+                        }
+                    ],
+                    cursor=20,
+                    has_more=0,
+                )
+            ]
+        ),
+    )
+
+    async with httpx.AsyncClient() as client:
+        fetched = await CommentAnalyzer(Settings(), client).fetch_comment_page(
+            "https://www.tiktok.com/@ada/video/123"
+        )
+
+    assert fetched.total_count == 42
+    assert len(fetched.comments) == 1
+    assert fetched.comments[0].like_count == 9
+    assert fetched.comments[0].author == "Ada"
+
+
+async def test_tiktok_fetch_disabled_reports_explainable_error(monkeypatch) -> None:
+    _exploding_ytdlp(monkeypatch)
+
+    with pytest.raises(CommentAnalysisError, match="当前已关闭"):
+        async with httpx.AsyncClient() as client:
+            await CommentAnalyzer(
+                Settings(tiktok_comment_fetch_enabled=False), client
+            ).fetch_comment_page("https://www.tiktok.com/@ada/video/123")
+
+
+async def test_tiktok_browser_failure_is_not_masked_by_ytdlp(monkeypatch) -> None:
+    _exploding_ytdlp(monkeypatch)
+
+    @asynccontextmanager
+    async def failing_fetcher(self, page_url: str):
+        raise TikTokCommentError("TikTok 触发了人机验证，请稍后重试。")
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+    monkeypatch.setattr(TikTokCommentClient, "_browser_json_fetcher", failing_fetcher)
+
+    with pytest.raises(CommentAnalysisError, match="人机验证"):
+        async with httpx.AsyncClient() as client:
+            await CommentAnalyzer(Settings(), client).fetch_comment_page(
+                "https://www.tiktok.com/@ada/video/123"
+            )
