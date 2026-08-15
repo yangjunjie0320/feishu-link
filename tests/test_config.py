@@ -115,3 +115,16 @@ def test_effective_report_chat_id_falls_back_to_archive() -> None:
         Settings(archive_chat_id="oc_a", report_chat_id="oc_r").effective_report_chat_id()
         == "oc_r"
     )
+
+
+def test_comment_fetch_timeout_is_platform_specific_for_tiktok() -> None:
+    settings = Settings()
+    assert settings.comment_fetch_timeout_for("tiktok") == settings.tiktok_comment_fetch_timeout
+    assert settings.comment_fetch_timeout_for("TikTok") == settings.tiktok_comment_fetch_timeout
+    assert settings.comment_fetch_timeout_for("youtube") == settings.comment_fetch_timeout
+    assert settings.comment_fetch_timeout_for("bilibili") == settings.comment_fetch_timeout
+
+
+def test_comment_fetch_timeout_for_tiktok_falls_back_when_disabled() -> None:
+    settings = Settings(tiktok_comment_fetch_timeout=0)
+    assert settings.comment_fetch_timeout_for("tiktok") == settings.comment_fetch_timeout

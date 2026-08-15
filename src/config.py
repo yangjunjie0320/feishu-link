@@ -100,6 +100,20 @@ class Settings(BaseSettings):
     comment_analysis_timeout: float = 120.0
     comment_fetch_timeout: float = 90.0
 
+    # TikTok comments come from an in-page fetch inside a Playwright Chromium
+    # page: the web API is signed by the page's webmssdk.js, so requests must
+    # originate from the page context. Browser startup makes it slower than the
+    # httpx-based platforms, hence its own wall-clock budget.
+    tiktok_comment_fetch_enabled: bool = True
+    tiktok_comment_browser_profile_dir: str = "browser-data/tiktok"
+    tiktok_comment_browser_headless: bool = True
+    tiktok_comment_browser_timeout: float = 45.0
+    tiktok_comment_fetch_timeout: float = 120.0
+    tiktok_comment_page_size: int = 20
+    tiktok_comment_max_pages: int = 30
+    tiktok_comment_request_delay: float = 0.3
+    tiktok_comment_signer_wait_ms: int = 5000
+
     _allowlist_patterns: list[re.Pattern[str]] = []
     _blacklist_patterns: list[re.Pattern[str]] = []
 
@@ -166,6 +180,17 @@ class Settings(BaseSettings):
 
     def effective_report_chat_id(self) -> str:
         return self.report_chat_id or self.archive_chat_id
+
+    def comment_fetch_timeout_for(self, platform: str) -> float:
+        """Wall-clock budget for one platform's comment fetch.
+
+        TikTok pays for a Chromium launch and page load before the first
+        request, so it gets its own budget instead of raising the global one and
+        slowing down every other platform's failure feedback.
+        """
+        if platform.strip().lower() == "tiktok" and self.tiktok_comment_fetch_timeout > 0:
+            return self.tiktok_comment_fetch_timeout
+        return self.comment_fetch_timeout
 
     def cookie_file_for_platform(self, platform: str) -> str:
         normalized = platform.strip().lower()
