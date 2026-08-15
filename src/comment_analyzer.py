@@ -140,6 +140,20 @@ _CJK_RE = re.compile(r"[㐀-鿿]")
 
 _TOP_COMMENT_COUNT = 8
 
+# User-facing platform names. The yt-dlp path serves every platform, so its
+# failure messages must not name one of them.
+_PLATFORM_LABELS = {
+    "bilibili": "B 站",
+    "instagram": "Instagram",
+    "tiktok": "TikTok",
+    "youtube": "YouTube",
+    "x": "X",
+}
+
+
+def _platform_label(platform: str) -> str:
+    return _PLATFORM_LABELS.get(platform.strip().lower(), platform or "该平台")
+
 
 def _is_chinese(text: str) -> bool:
     return bool(_CJK_RE.search(text))
@@ -679,14 +693,18 @@ class CommentAnalyzer:
                 raise
             if not await force_refresh(platform, self._settings):
                 if first_logger.rate_limited or looks_like_rate_limit(str(e)):
-                    raise CommentAnalysisError("YouTube 暂时限流，请稍后再试。") from e
+                    raise CommentAnalysisError(
+                        f"{_platform_label(platform)} 暂时限流，请稍后再试。"
+                    ) from e
                 raise
             retry_logger = YtDlpSignalLogger(logger, prefix="yt-dlp comments: ")
             try:
                 return await loop.run_in_executor(self._comment_executor, _extract, retry_logger)
             except CommentAnalysisError as retry_error:
                 if retry_logger.rate_limited or looks_like_rate_limit(str(retry_error)):
-                    raise CommentAnalysisError("YouTube 暂时限流，请稍后再试。") from retry_error
+                    raise CommentAnalysisError(
+                        f"{_platform_label(platform)} 暂时限流，请稍后再试。"
+                    ) from retry_error
                 raise
 
     def _build_comment_llm_payload(

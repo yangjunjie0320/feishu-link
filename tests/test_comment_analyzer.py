@@ -418,11 +418,47 @@ async def test_ytdlp_comment_fetch_reports_rate_limit_when_refresh_unavailable(
 
     monkeypatch.setattr(comment_analyzer, "force_refresh", fake_force_refresh)
 
-    with pytest.raises(CommentAnalysisError, match="限流"):
+    with pytest.raises(CommentAnalysisError, match="YouTube 暂时限流"):
         async with httpx.AsyncClient() as client:
             await CommentAnalyzer(Settings(), client).fetch_comment_page(
                 "https://www.youtube.com/watch?v=abc"
             )
+
+
+async def test_ytdlp_rate_limit_message_names_the_actual_platform(monkeypatch) -> None:
+    """The yt-dlp path serves every platform; the message must not say YouTube."""
+
+    class FakeYoutubeDL:
+        def __init__(self, options: dict[str, object]) -> None:
+            self.options = options
+
+        def __enter__(self) -> "FakeYoutubeDL":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def extract_info(self, url: str, download: bool = False) -> dict[str, object]:
+            raise RuntimeError(
+                "Sign in to confirm you're not a bot. "
+                "This content isn't available, try again later."
+            )
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+
+    async def fake_force_refresh(platform: str, settings: Settings) -> bool:
+        return False
+
+    monkeypatch.setattr(comment_analyzer, "force_refresh", fake_force_refresh)
+
+    with pytest.raises(CommentAnalysisError) as excinfo:
+        async with httpx.AsyncClient() as client:
+            await CommentAnalyzer(Settings(), client)._fetch_ytdlp_comments(
+                "https://www.bilibili.com/video/BV1xx411c7mD", "bilibili", 100
+            )
+
+    assert "B 站 暂时限流" in str(excinfo.value)
+    assert "YouTube" not in str(excinfo.value)
 
 
 async def test_ytdlp_comment_fetch_does_not_refresh_on_ordinary_failure(monkeypatch) -> None:
