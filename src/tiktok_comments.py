@@ -81,26 +81,38 @@ _STATUS_ITEM_UNAVAILABLE = frozenset({2053, 10204})
 # cancellation that lands mid-close is exactly how orphan Chromium is created.
 _CLOSE_MARGIN_SECONDS = 10.0
 
-# Dispatch the full pointer sequence rather than page.mouse.click(): React
-# listens on pointerdown, and the tab sits under an overlay that swallows a
-# synthetic click at those coordinates.
+# The page renders in two layouts and each has its own comment entry point:
+# a "Comments" tab in the detail layout, and the comment-icon bubble in the
+# immersive feed layout. Which one appears is not under our control, so try
+# both. The full pointer sequence is dispatched because React listens on
+# pointerdown and an overlay swallows a plain synthetic click.
 _CLICK_TAB_JS = """() => {
+    const fire = (el) => {
+        const box = el.getBoundingClientRect();
+        const opts = {
+            bubbles: true, cancelable: true, view: window,
+            clientX: box.x + box.width / 2, clientY: box.y + box.height / 2,
+        };
+        for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+            const Ctor = type.startsWith("pointer") ? PointerEvent : MouseEvent;
+            el.dispatchEvent(new Ctor(type, opts));
+        }
+        if (typeof el.click === "function") el.click();
+        return {y: Math.round(box.y)};
+    };
+
+    // Feed layout: the comment bubble beside the video.
+    const icon = document.querySelector('[data-e2e="comment-icon"]');
+    if (icon && icon.offsetParent !== null) return fire(icon);
+
+    // Detail layout: the "Comments" tab. The same word also labels a hidden
+    // filter in the Activity menu, so take the last visible leaf node.
     const leaves = Array.from(document.querySelectorAll("*")).filter(
         (e) => e.children.length === 0 && e.textContent.trim() === "Comments"
     );
     const visible = leaves.filter((e) => e.offsetParent !== null);
     if (!visible.length) return null;
-    const target = visible[visible.length - 1];
-    const box = target.getBoundingClientRect();
-    const opts = {
-        bubbles: true, cancelable: true, view: window,
-        clientX: box.x + box.width / 2, clientY: box.y + box.height / 2,
-    };
-    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-        const Ctor = type.startsWith("pointer") ? PointerEvent : MouseEvent;
-        target.dispatchEvent(new Ctor(type, opts));
-    }
-    return {y: Math.round(box.y)};
+    return fire(visible[visible.length - 1]);
 }"""
 
 _COMMENTS_LOADED_JS = """() => document.querySelectorAll(
