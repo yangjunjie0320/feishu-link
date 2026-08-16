@@ -299,3 +299,85 @@ def test_normalize_drops_user_key_so_instagram_branch_cannot_claim_it() -> None:
 
 def test_normalize_passes_through_non_dict() -> None:
     assert normalize_tiktok_comment("not a comment") == "not a comment"
+
+
+def _netscape_cookie_file(tmp_path, lines: list[str]) -> str:
+    path = tmp_path / "tiktok.txt"
+    path.write_text("# Netscape HTTP Cookie File\n" + "\n".join(lines) + "\n", encoding="utf-8")
+    return str(path)
+
+
+async def test_seed_cookies_loads_exported_session(tmp_path, caplog) -> None:
+    """A fresh profile is anonymous, and TikTok answers anonymous with an empty body."""
+    from src.config import Settings
+    from src.tiktok_comments import TikTokCommentClient
+
+    cookie_file = _netscape_cookie_file(
+        tmp_path,
+        [
+            ".tiktok.com\tTRUE\t/\tTRUE\t1900000000\tsessionid\tsecret",
+            ".tiktok.com\tTRUE\t/\tTRUE\t1900000000\tssid_ucp_v1\talso-secret",
+            ".example.com\tTRUE\t/\tTRUE\t1900000000\tunrelated\tnope",
+        ],
+    )
+    added: list[list[dict]] = []
+
+    class FakeContext:
+        async def add_cookies(self, cookies):
+            added.append(cookies)
+
+    settings = Settings(platform_cookie_files={"tiktok": cookie_file})
+    await TikTokCommentClient(settings)._seed_cookies(FakeContext())
+
+    assert len(added) == 1
+    names = {c["name"] for c in added[0]}
+    assert names == {"sessionid", "ssid_ucp_v1"}
+
+
+async def test_seed_cookies_warns_when_nothing_to_seed(tmp_path, caplog) -> None:
+    from src.config import Settings
+    from src.tiktok_comments import TikTokCommentClient
+
+    class FakeContext:
+        async def add_cookies(self, cookies):
+            raise AssertionError("must not be called without cookies")
+
+    settings = Settings(platform_cookie_files={"tiktok": str(tmp_path / "missing.txt")})
+    with caplog.at_level("WARNING"):
+        await TikTokCommentClient(settings)._seed_cookies(FakeContext())
+
+    assert "no tiktok cookies to seed" in caplog.text
+
+
+async def test_browser_request_json_retries_once_after_navigation() -> None:
+    """TikTok navigates after load; a destroyed context must not kill the fetch."""
+    from src.config import Settings
+    from src.tiktok_comments import TikTokCommentClient
+
+    calls: list[str] = []
+
+    class FakePage:
+        async def evaluate(self, script, arg=None):
+            calls.append("evaluate")
+            if len(calls) == 1:
+                raise RuntimeError(
+                    "Execution context was destroyed, most likely because of a navigation"
+                )
+            return {"status": 200, "text": '{"status_code": 0}', "contentType": "application/json"}
+
+    result = await TikTokCommentClient(Settings())._browser_request_json(FakePage(), "https://x")
+
+    assert len(calls) == 2
+    assert result == {"status_code": 0}
+
+
+async def test_browser_request_json_propagates_other_errors() -> None:
+    from src.config import Settings
+    from src.tiktok_comments import TikTokCommentClient
+
+    class FakePage:
+        async def evaluate(self, script, arg=None):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    with pytest.raises(RuntimeError, match="has been closed"):
+        await TikTokCommentClient(Settings())._browser_request_json(FakePage(), "https://x")

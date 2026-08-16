@@ -5,12 +5,9 @@ import base64
 import json
 import logging
 import re
-import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from http.cookiejar import MozillaCookieJar
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -24,7 +21,7 @@ from .bibi_models import (
 from .browser_session import BrowserUnavailableError, persistent_context
 from .config import Settings
 from .cookie_refresh import write_netscape
-from .cookie_utils import get_cookie_header
+from .cookie_utils import get_cookie_header, playwright_cookies_from_file
 
 logger = logging.getLogger(__name__)
 
@@ -482,7 +479,7 @@ class BibiClient:
                 )
             return
 
-        cookies = _playwright_cookies_from_file(
+        cookies = playwright_cookies_from_file(
             self._cookie_file,
             self._routes.cookie_domain,
         )
@@ -729,42 +726,6 @@ def _extract_user_data(data: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("BibiGPT user response data has unexpected shape")
     return payload
-
-
-def _playwright_cookies_from_file(cookie_file: str, domain: str) -> list[dict[str, Any]]:
-    path = Path(cookie_file)
-    if not path.exists():
-        return []
-
-    jar = MozillaCookieJar(str(path))
-    try:
-        jar.load(ignore_discard=True, ignore_expires=True)
-    except Exception as exc:
-        logger.warning("Failed to parse BibiGPT cookies for browser mode: %s", exc)
-        return []
-
-    now = int(time.time())
-    cookies: list[dict[str, Any]] = []
-    for cookie in jar:
-        cookie_domain = cookie.domain.lstrip(".")
-        if cookie_domain != domain and not domain.endswith(f".{cookie_domain}"):
-            continue
-        if cookie.expires is not None and cookie.expires <= now:
-            continue
-
-        item: dict[str, Any] = {
-            "name": cookie.name,
-            "value": cookie.value,
-            "domain": cookie.domain or domain,
-            "path": cookie.path or "/",
-            "secure": bool(cookie.secure),
-            "httpOnly": bool(cookie.has_nonstandard_attr("HttpOnly")),
-        }
-        if cookie.expires is not None:
-            item["expires"] = cookie.expires
-        cookies.append(item)
-
-    return cookies
 
 
 def _summarize_error_body(body: str) -> str:

@@ -28,6 +28,7 @@ import httpx
 
 from .browser_session import BrowserUnavailableError, persistent_context
 from .config import Settings
+from .cookie_utils import playwright_cookies_from_file
 
 logger = logging.getLogger(__name__)
 
@@ -359,8 +360,12 @@ class TikTokCommentClient:
                 timeout_ms=timeout_ms,
                 viewport=_VIEWPORT,
             ) as context:
+                await self._seed_cookies(context)
                 page = context.pages[0] if context.pages else await context.new_page()
                 await page.goto(page_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                # TikTok keeps navigating after domcontentloaded; evaluating too
+                # early dies with "Execution context was destroyed".
+                await self._settle_page(page, timeout_ms)
                 await self._check_page_state(page)
                 await self._wait_for_signer(page)
 
@@ -379,6 +384,30 @@ class TikTokCommentClient:
         except PlaywrightError as exc:
             logger.error("tiktok comment browser failed: url=%s error=%s", page_url, exc)
             raise TikTokCommentError("TikTok 评论抓取启动浏览器失败，请稍后重试。") from exc
+
+    async def _seed_cookies(self, context: Any) -> None:
+        """Load the exported tiktok session into this profile.
+
+        The comment profile is created empty, so without this every request is
+        anonymous -- and TikTok answers logged-out clients with an empty body.
+        """
+        cookie_file = self._settings.cookie_file_for_platform("tiktok")
+        cookies = playwright_cookies_from_file(cookie_file, "tiktok.com")
+        if not cookies:
+            logger.warning(
+                "no tiktok cookies to seed (file=%s); comment API will likely return an empty body",
+                cookie_file or "<none>",
+            )
+            return
+        await context.add_cookies(cookies)
+        logger.info("seeded %d tiktok cookies into comment browser context", len(cookies))
+
+    async def _settle_page(self, page: Any, timeout_ms: int) -> None:
+        """Wait out TikTok's post-load navigation before evaluating in the page."""
+        try:
+            await page.wait_for_load_state("load", timeout=timeout_ms)
+        except Exception as exc:
+            logger.info("tiktok page load state not reached, continuing: %s", exc)
 
     async def _check_page_state(self, page: Any) -> None:
         landed = str(page.url)
@@ -409,7 +438,16 @@ class TikTokCommentClient:
             )
 
     async def _browser_request_json(self, page: Any, url: str) -> Any:
-        result = await page.evaluate(_FETCH_JS, {"url": url})
+        try:
+            result = await page.evaluate(_FETCH_JS, {"url": url})
+        except Exception as exc:
+            if "Execution context was destroyed" not in str(exc):
+                raise
+            # A late navigation tore down the context mid-evaluate; the page is
+            # settled by the time it lands, so one retry is enough.
+            logger.info("tiktok page navigated during fetch, retrying once")
+            result = await page.evaluate(_FETCH_JS, {"url": url})
+
         if not isinstance(result, dict):
             raise TikTokCommentError("TikTok 评论接口返回了无法解析的数据。")
 
