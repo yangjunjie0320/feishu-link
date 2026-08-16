@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from ..config import Settings
+from ..http_errors import describe_request_error
 from .base import LinkMetadata, MediaType, ParserError
 from .og_meta import _request_headers
 
@@ -23,19 +24,22 @@ class InstagramMediaInfoParser:
             raise ParserError(url, "instagram shortcode not found")
 
         endpoint = (
-            "https://www.instagram.com/api/v1/media/"
-            f"{_shortcode_to_media_id(shortcode)}/info/"
+            f"https://www.instagram.com/api/v1/media/{_shortcode_to_media_id(shortcode)}/info/"
         )
         headers = _request_headers("https://www.instagram.com/", self._settings)
-        headers.update({
-            "Referer": "https://www.instagram.com/",
-            "X-IG-App-ID": "936619743392459",
-        })
+        headers.update(
+            {
+                "Referer": "https://www.instagram.com/",
+                "X-IG-App-ID": "936619743392459",
+            }
+        )
 
         try:
             resp = await self._client.get(endpoint, headers=headers, follow_redirects=True)
         except httpx.RequestError as e:
-            raise ParserError(url, f"instagram media info request error: {e}") from e
+            raise ParserError(
+                url, f"instagram media info request error: {describe_request_error(e)}"
+            ) from e
 
         if resp.status_code >= 400:
             raise ParserError(url, f"instagram media info HTTP {resp.status_code}")

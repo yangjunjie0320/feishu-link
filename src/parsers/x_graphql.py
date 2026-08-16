@@ -8,6 +8,7 @@ import httpx
 
 from ..config import Settings
 from ..cookie_utils import cookie_value, get_cookie_header
+from ..http_errors import describe_request_error
 from .base import LinkMetadata, MediaType, ParserError
 
 _BEARER_TOKEN = (
@@ -88,7 +89,7 @@ class XGraphQLParser:
                 follow_redirects=True,
             )
         except httpx.RequestError as e:
-            raise ParserError(url, f"x GraphQL request error: {e}") from e
+            raise ParserError(url, f"x GraphQL request error: {describe_request_error(e)}") from e
 
         if resp.status_code >= 400:
             raise ParserError(url, f"x GraphQL HTTP {resp.status_code}")

@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 
 from ..config import Settings
 from ..cookie_utils import get_cookie_header
+from ..http_errors import describe_request_error
 from ..platforms import detect_platform
 from .base import LinkMetadata, ParserError
 
@@ -35,7 +36,7 @@ class OGMetaParser:
                 follow_redirects=True,
             )
         except httpx.RequestError as e:
-            raise ParserError(url, f"request error: {e}") from e
+            raise ParserError(url, f"request error: {describe_request_error(e)}") from e
 
         if resp.status_code >= 400:
             raise ParserError(url, f"HTTP {resp.status_code}")

@@ -5,6 +5,7 @@ from urllib.parse import urlencode, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
+from ..http_errors import describe_request_error
 from .base import LinkMetadata, MediaType, ParserError
 
 
@@ -21,7 +22,7 @@ class XOEmbedParser:
         try:
             resp = await self._client.get(endpoint, follow_redirects=True)
         except httpx.RequestError as e:
-            raise ParserError(url, f"x oEmbed request error: {e}") from e
+            raise ParserError(url, f"x oEmbed request error: {describe_request_error(e)}") from e
 
         if resp.status_code >= 400:
             raise ParserError(url, f"x oEmbed HTTP {resp.status_code}")

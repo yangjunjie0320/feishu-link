@@ -20,6 +20,7 @@ import httpx
 from .config import Settings
 from .cookie_refresh import force_refresh
 from .cookie_utils import cookie_value, get_cookie_header, temporary_cookie_file
+from .http_errors import describe_request_error
 from .parsers.instagram_media_info import _shortcode_from_url, _shortcode_to_media_id
 from .parsers.og_meta import _USER_AGENT, _request_headers
 from .parsers.x_graphql import tweet_id_from_url, x_api_headers, x_graphql_endpoint
@@ -334,7 +335,9 @@ class CommentAnalyzer:
                     follow_redirects=True,
                 )
             except httpx.RequestError as e:
-                raise CommentAnalysisError(f"Instagram comments request error: {e}") from e
+                raise CommentAnalysisError(
+                    f"Instagram comments request error: {describe_request_error(e)}"
+                ) from e
 
             if response.status_code >= 400:
                 raise CommentAnalysisError(f"Instagram comments HTTP {response.status_code}")
@@ -428,7 +431,9 @@ class CommentAnalyzer:
                 follow_redirects=True,
             )
         except httpx.RequestError as e:
-            raise CommentAnalysisError(f"X comments request error: {e}") from e
+            raise CommentAnalysisError(
+                f"X comments request error: {describe_request_error(e)}"
+            ) from e
 
         if response.status_code == 429:
             raise CommentAnalysisError("X 评论接口触发限流。")
@@ -501,7 +506,9 @@ class CommentAnalyzer:
             view_response.raise_for_status()
             view_data = view_response.json()
         except httpx.HTTPError as e:
-            raise CommentAnalysisError(f"Bilibili view request error: {e}") from e
+            raise CommentAnalysisError(
+                f"Bilibili view request error: {describe_request_error(e)}"
+            ) from e
         except ValueError as e:
             raise CommentAnalysisError("Bilibili view API returned non-json response") from e
         if view_data.get("code") != 0:
@@ -548,7 +555,9 @@ class CommentAnalyzer:
                     response.raise_for_status()
                     data = response.json()
                 except httpx.HTTPError as e:
-                    raise CommentAnalysisError(f"Bilibili reply request error: {e}") from e
+                    raise CommentAnalysisError(
+                        f"Bilibili reply request error: {describe_request_error(e)}"
+                    ) from e
                 except ValueError as e:
                     raise CommentAnalysisError(
                         "Bilibili reply API returned non-json response"
@@ -615,7 +624,9 @@ class CommentAnalyzer:
             response.raise_for_status()
             nav_data = response.json()
         except httpx.HTTPError as e:
-            raise CommentAnalysisError(f"Bilibili nav request error: {e}") from e
+            raise CommentAnalysisError(
+                f"Bilibili nav request error: {describe_request_error(e)}"
+            ) from e
         except ValueError as e:
             raise CommentAnalysisError("Bilibili nav API returned non-json response") from e
 

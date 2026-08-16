@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from ..http_errors import describe_request_error
 from .base import LinkMetadata, MediaType, ParserError
 from .og_meta import OGMetaParser
 
@@ -74,7 +75,7 @@ class YouTubeParser:
                 },
             )
         except httpx.RequestError as e:
-            raise ParserError(url, f"YouTube API request error: {e}") from e
+            raise ParserError(url, f"YouTube API request error: {describe_request_error(e)}") from e
 
         if resp.status_code >= 400:
             raise ParserError(url, f"YouTube API HTTP {resp.status_code}")
