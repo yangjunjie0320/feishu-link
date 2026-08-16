@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     tiktok_comment_fetch_enabled: bool = True
     tiktok_comment_browser_profile_dir: str = "browser-data/tiktok"
     tiktok_comment_browser_headless: bool = True
+    # Real Chrome, not Playwright's bundled Chromium: TikTok serves the latter
+    # empty comment bodies. Combined with Chrome's new headless mode.
+    tiktok_comment_browser_channel: str = "chrome"
     tiktok_comment_browser_timeout: float = 45.0
     tiktok_comment_fetch_timeout: float = 120.0
     # Timing is a narrow window: the Comments tab renders before React binds

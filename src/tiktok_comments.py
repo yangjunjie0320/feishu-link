@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import re
+import subprocess
 import time
 from collections.abc import Iterable
 from typing import Any
@@ -46,6 +47,21 @@ _USER_AGENT = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 _VIEWPORT = {"width": 1280, "height": 900}
+
+# Chrome's new headless mode is a full browser; Playwright's headless flag picks
+# the old stripped-down build, which TikTok detects and answers with empty
+# comment bodies. Requesting it needs headless=False so Playwright does not add
+# its own flag. Verified: identical setup returned 0 bytes on the old mode and
+# 69494 bytes / 17 comments on the new one.
+_NEW_HEADLESS_ARGS = ("--headless=new", "--no-first-run", "--no-default-browser-check")
+
+# Dropping GPU support leaves no WebGL fingerprint, which TikTok reads as
+# automation: with --disable-gpu the comment API returns 0 bytes, without it
+# the same run returns 69943 bytes / 17 comments. --no-sandbox is harmless.
+_OMIT_ARGS = ("--disable-gpu",)
+
+_CHROME_BINARY = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+_CHROME_VERSION_RE = re.compile(r"(\d+)\.")
 
 _COMMENT_API_MARKER = "/api/comment/list"
 
@@ -113,6 +129,30 @@ _SCROLL_JS = """() => {
 
 class TikTokCommentError(Exception):
     """Explainable TikTok comment fetch failure; the message is user-facing."""
+
+
+def chrome_user_agent(default: str = _USER_AGENT, binary: str = _CHROME_BINARY) -> str:
+    """A UA matching the installed Chrome, so the version does not contradict it.
+
+    New headless mode still stamps "HeadlessChrome" into navigator.userAgent, so
+    the UA has to be overridden anyway; deriving the major version from the real
+    binary keeps it from drifting as Chrome updates.
+    """
+    try:
+        result = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.info("could not read Chrome version, using default UA: %s", exc)
+        return default
+
+    match = _CHROME_VERSION_RE.search(result.stdout)
+    if not match:
+        return default
+    return (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{match.group(1)}.0.0.0 Safari/537.36"
+    )
 
 
 def aweme_id_from_url(url: str) -> str:
@@ -346,12 +386,20 @@ class TikTokCommentClient:
         self._empty_responses = 0
 
         try:
+            # headless=False is deliberate: it stops Playwright selecting the
+            # old headless build, and --headless=new asks Chrome for the full
+            # one. No window is shown either way.
             async with persistent_context(
                 settings.tiktok_comment_browser_profile_dir,
-                headless=settings.tiktok_comment_browser_headless,
-                user_agent=_USER_AGENT,
+                headless=False,
+                user_agent=chrome_user_agent(),
                 timeout_ms=timeout_ms,
                 viewport=_VIEWPORT,
+                channel=settings.tiktok_comment_browser_channel or None,
+                extra_args=list(_NEW_HEADLESS_ARGS)
+                if settings.tiktok_comment_browser_headless
+                else None,
+                omit_args=_OMIT_ARGS,
             ) as context:
                 await self._seed_cookies(context)
                 page = context.pages[0] if context.pages else await context.new_page()

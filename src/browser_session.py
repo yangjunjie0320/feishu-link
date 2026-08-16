@@ -162,6 +162,8 @@ async def persistent_context(
     timeout_ms: int = 60000,
     viewport: dict[str, int] | None = None,
     channel: str | None = None,
+    extra_args: list[str] | None = None,
+    omit_args: tuple[str, ...] = (),
 ) -> AsyncIterator[Any]:
     """Launch a persistent Chromium profile and yield its browser context.
 
@@ -169,6 +171,13 @@ async def persistent_context(
     and clears stale singleton locks before launch, and guarantees the context is
     closed on exit. Playwright runtime errors propagate to the caller; a missing
     Playwright install raises BrowserUnavailableError.
+
+    extra_args appends to the shared launch flags; omit_args drops some. Both
+    exist for anti-bot-sensitive callers: TikTok needs Chrome's new headless
+    mode (`headless=False` plus `--headless=new`, a full browser rather than the
+    stripped-down build Playwright's own headless flag selects) and needs
+    `--disable-gpu` dropped, since the missing WebGL fingerprint reads as
+    automation. See DESIGN.md.
     """
     try:
         from playwright.async_api import async_playwright
@@ -185,7 +194,7 @@ async def persistent_context(
     launch_kwargs: dict[str, Any] = {
         "user_data_dir": str(path),
         "headless": headless,
-        "args": _LAUNCH_ARGS,
+        "args": [a for a in _LAUNCH_ARGS if a not in omit_args] + list(extra_args or []),
         "timeout": timeout_ms,
     }
     if user_agent:
