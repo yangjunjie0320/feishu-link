@@ -109,11 +109,12 @@ class Settings(BaseSettings):
     tiktok_comment_browser_headless: bool = True
     tiktok_comment_browser_timeout: float = 45.0
     tiktok_comment_fetch_timeout: float = 120.0
-    # The Comments tab renders before React binds its handler, so an early click
-    # silently does nothing; settle, click, and retry until comments appear.
-    tiktok_comment_tab_settle_seconds: float = 4.0
+    # Timing is a narrow window: the Comments tab renders before React binds
+    # its handler (early clicks silently do nothing), while waiting too long
+    # lets the feed autoplay on to the next video.
+    tiktok_comment_tab_settle_seconds: float = 10.0
     tiktok_comment_tab_click_attempts: int = 3
-    tiktok_comment_load_timeout: float = 15.0
+    tiktok_comment_load_timeout: float = 7.0
     tiktok_comment_max_scrolls: int = 25
     tiktok_comment_scroll_delay: float = 1.2
     # TikTok's device identity lives in Local Storage / IndexedDB, not cookies.

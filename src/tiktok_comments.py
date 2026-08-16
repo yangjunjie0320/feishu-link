@@ -68,14 +68,6 @@ _STATUS_ITEM_UNAVAILABLE = frozenset({2053, 10204})
 # cancellation that lands mid-close is exactly how orphan Chromium is created.
 _CLOSE_MARGIN_SECONDS = 10.0
 
-# "Comments" also labels a hidden filter in the Activity menu, so match the
-# visible leaf node -- the last one in document order is the panel tab.
-_TAB_READY_JS = """() => Array.from(document.querySelectorAll("*")).some(
-    (e) => e.children.length === 0
-        && e.textContent.trim() === "Comments"
-        && e.offsetParent !== null
-)"""
-
 # Dispatch the full pointer sequence rather than page.mouse.click(): React
 # listens on pointerdown, and the tab sits under an overlay that swallows a
 # synthetic click at those coordinates.
@@ -457,28 +449,24 @@ class TikTokCommentClient:
     async def _activate_comment_panel(self, page: Any, timeout_ms: int) -> None:
         """Click the Comments tab; the page requests nothing until it is open.
 
-        The tab renders before React binds its handler, so a click can report
-        success and do nothing -- hence retrying until comments actually appear.
+        Timing matters more than it looks. The tab renders before React binds
+        its handler, so clicking too early reports success and does nothing --
+        but waiting too long is just as bad, because the feed layout autoplays
+        on to the next video and the panel then belongs to a different post.
+        The working sequence settles once, then clicks and re-checks quickly.
         """
-        try:
-            await page.wait_for_function(_TAB_READY_JS, timeout=timeout_ms)
-        except Exception as exc:
-            logger.warning("tiktok comments tab never rendered: %s", exc)
-            return
+        await asyncio.sleep(self._settings.tiktok_comment_tab_settle_seconds)
 
-        settle = self._settings.tiktok_comment_tab_settle_seconds
         attempts = max(1, self._settings.tiktok_comment_tab_click_attempts)
+        poll = self._settings.tiktok_comment_load_timeout
         for attempt in range(attempts):
-            await asyncio.sleep(settle)
             spot = await page.evaluate(_CLICK_TAB_JS)
             if not isinstance(spot, dict):
-                logger.warning("tiktok comments tab not clickable")
-                return
+                logger.info("tiktok comments tab not present on attempt %d", attempt + 1)
+                await asyncio.sleep(2)
+                continue
             try:
-                await page.wait_for_function(
-                    _COMMENTS_LOADED_JS,
-                    timeout=int(self._settings.tiktok_comment_load_timeout * 1000),
-                )
+                await page.wait_for_function(_COMMENTS_LOADED_JS, timeout=int(poll * 1000))
                 logger.info("tiktok comment panel activated on attempt %d", attempt + 1)
                 return
             except Exception:
