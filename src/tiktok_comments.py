@@ -55,7 +55,6 @@ _COMMENT_API_MARKER = "/api/comment/list"
 # A profile seeded with cookies alone still looks like a brand new device and
 # gets empty comment bodies; copying this state across is what made it work.
 _BROWSER_STATE_DIRS = ("Local Storage", "Session Storage")
-_TIKTOK_IDB_PREFIX = "https_www.tiktok.com"
 
 # Distinguishing a captcha wall from a plain login requirement matters: one is
 # waited out or cleared by hand, the other needs fresh cookies.
@@ -405,19 +404,16 @@ class TikTokCommentClient:
             except OSError as exc:
                 logger.warning("failed to copy %s into tiktok profile: %s", name, exc)
 
-        # Only TikTok's own IndexedDB is needed; the rest of the store is large
-        # and irrelevant.
+        # Copy IndexedDB whole. Restricting it to TikTok's own origin looked
+        # like an obvious saving and broke it: the verified-working setup copied
+        # the entire store, and the same video that returned 70679 bytes with
+        # everything came back empty with only https_www.tiktok.com_0.
         idb_src = source / "IndexedDB"
         if idb_src.is_dir():
-            idb_dst = target / "IndexedDB"
-            idb_dst.mkdir(parents=True, exist_ok=True)
-            for entry in idb_src.iterdir():
-                if not entry.name.startswith(_TIKTOK_IDB_PREFIX):
-                    continue
-                try:
-                    shutil.copytree(entry, idb_dst / entry.name, dirs_exist_ok=True)
-                except OSError as exc:
-                    logger.warning("failed to copy %s into tiktok profile: %s", entry.name, exc)
+            try:
+                shutil.copytree(idb_src, target / "IndexedDB", dirs_exist_ok=True)
+            except OSError as exc:
+                logger.warning("failed to copy IndexedDB into tiktok profile: %s", exc)
         logger.info("seeded browser state into tiktok comment profile from %s", source)
 
     async def _seed_cookies(self, context: Any) -> None:

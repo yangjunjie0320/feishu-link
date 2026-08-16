@@ -319,8 +319,8 @@ def test_seed_browser_state_copies_local_storage_and_tiktok_idb(tmp_path) -> Non
     assert (default / "Local Storage" / "leveldb" / "000.ldb").exists()
     assert (default / "Session Storage" / "s.ldb").exists()
     assert (default / "IndexedDB" / "https_www.tiktok.com_0.indexeddb.leveldb" / "1.ldb").exists()
-    # Other sites' IndexedDB is large and irrelevant.
-    assert not (default / "IndexedDB" / "https_www.example.com_0.indexeddb.leveldb").exists()
+    # The whole store is copied: restricting it to TikTok's origin broke it.
+    assert (default / "IndexedDB" / "https_www.example.com_0.indexeddb.leveldb").exists()
 
 
 def test_seed_browser_state_runs_once_per_profile(tmp_path) -> None:
