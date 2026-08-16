@@ -438,11 +438,17 @@ class TikTokCommentClient:
                         )
 
                 page.on("response", on_response)
-                await page.goto(page_url, wait_until="domcontentloaded", timeout=timeout_ms)
-                await self._settle_page(page, timeout_ms)
-                await self._check_page_state(page)
-                await self._activate_comment_panel(page, timeout_ms)
-                await self._scroll_for_more(page, payloads, max_comments=max_comments)
+                try:
+                    await page.goto(page_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    await self._settle_page(page, timeout_ms)
+                    await self._check_page_state(page)
+                    await self._activate_comment_panel(page, timeout_ms)
+                    await self._scroll_for_more(page, payloads, max_comments=max_comments)
+                finally:
+                    # Responses still in flight would otherwise fire against a
+                    # closing context and surface as an unretrieved
+                    # TargetClosedError in the logs.
+                    page.remove_listener("response", on_response)
 
                 if not payloads and self._empty_responses:
                     logger.warning(
