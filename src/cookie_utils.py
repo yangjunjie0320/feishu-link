@@ -12,6 +12,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Beyond this an "expiry" cannot be unix seconds, so it is a different unit --
+# WebKit microsecond timestamps (~1.3e16) show up in exported cookie files and
+# Playwright rejects them outright. Real expiries run ~1.8e9 and legitimately
+# reach past 2038, so the cutoff sits well above them and well below microseconds.
+_MAX_UNIX_EXPIRY = 10**12
+
 
 class CookieError(Exception):
     """Raised when cookie file is missing, malformed, or contains no auth tokens."""
@@ -85,7 +91,9 @@ def playwright_cookies_from_file(cookie_file: str, domain: str) -> list[dict[str
         cookie_domain = cookie.domain.lstrip(".")
         if cookie_domain != domain and not domain.endswith(f".{cookie_domain}"):
             continue
-        if cookie.expires is not None and cookie.expires <= now:
+
+        expires = _playwright_expires(cookie.expires)
+        if expires is not None and 0 < expires <= now:
             continue
 
         item: dict[str, Any] = {
@@ -96,11 +104,26 @@ def playwright_cookies_from_file(cookie_file: str, domain: str) -> list[dict[str
             "secure": bool(cookie.secure),
             "httpOnly": bool(cookie.has_nonstandard_attr("HttpOnly")),
         }
-        if cookie.expires is not None:
-            item["expires"] = cookie.expires
+        if expires is not None:
+            item["expires"] = expires
         cookies.append(item)
 
     return cookies
+
+
+def _playwright_expires(expires: int | None) -> int | None:
+    """Normalize a Netscape expiry into what Playwright accepts (-1 or positive).
+
+    Two real shapes break add_cookies outright. TikTok exports session cookies
+    (tt_csrf_token among them) with expiry 0, which read as "already expired"
+    and were dropped; and some entries carry WebKit microsecond timestamps
+    (13455611319580140), which Playwright rejects as out of range. Both are
+    treated as session cookies -- valid for this browser context, which is all
+    a single fetch needs.
+    """
+    if expires is None or expires <= 0 or expires > _MAX_UNIX_EXPIRY:
+        return -1
+    return expires
 
 
 def cookie_value(cookie_header: str, name: str) -> str:
