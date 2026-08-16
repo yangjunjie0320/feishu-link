@@ -26,10 +26,8 @@ import asyncio
 import json
 import logging
 import re
-import shutil
 import time
 from collections.abc import Iterable
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -50,11 +48,6 @@ _USER_AGENT = (
 _VIEWPORT = {"width": 1280, "height": 900}
 
 _COMMENT_API_MARKER = "/api/comment/list"
-
-# TikTok keeps its device identity in Local Storage / IndexedDB, not in cookies.
-# A profile seeded with cookies alone still looks like a brand new device and
-# gets empty comment bodies; copying this state across is what made it work.
-_BROWSER_STATE_DIRS = ("Local Storage", "Session Storage")
 
 # Distinguishing a captcha wall from a plain login requirement matters: one is
 # waited out or cleared by hand, the other needs fresh cookies.
@@ -304,9 +297,6 @@ class TikTokCommentClient:
         payloads: list[object] = []
         self._empty_responses = 0
 
-        # Must happen before launch: Chromium reads the profile at startup.
-        self._seed_browser_state()
-
         try:
             async with persistent_context(
                 settings.tiktok_comment_browser_profile_dir,
@@ -365,48 +355,6 @@ class TikTokCommentClient:
         except PlaywrightError as exc:
             logger.error("tiktok comment browser failed: url=%s error=%s", page_url, exc)
             raise TikTokCommentError("TikTok 评论抓取启动浏览器失败，请稍后重试。") from exc
-
-    def _seed_browser_state(self) -> None:
-        """Copy the device identity TikTok keeps outside cookies.
-
-        Local Storage and IndexedDB carry what TikTok uses to recognize a
-        browser; a profile holding only cookies still reads as a new device and
-        gets empty comment bodies. Verified: the same video failed with cookies
-        alone and returned 70679 bytes once this state was copied across.
-
-        Runs once per profile -- the copy is ~20MB and the state does not need
-        to stay in sync afterwards. Best effort: any failure is logged and the
-        fetch proceeds.
-        """
-        source = Path(self._settings.tiktok_comment_chrome_profile_dir).expanduser()
-        if not self._settings.tiktok_comment_seed_browser_state or not source.is_dir():
-            return
-
-        target = Path(self._settings.tiktok_comment_browser_profile_dir) / "Default"
-        if (target / "Local Storage").exists():
-            return
-
-        target.mkdir(parents=True, exist_ok=True)
-        for name in _BROWSER_STATE_DIRS:
-            src = source / name
-            if not src.is_dir():
-                continue
-            try:
-                shutil.copytree(src, target / name, dirs_exist_ok=True)
-            except OSError as exc:
-                logger.warning("failed to copy %s into tiktok profile: %s", name, exc)
-
-        # Copy IndexedDB whole. Restricting it to TikTok's own origin looked
-        # like an obvious saving and broke it: the verified-working setup copied
-        # the entire store, and the same video that returned 70679 bytes with
-        # everything came back empty with only https_www.tiktok.com_0.
-        idb_src = source / "IndexedDB"
-        if idb_src.is_dir():
-            try:
-                shutil.copytree(idb_src, target / "IndexedDB", dirs_exist_ok=True)
-            except OSError as exc:
-                logger.warning("failed to copy IndexedDB into tiktok profile: %s", exc)
-        logger.info("seeded browser state into tiktok comment profile from %s", source)
 
     async def _seed_cookies(self, context: Any) -> None:
         """Load the exported tiktok session into this profile.

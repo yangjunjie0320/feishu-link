@@ -117,12 +117,6 @@ class Settings(BaseSettings):
     tiktok_comment_load_timeout: float = 7.0
     tiktok_comment_max_scrolls: int = 25
     tiktok_comment_scroll_delay: float = 1.2
-    # TikTok's device identity lives in Local Storage / IndexedDB, not cookies.
-    # Copying it from the real Chrome profile once is what makes comments load.
-    tiktok_comment_seed_browser_state: bool = True
-    tiktok_comment_chrome_profile_dir: str = (
-        "~/Library/Application Support/Google/Chrome/Default"
-    )
 
     _allowlist_patterns: list[re.Pattern[str]] = []
     _blacklist_patterns: list[re.Pattern[str]] = []
