@@ -14,6 +14,8 @@ dependencies = [
     "python-dateutil>=2.9",
     "tenacity>=8.0",
     "lark-oapi>=1.3",
+    # Deliberately NOT yt-dlp[curl-cffi]: enabling impersonation breaks TikTok
+    # in this deployment. See DESIGN.md (dependency notes).
     "yt-dlp>=2025.0",
     "playwright==1.60.0",
 ]

@@ -70,7 +70,11 @@ class Dispatcher:
     async def _parse_og_or_fallback(self, url: str) -> LinkMetadata:
         try:
             return await self._og.parse(url)
-        except ParserError:
+        except ParserError as e:
+            # Both layers must explain themselves: when fallback also fails only
+            # its reason survives, and a silent OG failure leaves no way to tell
+            # a transport error from a blocked page.
+            logger.info("og meta failed, trying fallback parser: url=%s reason=%s", url, e.reason)
             return await self._fallback.parse(url)
 
     async def _parse_instagram_post(self, url: str) -> LinkMetadata:
@@ -80,12 +84,20 @@ class Dispatcher:
             logger.info("instagram media info failed for %s: %s", url, e.reason)
             try:
                 meta = await self._og.parse(url)
-            except ParserError:
+            except ParserError as og_error:
+                logger.info(
+                    "instagram og meta failed, trying fallback parser: url=%s reason=%s",
+                    url,
+                    og_error.reason,
+                )
                 meta = await self._fallback.parse(url)
         if not meta.cover_url:
             try:
                 og_meta = await self._og.parse(url)
-            except ParserError:
+            except ParserError as cover_error:
+                logger.info(
+                    "instagram cover backfill failed: url=%s reason=%s", url, cover_error.reason
+                )
                 og_meta = None
             if og_meta and og_meta.cover_url:
                 meta.cover_url = og_meta.cover_url

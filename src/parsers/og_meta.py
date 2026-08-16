@@ -36,9 +36,25 @@ class OGMetaParser:
                 follow_redirects=True,
             )
         except httpx.RequestError as e:
+            logger.warning(
+                "og meta transport error: platform=%s url=%s error=%s",
+                platform,
+                url,
+                describe_request_error(e),
+            )
             raise ParserError(url, f"request error: {describe_request_error(e)}") from e
 
         if resp.status_code >= 400:
+            # The body distinguishes a login wall from a rate limit from a
+            # deleted post; the status code alone does not.
+            logger.warning(
+                "og meta HTTP %d: platform=%s url=%s content_type=%s body=%r",
+                resp.status_code,
+                platform,
+                url,
+                resp.headers.get("content-type", ""),
+                resp.text[:200],
+            )
             raise ParserError(url, f"HTTP {resp.status_code}")
 
         soup = BeautifulSoup(resp.text, "lxml")

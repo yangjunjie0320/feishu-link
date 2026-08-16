@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -10,7 +11,14 @@ from ..http_errors import describe_request_error
 from .base import LinkMetadata, MediaType, ParserError
 from .og_meta import _request_headers
 
+logger = logging.getLogger(__name__)
+
 _SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+# Instagram answers 4xx with a JSON body explaining itself ("login_required",
+# "Please wait a few minutes before you try again"). Without it a bare status
+# code cannot tell a rate limit from a dead cookie.
+_ERROR_BODY_CHARS = 200
 
 
 class InstagramMediaInfoParser:
@@ -34,27 +42,61 @@ class InstagramMediaInfoParser:
             }
         )
 
+        has_cookie = "Cookie" in headers
+        logger.info("instagram media info request: shortcode=%s cookie=%s", shortcode, has_cookie)
+
         try:
             resp = await self._client.get(endpoint, headers=headers, follow_redirects=True)
         except httpx.RequestError as e:
+            logger.warning(
+                "instagram media info transport error: shortcode=%s cookie=%s error=%s",
+                shortcode,
+                has_cookie,
+                describe_request_error(e),
+            )
             raise ParserError(
                 url, f"instagram media info request error: {describe_request_error(e)}"
             ) from e
 
         if resp.status_code >= 400:
+            logger.warning(
+                "instagram media info HTTP %d: shortcode=%s cookie=%s content_type=%s body=%r",
+                resp.status_code,
+                shortcode,
+                has_cookie,
+                resp.headers.get("content-type", ""),
+                resp.text[:_ERROR_BODY_CHARS],
+            )
             raise ParserError(url, f"instagram media info HTTP {resp.status_code}")
 
         try:
             data: dict[str, Any] = resp.json()
         except ValueError as e:
+            logger.warning(
+                "instagram media info non-json: shortcode=%s content_type=%s body=%r",
+                shortcode,
+                resp.headers.get("content-type", ""),
+                resp.text[:_ERROR_BODY_CHARS],
+            )
             raise ParserError(url, "instagram media info returned non-json response") from e
 
         item = _first_item(data)
         if not item:
+            logger.warning(
+                "instagram media info no items: shortcode=%s keys=%s",
+                shortcode,
+                sorted(data.keys())[:10],
+            )
             raise ParserError(url, "instagram media info returned no items")
 
         cover_url = _cover_url_from_item(item, _img_index(url))
         if not cover_url:
+            logger.warning(
+                "instagram media info no image: shortcode=%s media_type=%s carousel=%s",
+                shortcode,
+                item.get("media_type"),
+                isinstance(item.get("carousel_media"), list),
+            )
             raise ParserError(url, "instagram media info returned no image")
 
         user = item.get("user") if isinstance(item.get("user"), dict) else {}
