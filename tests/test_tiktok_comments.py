@@ -290,3 +290,50 @@ async def test_panel_never_loading_is_distinct_from_throttling(monkeypatch) -> N
         await client.fetch_comments(
             "https://www.tiktok.com/@a/video/123", max_comments=10, deadline=time.monotonic() + 60
         )
+
+
+def test_parse_abbreviated_count_handles_tiktok_display_formats() -> None:
+    """Without this every DOM-path like count reads as 0 and heat sorting dies."""
+    from src.tiktok_comments import parse_abbreviated_count
+
+    assert parse_abbreviated_count("789") == 789
+    assert parse_abbreviated_count("1.2K") == 1200
+    assert parse_abbreviated_count("3.4M") == 3_400_000
+    assert parse_abbreviated_count("1,234") == 1234
+    assert parse_abbreviated_count("") == 0
+    assert parse_abbreviated_count(None) == 0
+    assert parse_abbreviated_count("赞") == 0
+
+
+def test_normalize_dom_comment_maps_through_to_video_comment() -> None:
+    from src.comment_analyzer import comments_from_raw
+    from src.tiktok_comments import normalize_dom_comment
+
+    scraped = [
+        {"author": "Ada", "text": "great video", "likes": "1.2K"},
+        {"author": "@bob_t", "text": "second", "likes": "5"},
+    ]
+
+    comments = comments_from_raw([normalize_dom_comment(c) for c in scraped], max_comments=10)
+
+    assert [c.text for c in comments] == ["great video", "second"]
+    assert comments[0].like_count == 1200
+    assert comments[0].author_url == "https://www.tiktok.com/@Ada"
+    # A leading @ must not become a doubled handle in the URL.
+    assert comments[1].author_url == "https://www.tiktok.com/@bob_t"
+
+
+def test_normalize_dom_comment_dedupes_without_ids() -> None:
+    """The DOM carries no comment id, so dedupe leans on (author, text)."""
+    from src.comment_analyzer import comments_from_raw
+    from src.tiktok_comments import normalize_dom_comment
+
+    scraped = [
+        {"author": "Ada", "text": "pinned", "likes": "9K"},
+        {"author": "Ada", "text": "pinned", "likes": "9K"},
+        {"author": "Bob", "text": "other", "likes": "1"},
+    ]
+
+    comments = comments_from_raw([normalize_dom_comment(c) for c in scraped], max_comments=10)
+
+    assert len(comments) == 2

@@ -49,6 +49,10 @@ _VIEWPORT = {"width": 1280, "height": 900}
 
 _COMMENT_API_MARKER = "/api/comment/list"
 
+# Rendered counts are abbreviated ("1.2K"); parsing them keeps heat sorting
+# meaningful on the DOM path, which has no raw numbers.
+_COUNT_SUFFIXES = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
+
 # Distinguishing a captcha wall from a plain login requirement matters: one is
 # waited out or cleared by hand, the other needs fresh cookies.
 _CAPTCHA_MARKERS = ("captcha", "verify_center", "secsdk-captcha")
@@ -165,6 +169,50 @@ def normalize_tiktok_comment(raw: object) -> object:
         "parent": parent,
         "replies": [],
     }
+
+
+def normalize_dom_comment(raw: object) -> object:
+    """Rewrite a comment scraped from the rendered page into the generic keys.
+
+    The DOM path (driving the user's real Chrome over AppleScript) yields only
+    what is on screen -- author, text and an abbreviated like count like "1.2K"
+    -- rather than the API's JSON. It carries no comment id, so dedupe falls
+    back to (author, text), which `comments_from_raw` already does.
+    """
+    if not isinstance(raw, dict):
+        return raw
+
+    author = str(raw.get("author") or "").strip()
+    return {
+        "id": "",
+        "text": str(raw.get("text") or "").strip(),
+        "author": author,
+        "author_url": f"https://www.tiktok.com/@{author.lstrip('@')}" if author else "",
+        "comment_url": "",
+        "like_count": parse_abbreviated_count(raw.get("likes")),
+        "reply_count": 0,
+        "parent": "",
+        "replies": [],
+    }
+
+
+def parse_abbreviated_count(value: object) -> int:
+    """Turn TikTok's on-screen counts ("1.2K", "3.4M", "789") into integers.
+
+    Rendered counts are abbreviated; without this every like count reads as 0
+    and heat sorting silently degrades to input order.
+    """
+    text = str(value or "").strip().replace(",", "")
+    if not text:
+        return 0
+    multiplier = 1
+    if text[-1] in _COUNT_SUFFIXES:
+        multiplier = _COUNT_SUFFIXES[text[-1]]
+        text = text[:-1]
+    try:
+        return int(float(text) * multiplier)
+    except ValueError:
+        return 0
 
 
 def comments_from_payloads(
