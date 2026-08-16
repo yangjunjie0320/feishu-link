@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import httpx
@@ -252,3 +253,40 @@ def test_payloads_return_empty_without_error_when_no_comments() -> None:
 
     assert collected == []
     assert total == 0
+
+
+async def test_empty_body_is_reported_as_throttling_not_as_no_comments(monkeypatch) -> None:
+    """An empty body is TikTok's throttling response, not an empty comment section."""
+    from src.config import Settings
+    from src.tiktok_comments import TikTokCommentClient
+
+    client = TikTokCommentClient(Settings())
+
+    async def fake_collect(self, page_url: str, *, max_comments: int):
+        self._empty_responses = 2
+        return []
+
+    monkeypatch.setattr(TikTokCommentClient, "_collect_payloads", fake_collect)
+
+    with pytest.raises(TikTokCommentError, match="限流"):
+        await client.fetch_comments(
+            "https://www.tiktok.com/@a/video/123", max_comments=10, deadline=time.monotonic() + 60
+        )
+
+
+async def test_panel_never_loading_is_distinct_from_throttling(monkeypatch) -> None:
+    from src.config import Settings
+    from src.tiktok_comments import TikTokCommentClient
+
+    client = TikTokCommentClient(Settings())
+
+    async def fake_collect(self, page_url: str, *, max_comments: int):
+        self._empty_responses = 0
+        return []
+
+    monkeypatch.setattr(TikTokCommentClient, "_collect_payloads", fake_collect)
+
+    with pytest.raises(TikTokCommentError, match="评论面板未加载"):
+        await client.fetch_comments(
+            "https://www.tiktok.com/@a/video/123", max_comments=10, deadline=time.monotonic() + 60
+        )

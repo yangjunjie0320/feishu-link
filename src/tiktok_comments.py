@@ -230,6 +230,10 @@ def _captcha_marker(text: str) -> str:
 class TikTokCommentClient:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        # How many comment responses came back with an empty body: TikTok's
+        # throttling signal, and the difference between "refused" and "never
+        # asked" when reporting failure.
+        self._empty_responses = 0
 
     async def fetch_comments(
         self, url: str, *, max_comments: int, deadline: float
@@ -250,16 +254,23 @@ class TikTokCommentClient:
             raise TikTokCommentError("TikTok 评论抓取超时，请稍后重试。") from e
 
         if not payloads:
-            raise TikTokCommentError(
-                "TikTok 未返回任何评论数据，可能是评论区已关闭或触发了风控，请稍后重试。"
-            )
+            raise TikTokCommentError(self._empty_result_message())
 
         comments, total = comments_from_payloads(payloads, max_comments=max_comments)
         if not comments:
-            # The page asked and TikTok answered with nothing. Empty bodies are
-            # its throttling response, so say so rather than "no comments".
-            raise TikTokCommentError("TikTok 返回了空评论数据，通常表示被限流，请稍后重试。")
+            raise TikTokCommentError(self._empty_result_message())
         return comments, total
+
+    def _empty_result_message(self) -> str:
+        """Separate "TikTok refused" from "the panel never opened".
+
+        An empty body is TikTok's throttling response and is by far the common
+        case after repeated fetches, so it must not read as "no comments" --
+        that sends the reader looking at the video instead of at the clock.
+        """
+        if self._empty_responses:
+            return "TikTok 返回空评论数据，通常是短时间内请求过多被限流，过一段时间再试即可。"
+        return "TikTok 评论面板未加载出评论，请稍后重试。"
 
     async def _collect_payloads(self, page_url: str, *, max_comments: int) -> list[object]:
         """Drive the page's comment panel and return the responses it received.
@@ -281,7 +292,7 @@ class TikTokCommentClient:
         settings = self._settings
         timeout_ms = int(settings.tiktok_comment_browser_timeout * 1000)
         payloads: list[object] = []
-        empty_responses = 0
+        self._empty_responses = 0
 
         try:
             async with persistent_context(
@@ -295,7 +306,6 @@ class TikTokCommentClient:
                 page = context.pages[0] if context.pages else await context.new_page()
 
                 async def on_response(response: Any) -> None:
-                    nonlocal empty_responses
                     if _COMMENT_API_MARKER not in response.url:
                         return
                     try:
@@ -304,7 +314,7 @@ class TikTokCommentClient:
                         logger.info("tiktok comment response unreadable: %s", exc)
                         return
                     if not text.strip():
-                        empty_responses += 1
+                        self._empty_responses += 1
                         return
                     try:
                         payloads.append(json.loads(text))
@@ -323,11 +333,11 @@ class TikTokCommentClient:
                 await self._activate_comment_panel(page, timeout_ms)
                 await self._scroll_for_more(page, payloads, max_comments=max_comments)
 
-                if not payloads and empty_responses:
+                if not payloads and self._empty_responses:
                     logger.warning(
                         "tiktok returned %d empty comment responses: likely throttled "
                         "(cookie_present=%s)",
-                        empty_responses,
+                        self._empty_responses,
                         bool(settings.cookie_file_for_platform("tiktok")),
                     )
                 return payloads
