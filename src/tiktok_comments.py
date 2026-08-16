@@ -26,8 +26,10 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 import time
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -49,6 +51,12 @@ _VIEWPORT = {"width": 1280, "height": 900}
 
 _COMMENT_API_MARKER = "/api/comment/list"
 
+# TikTok keeps its device identity in Local Storage / IndexedDB, not in cookies.
+# A profile seeded with cookies alone still looks like a brand new device and
+# gets empty comment bodies; copying this state across is what made it work.
+_BROWSER_STATE_DIRS = ("Local Storage", "Session Storage")
+_TIKTOK_IDB_PREFIX = "https_www.tiktok.com"
+
 # Distinguishing a captcha wall from a plain login requirement matters: one is
 # waited out or cleared by hand, the other needs fresh cookies.
 _CAPTCHA_MARKERS = ("captcha", "verify_center", "secsdk-captcha")
@@ -69,6 +77,9 @@ _TAB_READY_JS = """() => Array.from(document.querySelectorAll("*")).some(
         && e.offsetParent !== null
 )"""
 
+# Dispatch the full pointer sequence rather than page.mouse.click(): React
+# listens on pointerdown, and the tab sits under an overlay that swallows a
+# synthetic click at those coordinates.
 _CLICK_TAB_JS = """() => {
     const leaves = Array.from(document.querySelectorAll("*")).filter(
         (e) => e.children.length === 0 && e.textContent.trim() === "Comments"
@@ -77,7 +88,15 @@ _CLICK_TAB_JS = """() => {
     if (!visible.length) return null;
     const target = visible[visible.length - 1];
     const box = target.getBoundingClientRect();
-    return {x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2)};
+    const opts = {
+        bubbles: true, cancelable: true, view: window,
+        clientX: box.x + box.width / 2, clientY: box.y + box.height / 2,
+    };
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        const Ctor = type.startsWith("pointer") ? PointerEvent : MouseEvent;
+        target.dispatchEvent(new Ctor(type, opts));
+    }
+    return {y: Math.round(box.y)};
 }"""
 
 _COMMENTS_LOADED_JS = """() => document.querySelectorAll(
@@ -294,6 +313,9 @@ class TikTokCommentClient:
         payloads: list[object] = []
         self._empty_responses = 0
 
+        # Must happen before launch: Chromium reads the profile at startup.
+        self._seed_browser_state()
+
         try:
             async with persistent_context(
                 settings.tiktok_comment_browser_profile_dir,
@@ -353,6 +375,51 @@ class TikTokCommentClient:
             logger.error("tiktok comment browser failed: url=%s error=%s", page_url, exc)
             raise TikTokCommentError("TikTok 评论抓取启动浏览器失败，请稍后重试。") from exc
 
+    def _seed_browser_state(self) -> None:
+        """Copy the device identity TikTok keeps outside cookies.
+
+        Local Storage and IndexedDB carry what TikTok uses to recognize a
+        browser; a profile holding only cookies still reads as a new device and
+        gets empty comment bodies. Verified: the same video failed with cookies
+        alone and returned 70679 bytes once this state was copied across.
+
+        Runs once per profile -- the copy is ~20MB and the state does not need
+        to stay in sync afterwards. Best effort: any failure is logged and the
+        fetch proceeds.
+        """
+        source = Path(self._settings.tiktok_comment_chrome_profile_dir).expanduser()
+        if not self._settings.tiktok_comment_seed_browser_state or not source.is_dir():
+            return
+
+        target = Path(self._settings.tiktok_comment_browser_profile_dir) / "Default"
+        if (target / "Local Storage").exists():
+            return
+
+        target.mkdir(parents=True, exist_ok=True)
+        for name in _BROWSER_STATE_DIRS:
+            src = source / name
+            if not src.is_dir():
+                continue
+            try:
+                shutil.copytree(src, target / name, dirs_exist_ok=True)
+            except OSError as exc:
+                logger.warning("failed to copy %s into tiktok profile: %s", name, exc)
+
+        # Only TikTok's own IndexedDB is needed; the rest of the store is large
+        # and irrelevant.
+        idb_src = source / "IndexedDB"
+        if idb_src.is_dir():
+            idb_dst = target / "IndexedDB"
+            idb_dst.mkdir(parents=True, exist_ok=True)
+            for entry in idb_src.iterdir():
+                if not entry.name.startswith(_TIKTOK_IDB_PREFIX):
+                    continue
+                try:
+                    shutil.copytree(entry, idb_dst / entry.name, dirs_exist_ok=True)
+                except OSError as exc:
+                    logger.warning("failed to copy %s into tiktok profile: %s", entry.name, exc)
+        logger.info("seeded browser state into tiktok comment profile from %s", source)
+
     async def _seed_cookies(self, context: Any) -> None:
         """Load the exported tiktok session into this profile.
 
@@ -411,7 +478,6 @@ class TikTokCommentClient:
             if not isinstance(spot, dict):
                 logger.warning("tiktok comments tab not clickable")
                 return
-            await page.mouse.click(spot["x"], spot["y"])
             try:
                 await page.wait_for_function(
                     _COMMENTS_LOADED_JS,

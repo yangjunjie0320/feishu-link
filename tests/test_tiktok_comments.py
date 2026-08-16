@@ -290,3 +290,78 @@ async def test_panel_never_loading_is_distinct_from_throttling(monkeypatch) -> N
         await client.fetch_comments(
             "https://www.tiktok.com/@a/video/123", max_comments=10, deadline=time.monotonic() + 60
         )
+
+
+def test_seed_browser_state_copies_local_storage_and_tiktok_idb(tmp_path) -> None:
+    """Cookies alone leave the profile looking like a new device."""
+    from src.config import Settings
+    from src.tiktok_comments import TikTokCommentClient
+
+    chrome = tmp_path / "chrome"
+    (chrome / "Local Storage" / "leveldb").mkdir(parents=True)
+    (chrome / "Local Storage" / "leveldb" / "000.ldb").write_text("ls", encoding="utf-8")
+    (chrome / "Session Storage").mkdir()
+    (chrome / "Session Storage" / "s.ldb").write_text("ss", encoding="utf-8")
+    idb = chrome / "IndexedDB"
+    (idb / "https_www.tiktok.com_0.indexeddb.leveldb").mkdir(parents=True)
+    (idb / "https_www.tiktok.com_0.indexeddb.leveldb" / "1.ldb").write_text("tt", encoding="utf-8")
+    (idb / "https_www.example.com_0.indexeddb.leveldb").mkdir(parents=True)
+    (idb / "https_www.example.com_0.indexeddb.leveldb" / "2.ldb").write_text("no", encoding="utf-8")
+
+    profile = tmp_path / "profile"
+    settings = Settings(
+        tiktok_comment_browser_profile_dir=str(profile),
+        tiktok_comment_chrome_profile_dir=str(chrome),
+    )
+    TikTokCommentClient(settings)._seed_browser_state()
+
+    default = profile / "Default"
+    assert (default / "Local Storage" / "leveldb" / "000.ldb").exists()
+    assert (default / "Session Storage" / "s.ldb").exists()
+    assert (default / "IndexedDB" / "https_www.tiktok.com_0.indexeddb.leveldb" / "1.ldb").exists()
+    # Other sites' IndexedDB is large and irrelevant.
+    assert not (default / "IndexedDB" / "https_www.example.com_0.indexeddb.leveldb").exists()
+
+
+def test_seed_browser_state_runs_once_per_profile(tmp_path) -> None:
+    from src.config import Settings
+    from src.tiktok_comments import TikTokCommentClient
+
+    chrome = tmp_path / "chrome"
+    (chrome / "Local Storage").mkdir(parents=True)
+    (chrome / "Local Storage" / "a.ldb").write_text("first", encoding="utf-8")
+
+    profile = tmp_path / "profile"
+    settings = Settings(
+        tiktok_comment_browser_profile_dir=str(profile),
+        tiktok_comment_chrome_profile_dir=str(chrome),
+    )
+    client = TikTokCommentClient(settings)
+    client._seed_browser_state()
+
+    # A second call must not re-copy over live profile state.
+    (chrome / "Local Storage" / "a.ldb").write_text("changed", encoding="utf-8")
+    client._seed_browser_state()
+
+    assert (profile / "Default" / "Local Storage" / "a.ldb").read_text(encoding="utf-8") == "first"
+
+
+def test_seed_browser_state_skips_when_disabled_or_source_missing(tmp_path) -> None:
+    from src.config import Settings
+    from src.tiktok_comments import TikTokCommentClient
+
+    profile = tmp_path / "profile"
+    disabled = Settings(
+        tiktok_comment_browser_profile_dir=str(profile),
+        tiktok_comment_chrome_profile_dir=str(tmp_path / "chrome"),
+        tiktok_comment_seed_browser_state=False,
+    )
+    TikTokCommentClient(disabled)._seed_browser_state()
+    assert not profile.exists()
+
+    missing_source = Settings(
+        tiktok_comment_browser_profile_dir=str(profile),
+        tiktok_comment_chrome_profile_dir=str(tmp_path / "nope"),
+    )
+    TikTokCommentClient(missing_source)._seed_browser_state()
+    assert not profile.exists()
