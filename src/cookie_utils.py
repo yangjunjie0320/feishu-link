@@ -88,8 +88,7 @@ def playwright_cookies_from_file(cookie_file: str, domain: str) -> list[dict[str
     now = int(time.time())
     cookies: list[dict[str, Any]] = []
     for cookie in jar:
-        cookie_domain = cookie.domain.lstrip(".")
-        if cookie_domain != domain and not domain.endswith(f".{cookie_domain}"):
+        if not _same_site(cookie.domain, domain):
             continue
 
         expires = _playwright_expires(cookie.expires)
@@ -109,6 +108,19 @@ def playwright_cookies_from_file(cookie_file: str, domain: str) -> list[dict[str
         cookies.append(item)
 
     return cookies
+
+
+def _same_site(cookie_domain: str, domain: str) -> bool:
+    """Whether a cookie belongs to the site, in either direction.
+
+    Matching only parent domains dropped every www.tiktok.com cookie, including
+    tt_ticket_guard_has_set_public_key and x-web-secsdk-uid, which TikTok's
+    request-guard machinery expects. Playwright honors each cookie's own domain
+    field, so seeding subdomain cookies is safe.
+    """
+    left = cookie_domain.lstrip(".")
+    right = domain.lstrip(".")
+    return left == right or left.endswith(f".{right}") or right.endswith(f".{left}")
 
 
 def _playwright_expires(expires: int | None) -> int | None:
