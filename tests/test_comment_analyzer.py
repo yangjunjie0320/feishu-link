@@ -1,6 +1,5 @@
 import sys
 import types
-from contextlib import asynccontextmanager
 
 import httpx
 import pytest
@@ -845,31 +844,17 @@ def _x_tweet(
     }
 
 
-def _tiktok_page(comments: list[dict[str, object]], *, cursor: int, has_more: int) -> dict:
-    return {
-        "status_code": 0,
-        "comments": comments,
-        "cursor": cursor,
-        "has_more": has_more,
-        "total": 42,
-    }
+def _tiktok_page(comments: list[dict[str, object]]) -> dict:
+    return {"status_code": 0, "comments": comments, "total": 42}
 
 
-def _fake_json_fetcher(pages: list[dict]):
-    """asynccontextmanager standing in for the Playwright boundary."""
+def _fake_payload_collector(pages: list[dict]):
+    """Stands in for the Playwright boundary: returns intercepted payloads."""
 
-    @asynccontextmanager
-    async def fake_fetcher(self, page_url: str):
-        calls = {"n": 0}
+    async def fake_collect(self, page_url: str, *, max_comments: int):
+        return pages
 
-        async def fetch_json(url: str):
-            page = pages[min(calls["n"], len(pages) - 1)]
-            calls["n"] += 1
-            return page
-
-        yield fetch_json
-
-    return fake_fetcher
+    return fake_collect
 
 
 def _exploding_ytdlp(monkeypatch) -> None:
@@ -886,8 +871,8 @@ async def test_fetch_comment_page_routes_tiktok_to_browser_client(monkeypatch) -
     _exploding_ytdlp(monkeypatch)
     monkeypatch.setattr(
         TikTokCommentClient,
-        "_browser_json_fetcher",
-        _fake_json_fetcher(
+        "_collect_payloads",
+        _fake_payload_collector(
             [
                 _tiktok_page(
                     [
@@ -898,9 +883,7 @@ async def test_fetch_comment_page_routes_tiktok_to_browser_client(monkeypatch) -
                             "reply_comment_total": 2,
                             "user": {"nickname": "Ada", "unique_id": "ada_l"},
                         }
-                    ],
-                    cursor=20,
-                    has_more=0,
+                    ]
                 )
             ]
         ),
@@ -930,12 +913,10 @@ async def test_tiktok_fetch_disabled_reports_explainable_error(monkeypatch) -> N
 async def test_tiktok_browser_failure_is_not_masked_by_ytdlp(monkeypatch) -> None:
     _exploding_ytdlp(monkeypatch)
 
-    @asynccontextmanager
-    async def failing_fetcher(self, page_url: str):
+    async def failing_collect(self, page_url: str, *, max_comments: int):
         raise TikTokCommentError("TikTok 触发了人机验证，请稍后重试。")
-        yield  # pragma: no cover - unreachable, keeps this an async generator
 
-    monkeypatch.setattr(TikTokCommentClient, "_browser_json_fetcher", failing_fetcher)
+    monkeypatch.setattr(TikTokCommentClient, "_collect_payloads", failing_collect)
 
     with pytest.raises(CommentAnalysisError, match="人机验证"):
         async with httpx.AsyncClient() as client:

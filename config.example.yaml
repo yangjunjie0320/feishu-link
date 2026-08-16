@@ -143,16 +143,17 @@ comment_analysis_prompt_comments: 200
 comment_analysis_timeout: 120.0
 comment_fetch_timeout: 90.0                   # wall-clock for the fetch itself (per platform below)
 
-# TikTok comments: fetched from inside a Playwright Chromium page, because
-# TikTok's web API is signed by the page's own webmssdk.js. Needs a logged-in
-# tiktok session (add "tiktok" to cookie_refresh_platforms after logging in);
-# logged-out clients get HTTP 200 with an empty body.
+# TikTok comments: driven through the page's own comment panel (click the
+# Comments tab, then scroll) and collected by intercepting the responses.
+# Hand-built comment/list requests are dropped by the server. Needs a
+# logged-in tiktok session -- add "tiktok" to cookie_refresh_platforms.
 tiktok_comment_fetch_enabled: true
 tiktok_comment_browser_profile_dir: "browser-data/tiktok"   # own profile: delete it to reset
 tiktok_comment_browser_headless: true
 tiktok_comment_browser_timeout: 45.0          # single Playwright operation
 tiktok_comment_fetch_timeout: 120.0           # overrides comment_fetch_timeout for tiktok
-tiktok_comment_page_size: 20                  # count= per request
-tiktok_comment_max_pages: 30
-tiktok_comment_request_delay: 0.3             # between pages; raise if throttled
-tiktok_comment_signer_wait_ms: 5000           # wait for webmssdk to hook fetch
+tiktok_comment_tab_settle_seconds: 4.0        # tab renders before React binds its handler
+tiktok_comment_tab_click_attempts: 3
+tiktok_comment_load_timeout: 15.0             # wait for comments after clicking the tab
+tiktok_comment_max_scrolls: 25                # each scroll makes the page request one more page
+tiktok_comment_scroll_delay: 1.2

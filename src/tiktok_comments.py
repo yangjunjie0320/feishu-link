@@ -1,15 +1,23 @@
-"""TikTok comment fetching through a Playwright page.
+"""TikTok comment fetching by driving the page's own comment panel.
 
-TikTok's web API is signed by the page's own webmssdk.js, which hooks fetch and
-XHR to attach X-Bogus / X-Gnarly. Rather than reverse engineering the signature,
-requests are issued from inside the loaded video page so the site signs them for
-us. Everything above that boundary -- pagination, termination, normalization --
-is plain logic that takes a fetcher callable, so only `_browser_json_fetcher`
-touches Playwright.
+Constructing comment/list requests ourselves does not work, and neither does
+reverse engineering the signature. Verified on the production host:
 
-Note the API answers HTTP 200 with an empty body for logged-out clients (its
-generic content-throttling response), so a session cookie is required even
-though signing works without one.
+- The video page opens on the "You may like" tab; the comment panel is never
+  activated, so the page issues no comment request and the DOM has no comments.
+- A hand-built comment/list call from inside the page returns HTTP 200 with an
+  empty body and `x-envoy-response-flags: SC` -- the server drops it, because
+  the URL lacks the parameters the page signs over (WebIdLastTime, device_id,
+  verifyFp and friends).
+- Clicking the "Comments" tab makes the page issue its own request, which
+  returns real data (53916 bytes, 14 comments, total 4225).
+
+So the browser drives and we listen: activate the panel, scroll it, and collect
+the responses TikTok's own code asks for. Nothing here depends on the request
+shape, which is also why it should outlive TikTok's parameter changes.
+
+Everything above `_collect_payloads` is plain logic over the captured payloads,
+so it tests without a browser.
 """
 
 from __future__ import annotations
@@ -19,10 +27,8 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Iterable
 from typing import Any
-from urllib.parse import urlencode
 
 import httpx
 
@@ -31,8 +37,6 @@ from .config import Settings
 from .cookie_utils import playwright_cookies_from_file
 
 logger = logging.getLogger(__name__)
-
-JsonFetcher = Callable[[str], Awaitable[Any]]
 
 _AWEME_ID_RE = re.compile(r"/(?:video|photo)/(\d+)")
 _SHORT_HOSTS = ("vt.tiktok.com", "vm.tiktok.com")
@@ -43,66 +47,60 @@ _USER_AGENT = (
 )
 _VIEWPORT = {"width": 1280, "height": 900}
 
-# Query parameters describing the "browser" making the request. They must agree
-# with the user agent and viewport above; a mismatch reads as automation.
-_CLIENT_PARAMS = {
-    "aid": "1988",
-    "app_name": "tiktok_web",
-    "channel": "tiktok_web",
-    "device_platform": "web_pc",
-    "app_language": "en",
-    "region": "US",
-    "priority_region": "",
-    "browser_language": "en-US",
-    "browser_name": "Mozilla",
-    "browser_platform": "MacIntel",
-    "browser_online": "true",
-    "cookie_enabled": "true",
-    "screen_width": str(_VIEWPORT["width"]),
-    "screen_height": str(_VIEWPORT["height"]),
-    "os": "mac",
-}
+_COMMENT_API_MARKER = "/api/comment/list"
 
 # Distinguishing a captcha wall from a plain login requirement matters: one is
 # waited out or cleared by hand, the other needs fresh cookies.
 _CAPTCHA_MARKERS = ("captcha", "verify_center", "secsdk-captcha")
 _CAPTCHA_SELECTOR = "#captcha-verify-container, .captcha_verify_container"
 
-# TikTok status_code values seen in the wild. 0 is success.
 _STATUS_LOGIN_REQUIRED = frozenset({8, 2154})
 _STATUS_ITEM_UNAVAILABLE = frozenset({2053, 10204})
 
 # Leave room inside the caller's deadline for the browser to shut down; a
 # cancellation that lands mid-close is exactly how orphan Chromium is created.
 _CLOSE_MARGIN_SECONDS = 10.0
-_DEADLINE_MARGIN_SECONDS = 5.0
 
-_SIGNER_READY_JS = """() => {
-    return typeof window.byted_acrawler !== "undefined"
-        || (window.fetch && !/\\[native code\\]/.test(window.fetch.toString()));
+# "Comments" also labels a hidden filter in the Activity menu, so match the
+# visible leaf node -- the last one in document order is the panel tab.
+_TAB_READY_JS = """() => Array.from(document.querySelectorAll("*")).some(
+    (e) => e.children.length === 0
+        && e.textContent.trim() === "Comments"
+        && e.offsetParent !== null
+)"""
+
+_CLICK_TAB_JS = """() => {
+    const leaves = Array.from(document.querySelectorAll("*")).filter(
+        (e) => e.children.length === 0 && e.textContent.trim() === "Comments"
+    );
+    const visible = leaves.filter((e) => e.offsetParent !== null);
+    if (!visible.length) return null;
+    const target = visible[visible.length - 1];
+    const box = target.getBoundingClientRect();
+    return {x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2)};
 }"""
 
-_FETCH_JS = """async ({url}) => {
-    let target = url;
-    if (!target.includes("msToken=")) {
-        const m = document.cookie.match(/(?:^|;\\s*)msToken=([^;]+)/);
-        if (m) {
-            target += "&msToken=" + m[1];
+_COMMENTS_LOADED_JS = """() => document.querySelectorAll(
+    '[data-e2e="comment-level-1"]'
+).length > 0"""
+
+# Scroll the comment list's own scrollable ancestor; scrolling the window does
+# not reach it.
+_SCROLL_JS = """() => {
+    const items = document.querySelectorAll('[data-e2e="comment-level-1"]');
+    if (!items.length) return 0;
+    const last = items[items.length - 1];
+    last.scrollIntoView({block: "end"});
+    let node = last.parentElement;
+    while (node) {
+        const style = getComputedStyle(node);
+        if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) {
+            node.scrollTop = node.scrollHeight;
+            break;
         }
+        node = node.parentElement;
     }
-    try {
-        const response = await fetch(target, {
-            credentials: "include",
-            headers: {"accept": "application/json"},
-        });
-        return {
-            status: response.status,
-            text: await response.text(),
-            contentType: response.headers.get("content-type") || "",
-        };
-    } catch (e) {
-        return {status: 0, text: "", contentType: "", error: String(e)};
-    }
+    return items.length;
 }"""
 
 
@@ -131,16 +129,6 @@ async def resolve_tiktok_url(url: str, client: httpx.AsyncClient) -> str:
         logger.info("tiktok short link unresolved: url=%s error=%s", url, e)
         return url
     return str(response.url)
-
-
-def build_comment_list_url(aweme_id: str, *, cursor: int, count: int) -> str:
-    params = {
-        "aweme_id": aweme_id,
-        "cursor": str(cursor),
-        "count": str(count),
-        **_CLIENT_PARAMS,
-    }
-    return f"https://www.tiktok.com/api/comment/list/?{urlencode(params)}"
 
 
 def normalize_tiktok_comment(raw: object) -> object:
@@ -176,115 +164,51 @@ def normalize_tiktok_comment(raw: object) -> object:
     }
 
 
-def _captcha_marker(text: str) -> str:
-    lowered = text.lower()
-    for marker in _CAPTCHA_MARKERS:
-        if marker in lowered:
-            return marker
-    return ""
-
-
-async def paginate_comments(
-    fetch_json: JsonFetcher,
-    aweme_id: str,
-    *,
-    max_comments: int,
-    page_size: int,
-    max_pages: int,
-    request_delay: float,
-    deadline: float,
+def comments_from_payloads(
+    payloads: Iterable[object], *, max_comments: int
 ) -> tuple[list[object], int | None]:
-    """Walk the comment cursor, returning normalized raw comments and the total.
+    """Merge captured comment/list responses into normalized raw comments.
 
-    Errors on the first page raise; on later pages they log and return whatever
-    was collected, since a partial sample still analyzes fine.
+    Pinned comments repeat across pages, so dedupe by cid. A payload carrying a
+    non-zero status_code is reported rather than silently treated as empty.
     """
     collected: list[object] = []
     seen_cids: set[str] = set()
     total_count: int | None = None
-    cursor = 0
+    error_status: int | None = None
 
-    for index in range(max_pages):
-        payload = await fetch_json(build_comment_list_url(aweme_id, cursor=cursor, count=page_size))
+    for payload in payloads:
         if not isinstance(payload, dict):
-            raise TikTokCommentError("TikTok 评论接口返回了无法解析的数据。")
+            continue
 
         status_code = payload.get("status_code")
-        comments = payload.get("comments")
-        comments = comments if isinstance(comments, list) else []
+        if isinstance(status_code, int) and status_code != 0:
+            error_status = error_status or status_code
+            continue
+
         if total_count is None and isinstance(payload.get("total"), int):
             total_count = payload["total"]
 
-        if status_code not in (0, None):
-            message = _status_code_message(int(status_code))
-            if index == 0:
-                raise TikTokCommentError(message)
-            logger.warning(
-                "tiktok comment page failed mid-pagination: aweme_id=%s page=%d status_code=%s",
-                aweme_id,
-                index,
-                status_code,
-            )
-            break
-
-        if not comments:
-            if index == 0 and not total_count:
-                raise TikTokCommentError("该 TikTok 视频没有评论或评论区已关闭。")
-            logger.info(
-                "tiktok comment page empty: aweme_id=%s page=%d collected=%d",
-                aweme_id,
-                index,
-                len(collected),
-            )
-            break
+        comments = payload.get("comments")
+        if not isinstance(comments, list):
+            continue
 
         for item in comments:
             if not isinstance(item, dict):
                 continue
-            # Pinned comments repeat across pages and would eat the quota.
             cid = str(item.get("cid") or "")
             if cid and cid in seen_cids:
                 continue
             if cid:
                 seen_cids.add(cid)
             collected.append(normalize_tiktok_comment(item))
+            if len(collected) >= max_comments:
+                return collected, total_count
 
-        if len(collected) >= max_comments:
-            break
-        if not payload.get("has_more"):
-            break
+    if not collected and error_status is not None:
+        raise TikTokCommentError(_status_code_message(error_status))
 
-        next_cursor = payload.get("cursor")
-        advanced = int(next_cursor) if isinstance(next_cursor, int) else cursor
-        if advanced <= cursor:
-            logger.warning(
-                "tiktok comment cursor did not advance: aweme_id=%s cursor=%s next=%s",
-                aweme_id,
-                cursor,
-                next_cursor,
-            )
-            break
-        cursor = advanced
-
-        if time.monotonic() > deadline - _DEADLINE_MARGIN_SECONDS:
-            logger.warning(
-                "tiktok comment fetch hit deadline: aweme_id=%s collected=%d pages=%d",
-                aweme_id,
-                len(collected),
-                index + 1,
-            )
-            break
-
-        await asyncio.sleep(request_delay)
-    else:
-        logger.warning(
-            "tiktok comment fetch hit page limit: aweme_id=%s pages=%d collected=%d",
-            aweme_id,
-            max_pages,
-            len(collected),
-        )
-
-    return collected[:max_comments], total_count
+    return collected, total_count
 
 
 def _status_code_message(status_code: int) -> str:
@@ -295,6 +219,14 @@ def _status_code_message(status_code: int) -> str:
     return f"TikTok 评论接口返回错误（status_code={status_code}）。"
 
 
+def _captcha_marker(text: str) -> str:
+    lowered = text.lower()
+    for marker in _CAPTCHA_MARKERS:
+        if marker in lowered:
+            return marker
+    return ""
+
+
 class TikTokCommentClient:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -302,8 +234,7 @@ class TikTokCommentClient:
     async def fetch_comments(
         self, url: str, *, max_comments: int, deadline: float
     ) -> tuple[list[object], int | None]:
-        aweme_id = aweme_id_from_url(url)
-        if not aweme_id:
+        if not aweme_id_from_url(url):
             raise TikTokCommentError("无法从该 TikTok 链接解析出视频 ID。")
 
         budget = deadline - time.monotonic() - _CLOSE_MARGIN_SECONDS
@@ -311,33 +242,29 @@ class TikTokCommentClient:
             raise TikTokCommentError("TikTok 评论抓取超时，请稍后重试。")
 
         try:
-            return await asyncio.wait_for(
-                self._fetch_with_browser(url, aweme_id, max_comments, deadline),
+            payloads = await asyncio.wait_for(
+                self._collect_payloads(url, max_comments=max_comments),
                 timeout=budget,
             )
         except TimeoutError as e:
             raise TikTokCommentError("TikTok 评论抓取超时，请稍后重试。") from e
 
-    async def _fetch_with_browser(
-        self, page_url: str, aweme_id: str, max_comments: int, deadline: float
-    ) -> tuple[list[object], int | None]:
-        async with self._browser_json_fetcher(page_url) as fetch_json:
-            return await paginate_comments(
-                fetch_json,
-                aweme_id,
-                max_comments=max_comments,
-                page_size=self._settings.tiktok_comment_page_size,
-                max_pages=self._settings.tiktok_comment_max_pages,
-                request_delay=self._settings.tiktok_comment_request_delay,
-                deadline=deadline,
+        if not payloads:
+            raise TikTokCommentError(
+                "TikTok 未返回任何评论数据，可能是评论区已关闭或触发了风控，请稍后重试。"
             )
 
-    @asynccontextmanager
-    async def _browser_json_fetcher(self, page_url: str) -> AsyncIterator[JsonFetcher]:
-        """Open the video page and yield a fetcher that runs inside it.
+        comments, total = comments_from_payloads(payloads, max_comments=max_comments)
+        if not comments:
+            # The page asked and TikTok answered with nothing. Empty bodies are
+            # its throttling response, so say so rather than "no comments".
+            raise TikTokCommentError("TikTok 返回了空评论数据，通常表示被限流，请稍后重试。")
+        return comments, total
 
-        The whole Playwright surface lives here so everything above is testable
-        with a plain callable; tests monkeypatch this method.
+    async def _collect_payloads(self, page_url: str, *, max_comments: int) -> list[object]:
+        """Drive the page's comment panel and return the responses it received.
+
+        This is the whole Playwright surface; tests monkeypatch this method.
         """
         try:
             from playwright.async_api import (
@@ -351,35 +278,66 @@ class TikTokCommentClient:
                 "TikTok 评论抓取需要 Playwright 浏览器，当前环境不可用。"
             ) from exc
 
-        timeout_ms = int(self._settings.tiktok_comment_browser_timeout * 1000)
+        settings = self._settings
+        timeout_ms = int(settings.tiktok_comment_browser_timeout * 1000)
+        payloads: list[object] = []
+        empty_responses = 0
+
         try:
             async with persistent_context(
-                self._settings.tiktok_comment_browser_profile_dir,
-                headless=self._settings.tiktok_comment_browser_headless,
+                settings.tiktok_comment_browser_profile_dir,
+                headless=settings.tiktok_comment_browser_headless,
                 user_agent=_USER_AGENT,
                 timeout_ms=timeout_ms,
                 viewport=_VIEWPORT,
             ) as context:
                 await self._seed_cookies(context)
                 page = context.pages[0] if context.pages else await context.new_page()
+
+                async def on_response(response: Any) -> None:
+                    nonlocal empty_responses
+                    if _COMMENT_API_MARKER not in response.url:
+                        return
+                    try:
+                        text = await response.text()
+                    except Exception as exc:
+                        logger.info("tiktok comment response unreadable: %s", exc)
+                        return
+                    if not text.strip():
+                        empty_responses += 1
+                        return
+                    try:
+                        payloads.append(json.loads(text))
+                    except ValueError:
+                        marker = _captcha_marker(text)
+                        logger.warning(
+                            "tiktok comment response not json: captcha_marker=%s head=%r",
+                            marker or "none",
+                            text[:160],
+                        )
+
+                page.on("response", on_response)
                 await page.goto(page_url, wait_until="domcontentloaded", timeout=timeout_ms)
-                # TikTok keeps navigating after domcontentloaded; evaluating too
-                # early dies with "Execution context was destroyed".
                 await self._settle_page(page, timeout_ms)
                 await self._check_page_state(page)
-                await self._wait_for_signer(page)
+                await self._activate_comment_panel(page, timeout_ms)
+                await self._scroll_for_more(page, payloads, max_comments=max_comments)
 
-                async def fetch_json(url: str) -> Any:
-                    return await self._browser_request_json(page, url)
-
-                yield fetch_json
+                if not payloads and empty_responses:
+                    logger.warning(
+                        "tiktok returned %d empty comment responses: likely throttled "
+                        "(cookie_present=%s)",
+                        empty_responses,
+                        bool(settings.cookie_file_for_platform("tiktok")),
+                    )
+                return payloads
         except BrowserUnavailableError as exc:
             logger.error("tiktok comment browser unavailable: %s", exc)
             raise TikTokCommentError(
                 "TikTok 评论抓取需要 Playwright 浏览器，当前环境不可用。"
             ) from exc
         except PlaywrightTimeoutError as exc:
-            logger.error("tiktok video page goto timed out: url=%s error=%s", page_url, exc)
+            logger.error("tiktok video page timed out: url=%s error=%s", page_url, exc)
             raise TikTokCommentError("TikTok 视频页加载超时，请稍后重试。") from exc
         except PlaywrightError as exc:
             logger.error("tiktok comment browser failed: url=%s error=%s", page_url, exc)
@@ -395,7 +353,7 @@ class TikTokCommentClient:
         cookies = playwright_cookies_from_file(cookie_file, "tiktok.com")
         if not cookies:
             logger.warning(
-                "no tiktok cookies to seed (file=%s); comment API will likely return an empty body",
+                "no tiktok cookies to seed (file=%s); comments will likely be empty",
                 cookie_file or "<none>",
             )
             return
@@ -403,7 +361,7 @@ class TikTokCommentClient:
         logger.info("seeded %d tiktok cookies into comment browser context", len(cookies))
 
     async def _settle_page(self, page: Any, timeout_ms: int) -> None:
-        """Wait out TikTok's post-load navigation before evaluating in the page."""
+        """Wait out TikTok's post-load navigation before touching the page."""
         try:
             await page.wait_for_load_state("load", timeout=timeout_ms)
         except Exception as exc:
@@ -417,88 +375,78 @@ class TikTokCommentClient:
         if marker:
             logger.error("tiktok captcha wall: marker=%s url=%s", marker, landed)
             raise TikTokCommentError(
-                "TikTok 触发了人机验证，请稍后重试；如反复出现需在远端执行 "
-                "--browser-login tiktok 手工过一次验证。"
+                "TikTok 触发了人机验证，请稍后重试；如反复出现需在远端 Chrome 手工过一次验证。"
             )
         if "/login" in landed:
             logger.warning("tiktok comments require login: landed=%s", landed)
             raise TikTokCommentError("TikTok 评论接口要求登录，请更新 cookies/tiktok.txt。")
 
-    async def _wait_for_signer(self, page: Any) -> None:
-        """Give webmssdk.js a chance to hook fetch; proceed anyway on timeout."""
+    async def _activate_comment_panel(self, page: Any, timeout_ms: int) -> None:
+        """Click the Comments tab; the page requests nothing until it is open.
+
+        The tab renders before React binds its handler, so a click can report
+        success and do nothing -- hence retrying until comments actually appear.
+        """
         try:
-            await page.wait_for_function(
-                _SIGNER_READY_JS, timeout=self._settings.tiktok_comment_signer_wait_ms
-            )
+            await page.wait_for_function(_TAB_READY_JS, timeout=timeout_ms)
         except Exception as exc:
-            logger.warning(
-                "tiktok signer not ready after %dms, requesting anyway: %s",
-                self._settings.tiktok_comment_signer_wait_ms,
-                exc,
-            )
+            logger.warning("tiktok comments tab never rendered: %s", exc)
+            return
 
-    async def _browser_request_json(self, page: Any, url: str) -> Any:
-        try:
-            result = await page.evaluate(_FETCH_JS, {"url": url})
-        except Exception as exc:
-            if "Execution context was destroyed" not in str(exc):
-                raise
-            # A late navigation tore down the context mid-evaluate; the page is
-            # settled by the time it lands, so one retry is enough.
-            logger.info("tiktok page navigated during fetch, retrying once")
-            result = await page.evaluate(_FETCH_JS, {"url": url})
+        settle = self._settings.tiktok_comment_tab_settle_seconds
+        attempts = max(1, self._settings.tiktok_comment_tab_click_attempts)
+        for attempt in range(attempts):
+            await asyncio.sleep(settle)
+            spot = await page.evaluate(_CLICK_TAB_JS)
+            if not isinstance(spot, dict):
+                logger.warning("tiktok comments tab not clickable")
+                return
+            await page.mouse.click(spot["x"], spot["y"])
+            try:
+                await page.wait_for_function(
+                    _COMMENTS_LOADED_JS,
+                    timeout=int(self._settings.tiktok_comment_load_timeout * 1000),
+                )
+                logger.info("tiktok comment panel activated on attempt %d", attempt + 1)
+                return
+            except Exception:
+                logger.info("tiktok comments not loaded after click attempt %d", attempt + 1)
+        logger.warning("tiktok comment panel never loaded comments")
 
-        if not isinstance(result, dict):
-            raise TikTokCommentError("TikTok 评论接口返回了无法解析的数据。")
+    async def _scroll_for_more(
+        self, page: Any, payloads: list[object], *, max_comments: int
+    ) -> None:
+        """Scroll the panel so TikTok requests further pages itself."""
+        collected = _count_comments(payloads)
+        stale_rounds = 0
+        for index in range(self._settings.tiktok_comment_max_scrolls):
+            if collected >= max_comments:
+                return
+            try:
+                await page.evaluate(_SCROLL_JS)
+            except Exception as exc:
+                logger.info("tiktok comment scroll failed at round %d: %s", index, exc)
+                return
+            await asyncio.sleep(self._settings.tiktok_comment_scroll_delay)
 
-        if result.get("error"):
-            logger.error("tiktok comment in-page fetch failed: %s", result["error"])
-            raise TikTokCommentError("TikTok 评论接口请求失败，请稍后重试。")
+            grown = _count_comments(payloads)
+            if grown == collected:
+                stale_rounds += 1
+                if stale_rounds >= 2:
+                    logger.info(
+                        "tiktok comments stopped growing at %d after %d scrolls",
+                        collected,
+                        index + 1,
+                    )
+                    return
+            else:
+                stale_rounds = 0
+            collected = grown
 
-        status = int(result.get("status") or 0)
-        text = str(result.get("text") or "")
-        content_type = str(result.get("contentType") or "")
 
-        if status in (401, 403):
-            logger.warning(
-                "tiktok comments require login: status=%d cookie_file=%s",
-                status,
-                bool(self._settings.cookie_file_for_platform("tiktok")),
-            )
-            raise TikTokCommentError("TikTok 评论接口要求登录，请更新 cookies/tiktok.txt。")
-        if status == 429:
-            logger.warning("tiktok comments rate limited: status=429")
-            raise TikTokCommentError("TikTok 评论接口触发限流，请稍后再试。")
-
-        marker = _captcha_marker(text)
-        if marker:
-            logger.error("tiktok captcha wall in response: marker=%s", marker)
-            raise TikTokCommentError(
-                "TikTok 触发了人机验证，请稍后重试；如反复出现需在远端执行 "
-                "--browser-login tiktok 手工过一次验证。"
-            )
-
-        if not text.strip():
-            # TikTok's throttling response for logged-out or distrusted clients.
-            logger.warning(
-                "tiktok comments empty body: status=%d content_type=%s cookie_present=%s",
-                status,
-                content_type,
-                bool(self._settings.cookie_file_for_platform("tiktok")),
-            )
-            raise TikTokCommentError(
-                "TikTok 评论接口返回空响应，通常表示未登录或被风控；请在远端 Chrome 登录 TikTok。"
-            )
-
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError as exc:
-            logger.error(
-                "tiktok comments non-json: status=%d content_type=%s head=%r",
-                status,
-                content_type,
-                text[:200],
-            )
-            raise TikTokCommentError(
-                "TikTok 评论接口返回了非 JSON 响应（可能是验证码或风控页）。"
-            ) from exc
+def _count_comments(payloads: Iterable[object]) -> int:
+    total = 0
+    for payload in payloads:
+        if isinstance(payload, dict) and isinstance(payload.get("comments"), list):
+            total += len(payload["comments"])
+    return total

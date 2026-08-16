@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -12,13 +10,10 @@ from src.comment_analyzer import comments_from_raw
 from src.tiktok_comments import (
     TikTokCommentError,
     aweme_id_from_url,
-    build_comment_list_url,
+    comments_from_payloads,
     normalize_tiktok_comment,
-    paginate_comments,
     resolve_tiktok_url,
 )
-
-_FAR_DEADLINE = float("inf")
 
 
 def _comment(cid: str, *, text: str = "nice", likes: int = 1, replies: int = 0) -> dict[str, Any]:
@@ -49,42 +44,12 @@ def _page(
     }
 
 
-def _fetcher(pages: list[dict[str, Any]]) -> tuple[Callable[[str], Any], list[str]]:
-    """Return a fetcher serving `pages` in order, plus the list of URLs it saw."""
-    requested: list[str] = []
-
-    async def fetch_json(url: str) -> Any:
-        requested.append(url)
-        return pages[min(len(requested) - 1, len(pages) - 1)]
-
-    return fetch_json, requested
-
-
-async def _paginate(fetch_json: Callable[[str], Any], **overrides: Any) -> tuple[Any, Any]:
-    kwargs: dict[str, Any] = {
-        "max_comments": 500,
-        "page_size": 20,
-        "max_pages": 30,
-        "request_delay": 0,
-        "deadline": _FAR_DEADLINE,
-    }
-    kwargs.update(overrides)
-    return await paginate_comments(fetch_json, "123", **kwargs)
-
-
 def test_aweme_id_from_url_handles_video_photo_and_query() -> None:
     assert aweme_id_from_url("https://www.tiktok.com/@a/video/7653231150139182367") == (
         "7653231150139182367"
     )
     assert aweme_id_from_url("https://www.tiktok.com/@a/photo/123?is_from_webapp=1") == "123"
     assert aweme_id_from_url("https://www.tiktok.com/@someone") == ""
-
-
-def test_build_comment_list_url_carries_required_client_params() -> None:
-    url = build_comment_list_url("123", cursor=40, count=20)
-    assert url.startswith("https://www.tiktok.com/api/comment/list/?")
-    for expected in ("aweme_id=123", "cursor=40", "count=20", "aid=1988", "app_name=tiktok_web"):
-        assert expected in url
 
 
 @respx.mock
@@ -112,137 +77,6 @@ async def test_resolve_tiktok_url_leaves_full_links_alone() -> None:
     full = "https://www.tiktok.com/@a/video/123"
     async with httpx.AsyncClient() as client:
         assert await resolve_tiktok_url(full, client) == full
-
-
-async def test_paginate_advances_cursor_until_has_more_is_zero() -> None:
-    fetch_json, requested = _fetcher(
-        [
-            _page([_comment("1"), _comment("2")], cursor=20),
-            _page([_comment("3")], cursor=40, has_more=0),
-        ]
-    )
-
-    collected, total = await _paginate(fetch_json)
-
-    assert len(collected) == 3
-    assert total == 100
-    assert "cursor=0" in requested[0]
-    assert "cursor=20" in requested[1]
-
-
-async def test_paginate_stops_when_cursor_does_not_advance() -> None:
-    """A server that keeps echoing the same cursor must not spin forever."""
-    fetch_json, requested = _fetcher([_page([_comment("1")], cursor=0)])
-
-    collected, _ = await _paginate(fetch_json)
-
-    assert len(requested) == 1
-    assert len(collected) == 1
-
-
-async def test_paginate_dedupes_pinned_comment_repeated_across_pages() -> None:
-    pinned = _comment("pin")
-    fetch_json, _ = _fetcher(
-        [
-            _page([pinned, _comment("1")], cursor=20),
-            _page([pinned, _comment("2")], cursor=40, has_more=0),
-        ]
-    )
-
-    collected, _ = await _paginate(fetch_json)
-
-    assert len(collected) == 3
-
-
-async def test_paginate_respects_max_comments() -> None:
-    fetch_json, _ = _fetcher(
-        [_page([_comment(str(i)) for i in range(20)], cursor=20 * (n + 1)) for n in range(5)]
-    )
-
-    collected, _ = await _paginate(fetch_json, max_comments=5)
-
-    assert len(collected) == 5
-
-
-async def test_paginate_respects_max_pages() -> None:
-    def page_at(index: int) -> dict[str, Any]:
-        return _page([_comment(f"{index}-{i}") for i in range(3)], cursor=20 * (index + 1))
-
-    requested: list[str] = []
-
-    async def fetch_json(url: str) -> Any:
-        requested.append(url)
-        return page_at(len(requested) - 1)
-
-    await _paginate(fetch_json, max_pages=3)
-
-    assert len(requested) == 3
-
-
-async def test_paginate_returns_partial_result_on_deadline() -> None:
-    def page_at(index: int) -> dict[str, Any]:
-        return _page([_comment(f"{index}-{i}") for i in range(2)], cursor=20 * (index + 1))
-
-    requested: list[str] = []
-
-    async def fetch_json(url: str) -> Any:
-        requested.append(url)
-        return page_at(len(requested) - 1)
-
-    # Already past the deadline: the first page is kept, the walk stops there.
-    collected, _ = await _paginate(fetch_json, deadline=time.monotonic() - 1)
-
-    assert len(requested) == 1
-    assert len(collected) == 2
-
-
-async def test_paginate_raises_login_required_on_first_page() -> None:
-    fetch_json, _ = _fetcher([_page([], cursor=0, status_code=2154)])
-
-    with pytest.raises(TikTokCommentError, match="要求登录"):
-        await _paginate(fetch_json)
-
-
-async def test_paginate_raises_item_unavailable_on_first_page() -> None:
-    fetch_json, _ = _fetcher([_page([], cursor=0, status_code=2053)])
-
-    with pytest.raises(TikTokCommentError, match="不存在或已被删除"):
-        await _paginate(fetch_json)
-
-
-async def test_paginate_reports_unknown_status_code() -> None:
-    fetch_json, _ = _fetcher([_page([], cursor=0, status_code=4001)])
-
-    with pytest.raises(TikTokCommentError, match="status_code=4001"):
-        await _paginate(fetch_json)
-
-
-async def test_paginate_keeps_partial_result_when_later_page_errors() -> None:
-    fetch_json, _ = _fetcher(
-        [
-            _page([_comment("1")], cursor=20),
-            _page([], cursor=40, status_code=2154),
-        ]
-    )
-
-    collected, _ = await _paginate(fetch_json)
-
-    assert len(collected) == 1
-
-
-async def test_paginate_raises_when_video_has_no_comments() -> None:
-    fetch_json, _ = _fetcher([_page([], cursor=0, has_more=0, total=0)])
-
-    with pytest.raises(TikTokCommentError, match="没有评论或评论区已关闭"):
-        await _paginate(fetch_json)
-
-
-async def test_paginate_rejects_non_dict_payload() -> None:
-    async def fetch_json(url: str) -> Any:
-        return "<html>captcha</html>"
-
-    with pytest.raises(TikTokCommentError, match="无法解析"):
-        await _paginate(fetch_json)
 
 
 def test_normalize_maps_tiktok_fields_through_to_video_comment() -> None:
@@ -349,35 +183,72 @@ async def test_seed_cookies_warns_when_nothing_to_seed(tmp_path, caplog) -> None
     assert "no tiktok cookies to seed" in caplog.text
 
 
-async def test_browser_request_json_retries_once_after_navigation() -> None:
-    """TikTok navigates after load; a destroyed context must not kill the fetch."""
-    from src.config import Settings
-    from src.tiktok_comments import TikTokCommentClient
-
-    calls: list[str] = []
-
-    class FakePage:
-        async def evaluate(self, script, arg=None):
-            calls.append("evaluate")
-            if len(calls) == 1:
-                raise RuntimeError(
-                    "Execution context was destroyed, most likely because of a navigation"
-                )
-            return {"status": 200, "text": '{"status_code": 0}', "contentType": "application/json"}
-
-    result = await TikTokCommentClient(Settings())._browser_request_json(FakePage(), "https://x")
-
-    assert len(calls) == 2
-    assert result == {"status_code": 0}
 
 
-async def test_browser_request_json_propagates_other_errors() -> None:
-    from src.config import Settings
-    from src.tiktok_comments import TikTokCommentClient
+def _payload(
+    comments: list[dict[str, Any]], *, total: int = 100, status_code: int = 0
+) -> dict[str, Any]:
+    return {"status_code": status_code, "comments": comments, "total": total}
 
-    class FakePage:
-        async def evaluate(self, script, arg=None):
-            raise RuntimeError("Target page, context or browser has been closed")
 
-    with pytest.raises(RuntimeError, match="has been closed"):
-        await TikTokCommentClient(Settings())._browser_request_json(FakePage(), "https://x")
+def test_payloads_merge_across_intercepted_pages() -> None:
+    collected, total = comments_from_payloads(
+        [_payload([_comment("1"), _comment("2")]), _payload([_comment("3")])],
+        max_comments=500,
+    )
+
+    assert len(collected) == 3
+    assert total == 100
+
+
+def test_payloads_dedupe_pinned_comment_repeated_across_pages() -> None:
+    """The pinned comment comes back on every page and would eat the quota."""
+    pinned = _comment("pin")
+    collected, _ = comments_from_payloads(
+        [_payload([pinned, _comment("1")]), _payload([pinned, _comment("2")])],
+        max_comments=500,
+    )
+
+    assert len(collected) == 3
+
+
+def test_payloads_respect_max_comments() -> None:
+    collected, _ = comments_from_payloads(
+        [_payload([_comment(str(i)) for i in range(20)])], max_comments=5
+    )
+
+    assert len(collected) == 5
+
+
+def test_payloads_report_login_required_when_nothing_collected() -> None:
+    with pytest.raises(TikTokCommentError, match="要求登录"):
+        comments_from_payloads([_payload([], status_code=2154)], max_comments=500)
+
+
+def test_payloads_report_item_unavailable() -> None:
+    with pytest.raises(TikTokCommentError, match="不存在或已被删除"):
+        comments_from_payloads([_payload([], status_code=2053)], max_comments=500)
+
+
+def test_payloads_keep_data_when_a_later_page_errors() -> None:
+    """A mid-scroll failure must not throw away what already arrived."""
+    collected, _ = comments_from_payloads(
+        [_payload([_comment("1")]), _payload([], status_code=2154)], max_comments=500
+    )
+
+    assert len(collected) == 1
+
+
+def test_payloads_ignore_non_dict_entries() -> None:
+    collected, _ = comments_from_payloads(
+        ["<html>", None, _payload([_comment("1")])], max_comments=500
+    )
+
+    assert len(collected) == 1
+
+
+def test_payloads_return_empty_without_error_when_no_comments() -> None:
+    collected, total = comments_from_payloads([_payload([], total=0)], max_comments=500)
+
+    assert collected == []
+    assert total == 0

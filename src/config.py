@@ -109,10 +109,13 @@ class Settings(BaseSettings):
     tiktok_comment_browser_headless: bool = True
     tiktok_comment_browser_timeout: float = 45.0
     tiktok_comment_fetch_timeout: float = 120.0
-    tiktok_comment_page_size: int = 20
-    tiktok_comment_max_pages: int = 30
-    tiktok_comment_request_delay: float = 0.3
-    tiktok_comment_signer_wait_ms: int = 5000
+    # The Comments tab renders before React binds its handler, so an early click
+    # silently does nothing; settle, click, and retry until comments appear.
+    tiktok_comment_tab_settle_seconds: float = 4.0
+    tiktok_comment_tab_click_attempts: int = 3
+    tiktok_comment_load_timeout: float = 15.0
+    tiktok_comment_max_scrolls: int = 25
+    tiktok_comment_scroll_delay: float = 1.2
 
     _allowlist_patterns: list[re.Pattern[str]] = []
     _blacklist_patterns: list[re.Pattern[str]] = []
