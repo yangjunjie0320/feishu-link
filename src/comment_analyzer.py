@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 
 from .config import Settings
-from .cookie_refresh import force_refresh
+from .cookie_refresh import ensure_fresh_cookies, force_refresh
 from .cookie_utils import cookie_value, get_cookie_header, temporary_cookie_file
 from .http_errors import describe_request_error
 from .parsers.instagram_media_info import _shortcode_from_url, _shortcode_to_media_id
@@ -462,6 +462,9 @@ class CommentAnalyzer:
         if not self._settings.tiktok_comment_fetch_enabled:
             raise CommentAnalysisError("TikTok 评论抓取当前已关闭。")
 
+        # The browser profile is seeded from the exported cookies, so refresh
+        # them first: an analysis can run long after the card was parsed.
+        await ensure_fresh_cookies("tiktok", self._settings)
         resolved = await resolve_tiktok_url(url, self._client)
         deadline = time.monotonic() + self._settings.tiktok_comment_fetch_timeout
         try:
