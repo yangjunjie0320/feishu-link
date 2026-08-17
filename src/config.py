@@ -115,6 +115,9 @@ class Settings(BaseSettings):
     # the same code succeeds intermittently on one egress and reliably on
     # another. Empty means use the machine's default route.
     tiktok_comment_proxy: str = ""
+    # Skip images/video/fonts: only the comment JSON is needed, and over a
+    # proxied hop those resources dominate page load time.
+    tiktok_comment_block_media: bool = True
     tiktok_comment_browser_timeout: float = 45.0
     tiktok_comment_fetch_timeout: float = 120.0
     # Timing is a narrow window: the Comments tab renders before React binds

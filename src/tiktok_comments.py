@@ -65,6 +65,12 @@ _CHROME_VERSION_RE = re.compile(r"(\d+)\.")
 
 _COMMENT_API_MARKER = "/api/comment/list"
 
+# Only the comment JSON matters, and the page ships megabytes of video, images
+# and fonts alongside it. Blocking those is worth an order of magnitude when the
+# browser reaches TikTok through a proxy: the video page alone is ~395KB, which
+# takes 30s+ at the throughput a cross-Pacific hop leaves.
+_BLOCKED_RESOURCE_TYPES = frozenset({"image", "media", "font"})
+
 # Rendered counts are abbreviated ("1.2K"); parsing them keeps heat sorting
 # meaningful on the DOM path, which has no raw numbers.
 _COUNT_SUFFIXES = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
@@ -448,6 +454,15 @@ class TikTokCommentClient:
                             marker or "none",
                             text[:160],
                         )
+
+                async def block_heavy(route: Any, request: Any) -> None:
+                    if request.resource_type in _BLOCKED_RESOURCE_TYPES:
+                        await route.abort()
+                    else:
+                        await route.continue_()
+
+                if settings.tiktok_comment_block_media:
+                    await page.route("**/*", block_heavy)
 
                 page.on("response", on_response)
                 try:
