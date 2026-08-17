@@ -348,10 +348,13 @@ async def test_proxy_is_passed_to_the_browser_only_when_configured(monkeypatch) 
 
     seen: list[object] = []
 
+    class _StopProbe(Exception):
+        """Abort the launch once the kwargs have been captured."""
+
     @asynccontextmanager
     async def fake_context(profile_dir, **kwargs):
         seen.append(kwargs.get("proxy_server"))
-        raise RuntimeError("stop after capturing kwargs")
+        raise _StopProbe
         yield  # pragma: no cover
 
     import src.tiktok_comments as mod
@@ -360,6 +363,6 @@ async def test_proxy_is_passed_to_the_browser_only_when_configured(monkeypatch) 
 
     for proxy, expected in (("socks5://127.0.0.1:11080", "socks5://127.0.0.1:11080"), ("", None)):
         client = TikTokCommentClient(Settings(tiktok_comment_proxy=proxy))
-        with pytest.raises(Exception):
+        with pytest.raises(_StopProbe):
             await client._collect_payloads("https://www.tiktok.com/@a/video/1", max_comments=10)
         assert seen[-1] == expected
