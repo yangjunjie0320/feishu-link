@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -391,8 +392,11 @@ async def test_cooldown_rejects_once_the_window_is_full(monkeypatch) -> None:
 
     with pytest.raises(TikTokCommentError, match="冷却限制") as excinfo:
         await client.fetch_comments(url, max_comments=10, deadline=time.monotonic() + 60)
-    # The message must say how long to wait, not just that it failed.
-    assert "分钟后再试" in str(excinfo.value)
+    # The message must name the wall-clock time it lifts, not just a duration:
+    # a duration makes the reader do arithmetic against a stale timestamp.
+    message = str(excinfo.value)
+    assert re.search(r"北京时间 \d{2}:\d{2} 恢复", message), message
+    assert "5 次/" not in message  # reflects the configured limit, not a default
     assert calls == 3, "被限流的请求不应触达浏览器"
 
 

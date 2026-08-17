@@ -29,6 +29,7 @@ import re
 import subprocess
 import time
 from collections.abc import Iterable
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -36,6 +37,7 @@ import httpx
 from .browser_session import BrowserUnavailableError, persistent_context
 from .config import Settings
 from .cookie_utils import playwright_cookies_from_file
+from .time_utils import format_beijing, now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +192,15 @@ def reset_fetch_quota() -> None:
 def _format_wait(seconds: float) -> str:
     minutes = max(1, round(seconds / 60))
     return f"{minutes} 分钟"
+
+
+def _resume_at(seconds: float) -> str:
+    """When the cooldown lifts, as a wall-clock time the reader can act on.
+
+    A duration alone ("12 分钟后") makes the reader do arithmetic against a
+    message whose own timestamp may already be minutes old.
+    """
+    return format_beijing(now_utc() + timedelta(seconds=seconds), "%H:%M")
 
 
 class TikTokCommentError(Exception):
@@ -413,7 +424,7 @@ class TikTokCommentClient:
             raise TikTokCommentError(
                 f"TikTok 评论抓取已达冷却限制（{self._settings.tiktok_comment_max_per_window} 次/"
                 f"{_format_wait(self._settings.tiktok_comment_window_seconds)}），"
-                f"请 {_format_wait(wait)}后再试。"
+                f"北京时间 {_resume_at(wait)} 恢复（约 {_format_wait(wait)}后）。"
             )
         _record_fetch(now)
 
