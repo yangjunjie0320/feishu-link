@@ -366,3 +366,61 @@ async def test_proxy_is_passed_to_the_browser_only_when_configured(monkeypatch) 
         with pytest.raises(_StopProbe):
             await client._collect_payloads("https://www.tiktok.com/@a/video/1", max_comments=10)
         assert seen[-1] == expected
+
+
+async def test_cooldown_rejects_once_the_window_is_full(monkeypatch) -> None:
+    """A night of rapid retries is what degraded this path; the cap stops that."""
+    from src.config import Settings
+    from src.tiktok_comments import TikTokCommentClient
+
+    calls = 0
+
+    async def fake_collect(self, page_url: str, *, max_comments: int):
+        nonlocal calls
+        calls += 1
+        return [{"status_code": 0, "comments": [_comment("1")], "total": 5}]
+
+    monkeypatch.setattr(TikTokCommentClient, "_collect_payloads", fake_collect)
+    settings = Settings(tiktok_comment_max_per_window=3, tiktok_comment_window_seconds=3600)
+    client = TikTokCommentClient(settings)
+    url = "https://www.tiktok.com/@a/video/123"
+
+    for _ in range(3):
+        await client.fetch_comments(url, max_comments=10, deadline=time.monotonic() + 60)
+    assert calls == 3
+
+    with pytest.raises(TikTokCommentError, match="冷却限制") as excinfo:
+        await client.fetch_comments(url, max_comments=10, deadline=time.monotonic() + 60)
+    # The message must say how long to wait, not just that it failed.
+    assert "分钟后再试" in str(excinfo.value)
+    assert calls == 3, "被限流的请求不应触达浏览器"
+
+
+async def test_cooldown_frees_slots_as_the_window_slides(monkeypatch) -> None:
+    from src.config import Settings
+    from src.tiktok_comments import TikTokCommentClient
+
+    async def fake_collect(self, page_url: str, *, max_comments: int):
+        return [{"status_code": 0, "comments": [_comment("1")], "total": 5}]
+
+    monkeypatch.setattr(TikTokCommentClient, "_collect_payloads", fake_collect)
+    settings = Settings(tiktok_comment_max_per_window=2, tiktok_comment_window_seconds=60)
+    client = TikTokCommentClient(settings)
+    url = "https://www.tiktok.com/@a/video/123"
+
+    base = time.monotonic()
+    monkeypatch.setattr("src.tiktok_comments.time.monotonic", lambda: base)
+    for _ in range(2):
+        await client.fetch_comments(url, max_comments=10, deadline=base + 60)
+    with pytest.raises(TikTokCommentError, match="冷却限制"):
+        await client.fetch_comments(url, max_comments=10, deadline=base + 60)
+
+    # Past the window, the old entries expire and a slot opens again.
+    monkeypatch.setattr("src.tiktok_comments.time.monotonic", lambda: base + 61)
+    await client.fetch_comments(url, max_comments=10, deadline=base + 121)
+
+
+def test_cooldown_disabled_when_limit_is_zero() -> None:
+    from src.tiktok_comments import _quota_wait_seconds
+
+    assert _quota_wait_seconds(0, 3600, 1000.0) == 0.0

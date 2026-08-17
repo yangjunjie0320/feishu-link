@@ -156,6 +156,42 @@ _SCROLL_JS = """() => {
 }"""
 
 
+# Timestamps of recent fetches, for the sliding-window quota below. Process
+# local, like cookie_refresh's throttles -- one agent owns this browser path.
+_recent_fetches: list[float] = []
+
+
+def _quota_wait_seconds(limit: int, window: float, now: float) -> float:
+    """Seconds until a slot frees up, or 0 when one is available.
+
+    TikTok degrades a client that fetches too often -- a night of rapid retries
+    is what pushed this path from working to returning empty bodies for hours.
+    The cap costs nothing in normal use (a few fetches a day) and is precisely
+    what stops a debugging session from burning the quota.
+    """
+    if limit <= 0:
+        return 0.0
+    cutoff = now - window
+    _recent_fetches[:] = [t for t in _recent_fetches if t > cutoff]
+    if len(_recent_fetches) < limit:
+        return 0.0
+    return _recent_fetches[0] + window - now
+
+
+def _record_fetch(now: float) -> None:
+    _recent_fetches.append(now)
+
+
+def reset_fetch_quota() -> None:
+    """Clear the cooldown window. For tests and for manual recovery."""
+    _recent_fetches.clear()
+
+
+def _format_wait(seconds: float) -> str:
+    minutes = max(1, round(seconds / 60))
+    return f"{minutes} 分钟"
+
+
 class TikTokCommentError(Exception):
     """Explainable TikTok comment fetch failure; the message is user-facing."""
 
@@ -360,6 +396,26 @@ class TikTokCommentClient:
     ) -> tuple[list[object], int | None]:
         if not aweme_id_from_url(url):
             raise TikTokCommentError("无法从该 TikTok 链接解析出视频 ID。")
+
+        now = time.monotonic()
+        wait = _quota_wait_seconds(
+            self._settings.tiktok_comment_max_per_window,
+            self._settings.tiktok_comment_window_seconds,
+            now,
+        )
+        if wait > 0:
+            logger.info(
+                "tiktok comment fetch throttled locally: %d in the last %.0fs, %.0fs to wait",
+                len(_recent_fetches),
+                self._settings.tiktok_comment_window_seconds,
+                wait,
+            )
+            raise TikTokCommentError(
+                f"TikTok 评论抓取已达冷却限制（{self._settings.tiktok_comment_max_per_window} 次/"
+                f"{_format_wait(self._settings.tiktok_comment_window_seconds)}），"
+                f"请 {_format_wait(wait)}后再试。"
+            )
+        _record_fetch(now)
 
         budget = deadline - time.monotonic() - _CLOSE_MARGIN_SECONDS
         if budget <= 0:

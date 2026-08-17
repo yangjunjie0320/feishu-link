@@ -157,3 +157,9 @@ tiktok_comment_tab_click_attempts: 3
 tiktok_comment_load_timeout: 15.0             # wait for comments after clicking the tab
 tiktok_comment_max_scrolls: 25                # each scroll makes the page request one more page
 tiktok_comment_scroll_delay: 1.2
+tiktok_comment_block_media: true              # skip images/video/fonts; only the JSON matters
+# Self-imposed cooldown: TikTok degrades clients that fetch too often, and a
+# burst of retries can cost hours of empty responses. Normal use is a few
+# fetches a day, so this only bites during debugging. 0 disables.
+tiktok_comment_max_per_window: 5
+tiktok_comment_window_seconds: 3600.0

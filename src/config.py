@@ -118,6 +118,12 @@ class Settings(BaseSettings):
     # Skip images/video/fonts: only the comment JSON is needed, and over a
     # proxied hop those resources dominate page load time.
     tiktok_comment_block_media: bool = True
+    # Self-imposed cooldown. TikTok degrades clients that fetch too often,
+    # and a night of rapid retries is what turned a working path into hours
+    # of empty bodies. Normal use is a few fetches a day, so this only ever
+    # bites during debugging.
+    tiktok_comment_max_per_window: int = 5
+    tiktok_comment_window_seconds: float = 3600.0
     tiktok_comment_browser_timeout: float = 45.0
     tiktok_comment_fetch_timeout: float = 120.0
     # Timing is a narrow window: the Comments tab renders before React binds
