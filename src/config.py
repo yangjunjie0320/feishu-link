@@ -110,6 +110,11 @@ class Settings(BaseSettings):
     # Real Chrome, not Playwright's bundled Chromium: TikTok serves the latter
     # empty comment bodies. Combined with Chrome's new headless mode.
     tiktok_comment_browser_channel: str = "chrome"
+    # Route only TikTok through a residential egress. Datacenter/VPN IPs score
+    # 10-30% success against TikTok versus 85-95% for residential, which is why
+    # the same code succeeds intermittently on one egress and reliably on
+    # another. Empty means use the machine's default route.
+    tiktok_comment_proxy: str = ""
     tiktok_comment_browser_timeout: float = 45.0
     tiktok_comment_fetch_timeout: float = 120.0
     # Timing is a narrow window: the Comments tab renders before React binds

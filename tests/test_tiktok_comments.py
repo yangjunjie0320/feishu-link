@@ -337,3 +337,29 @@ def test_normalize_dom_comment_dedupes_without_ids() -> None:
     comments = comments_from_raw([normalize_dom_comment(c) for c in scraped], max_comments=10)
 
     assert len(comments) == 2
+
+
+async def test_proxy_is_passed_to_the_browser_only_when_configured(monkeypatch) -> None:
+    """TikTok gates on IP reputation, so its browser can need its own egress."""
+    from contextlib import asynccontextmanager
+
+    from src.config import Settings
+    from src.tiktok_comments import TikTokCommentClient
+
+    seen: list[object] = []
+
+    @asynccontextmanager
+    async def fake_context(profile_dir, **kwargs):
+        seen.append(kwargs.get("proxy_server"))
+        raise RuntimeError("stop after capturing kwargs")
+        yield  # pragma: no cover
+
+    import src.tiktok_comments as mod
+
+    monkeypatch.setattr(mod, "persistent_context", fake_context)
+
+    for proxy, expected in (("socks5://127.0.0.1:11080", "socks5://127.0.0.1:11080"), ("", None)):
+        client = TikTokCommentClient(Settings(tiktok_comment_proxy=proxy))
+        with pytest.raises(Exception):
+            await client._collect_payloads("https://www.tiktok.com/@a/video/1", max_comments=10)
+        assert seen[-1] == expected

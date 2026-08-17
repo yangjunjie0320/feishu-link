@@ -412,6 +412,7 @@ class TikTokCommentClient:
                 if settings.tiktok_comment_browser_headless
                 else None,
                 omit_args=_OMIT_ARGS,
+                proxy_server=settings.tiktok_comment_proxy or None,
             ) as context:
                 await self._seed_cookies(context)
                 page = context.pages[0] if context.pages else await context.new_page()

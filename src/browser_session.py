@@ -164,6 +164,7 @@ async def persistent_context(
     channel: str | None = None,
     extra_args: list[str] | None = None,
     omit_args: tuple[str, ...] = (),
+    proxy_server: str | None = None,
 ) -> AsyncIterator[Any]:
     """Launch a persistent Chromium profile and yield its browser context.
 
@@ -177,7 +178,9 @@ async def persistent_context(
     mode (`headless=False` plus `--headless=new`, a full browser rather than the
     stripped-down build Playwright's own headless flag selects) and needs
     `--disable-gpu` dropped, since the missing WebGL fingerprint reads as
-    automation. See DESIGN.md.
+    automation. proxy_server routes just this browser through a different
+    egress -- TikTok gates on IP reputation, and datacenter ranges score far
+    worse than residential ones. See DESIGN.md.
     """
     try:
         from playwright.async_api import async_playwright
@@ -206,6 +209,8 @@ async def persistent_context(
         # the bundled Chromium build, so profiles that need a Google session
         # must run on the system's real Chrome.
         launch_kwargs["channel"] = channel
+    if proxy_server:
+        launch_kwargs["proxy"] = {"server": proxy_server}
 
     async with _lock_for(path), async_playwright() as playwright:
         context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
