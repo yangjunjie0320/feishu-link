@@ -115,6 +115,17 @@ _CLICK_TAB_JS = """() => {
     return fire(visible[visible.length - 1]);
 }"""
 
+# Either entry point showing up means the page is far enough along to click.
+_ENTRY_READY_JS = """() => {
+    const icon = document.querySelector('[data-e2e="comment-icon"]');
+    if (icon && icon.offsetParent !== null) return true;
+    return Array.from(document.querySelectorAll("*")).some(
+        (e) => e.children.length === 0
+            && e.textContent.trim() === "Comments"
+            && e.offsetParent !== null
+    );
+}"""
+
 _COMMENTS_LOADED_JS = """() => document.querySelectorAll(
     '[data-e2e="comment-level-1"]'
 ).length > 0"""
@@ -489,11 +500,17 @@ class TikTokCommentClient:
         logger.info("seeded %d tiktok cookies into comment browser context", len(cookies))
 
     async def _settle_page(self, page: Any, timeout_ms: int) -> None:
-        """Wait out TikTok's post-load navigation before touching the page."""
+        """Wait for a comment entry point rather than for a load event.
+
+        "load" waits on every video, image and beacon, which through a proxied
+        egress can outlast the whole budget -- and it says nothing about the
+        panel being ready anyway, since that renders later from JS. Waiting on
+        the entry point itself is both faster and the actual precondition.
+        """
         try:
-            await page.wait_for_load_state("load", timeout=timeout_ms)
+            await page.wait_for_function(_ENTRY_READY_JS, timeout=timeout_ms)
         except Exception as exc:
-            logger.info("tiktok page load state not reached, continuing: %s", exc)
+            logger.info("tiktok comment entry point never appeared, continuing: %s", exc)
 
     async def _check_page_state(self, page: Any) -> None:
         landed = str(page.url)
