@@ -776,11 +776,16 @@ def _validate_supabase_auth_cookie(cookie_header: str) -> str:
     return ""
 
 
-def share_page_url(base_url: str, video_url: str) -> str:
-    """The shareable BibiGPT summary page for a video: the official
-    open-by-prefix form {base}/{video_url} (always constructible, unlike
-    contentId which the API sometimes omits)."""
-    return _resolve_routes(base_url).referer + video_url
+def share_page_url(base_url: str, video_url: str, content_id: str = "") -> str:
+    """The shareable BibiGPT summary page for a video. With a contentId the
+    site's own share page is {origin}/content/{contentId} (the ?r= referral
+    suffix is optional); the API sometimes omits contentId even after
+    recovery, so the open-by-prefix form {base}/{video_url} — which is always
+    constructible and shows the same summary — is the fallback."""
+    routes = _resolve_routes(base_url)
+    if content_id:
+        return f"{routes.origin}/content/{content_id}"
+    return routes.referer + video_url
 
 
 def _resolve_routes(base_url: str) -> _BibiRoutes:

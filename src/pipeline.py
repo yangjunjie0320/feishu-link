@@ -539,7 +539,9 @@ class Pipeline:
                 self._archive.enqueue(
                     BibiLinkUpdate(
                         url=self._source_archive_url.get(url, url),
-                        bibigpt_url=share_page_url(self._settings.bibigpt_base_url, url),
+                        bibigpt_url=share_page_url(
+                            self._settings.bibigpt_base_url, url, result.content_id
+                        ),
                     )
                 )
 

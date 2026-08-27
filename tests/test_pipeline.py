@@ -615,8 +615,9 @@ async def test_summary_success_enqueues_bibigpt_link() -> None:
     update = archive.enqueue.call_args.args[0]
     assert isinstance(update, BibiLinkUpdate)
     assert update.url == "https://youtu.be/abc123"
-    # Settings default bibigpt_base_url is https://aitodo.co/zh.
-    assert update.bibigpt_url == "https://aitodo.co/zh/https://youtu.be/abc123"
+    # The site's share page, built from the summary's contentId at the origin
+    # of the default bibigpt_base_url (https://aitodo.co/zh).
+    assert update.bibigpt_url == "https://aitodo.co/content/content-123"
 
 
 async def test_summary_success_maps_source_url_to_archived_url() -> None:
@@ -634,7 +635,7 @@ async def test_summary_success_maps_source_url_to_archived_url() -> None:
     update = archive.enqueue.call_args.args[0]
     assert isinstance(update, BibiLinkUpdate)
     assert update.url == "https://www.youtube.com/watch?v=abc123"
-    assert update.bibigpt_url == "https://aitodo.co/zh/https://youtu.be/abc123"
+    assert update.bibigpt_url == "https://aitodo.co/content/content-123"
 
 
 async def test_summary_card_send_failure_does_not_enqueue_bibigpt_link() -> None:

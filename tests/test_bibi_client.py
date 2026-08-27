@@ -891,7 +891,16 @@ async def test_fetch_chapter_summary_browser_uses_profile_request(
     )
 
 
-def test_share_page_url_joins_base_and_video_url() -> None:
+def test_share_page_url_prefers_content_page_when_content_id_known() -> None:
+    from src.bibi_client import share_page_url
+
+    assert (
+        share_page_url("https://aitodo.co/zh", "https://youtu.be/abc", "9770f307-9430")
+        == "https://aitodo.co/content/9770f307-9430"
+    )
+
+
+def test_share_page_url_falls_back_to_prefix_form_without_content_id() -> None:
     from src.bibi_client import share_page_url
 
     assert (
