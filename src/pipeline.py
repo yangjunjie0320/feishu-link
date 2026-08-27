@@ -80,6 +80,9 @@ class Pipeline:
         # differ when canonical_url rewrites a short link like b23.tv).
         self._msg_archive_url: OrderedDict[str, str] = OrderedDict()
         self._source_archive_url: OrderedDict[str, str] = OrderedDict()
+        # url -> contentId of an already-generated summary; its presence is
+        # the duplicate-summarize marker that switches to the cached lookup.
+        self._bibigpt_content_id: OrderedDict[str, str] = OrderedDict()
 
     async def handle(self, event: ListenerEvent) -> None:
         if isinstance(event, CardActionEvent):
@@ -486,7 +489,11 @@ class Pipeline:
             )
 
             try:
-                result = await self._bibi_client.summarize(url, prompt=prompt)
+                result = None
+                if not (prompt and prompt.strip()):
+                    result = await self._lookup_cached_summary(url, prompt, event.message_id)
+                if result is None:
+                    result = await self._bibi_client.summarize(url, prompt=prompt)
                 summary_content = await self._translator.ensure_chinese_markdown_summary(
                     result.content,
                     source_url=url,
@@ -538,6 +545,8 @@ class Pipeline:
                 )
                 return
 
+            if result.content_id:
+                _remember(self._bibigpt_content_id, url, result.content_id)
             if self._archive is not None:
                 self._archive.enqueue(
                     BibiLinkUpdate(
@@ -547,6 +556,36 @@ class Pipeline:
                 )
 
             await self._try_send_bibigpt_chapter_summary(event, result)
+
+    async def _lookup_cached_summary(
+        self,
+        url: str,
+        prompt: str | None,
+        message_id: str,
+    ) -> SummaryResult | None:
+        """Reuse an already-generated summary when this video demonstrably has
+        one: a contentId remembered in-process or read back from the archived
+        row's BibiGPT link. Any miss or lookup failure returns None and the
+        caller regenerates; custom-prompt requests never take this path."""
+        content_id = self._bibigpt_content_id.get(url) or ""
+        if not content_id and self._archive is not None:
+            try:
+                content_id = await self._archive.find_bibigpt_content_id(
+                    self._source_archive_url.get(url, url)
+                )
+            except Exception as e:
+                logger.warning("bibigpt content-id lookup failed: url=%s error=%s", url, e)
+                return None
+        if not content_id:
+            return None
+        result = await self._bibi_client.summarize_cached(url, prompt=prompt)
+        if result is not None:
+            logger.info(
+                "using cached BibiGPT summary: content_id=%s message_id=%s",
+                result.content_id or content_id,
+                message_id,
+            )
+        return result
 
     async def _try_send_bibigpt_chapter_summary(
         self,

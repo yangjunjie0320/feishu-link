@@ -600,8 +600,14 @@ async def test_non_reply_without_urls_is_ignored() -> None:
     lark_client.arequest.assert_not_called()
 
 
-async def test_summary_success_enqueues_bibigpt_link() -> None:
+def _summary_archive_mock(content_id: str = "") -> MagicMock:
     archive = MagicMock()
+    archive.find_bibigpt_content_id = AsyncMock(return_value=content_id)
+    return archive
+
+
+async def test_summary_success_enqueues_bibigpt_link() -> None:
+    archive = _summary_archive_mock()
     pipeline = Pipeline(Settings(), MagicMock(), archive=archive)
     pipeline._typing_sender.hold = MagicMock(return_value=_NoopHold())  # type: ignore[method-assign]
     pipeline._translator.ensure_chinese_markdown_summary = AsyncMock(  # type: ignore[method-assign]
@@ -625,7 +631,7 @@ async def test_summary_success_enqueues_bibigpt_link() -> None:
 
 
 async def test_summary_success_maps_source_url_to_archived_url() -> None:
-    archive = MagicMock()
+    archive = _summary_archive_mock()
     pipeline = _prepare_card_pipeline(archive)
     await pipeline._process_url("https://youtu.be/abc123", _link_message_event(), False, False)
     pipeline._bibi_client.summarize = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
@@ -643,7 +649,7 @@ async def test_summary_success_maps_source_url_to_archived_url() -> None:
 
 
 async def test_summary_card_send_failure_does_not_enqueue_bibigpt_link() -> None:
-    archive = MagicMock()
+    archive = _summary_archive_mock()
     pipeline = Pipeline(Settings(), MagicMock(), archive=archive)
     pipeline._typing_sender.hold = MagicMock(return_value=_NoopHold())  # type: ignore[method-assign]
     pipeline._translator.ensure_chinese_markdown_summary = AsyncMock(  # type: ignore[method-assign]
@@ -656,3 +662,71 @@ async def test_summary_card_send_failure_does_not_enqueue_bibigpt_link() -> None
     await pipeline._try_send_bibigpt_summary("https://youtu.be/abc123", _summary_event())
 
     archive.enqueue.assert_not_called()
+
+
+def _cached_summary_pipeline(archive) -> Pipeline:
+    pipeline = Pipeline(Settings(), MagicMock(), archive=archive)
+    pipeline._typing_sender.hold = MagicMock(return_value=_NoopHold())  # type: ignore[method-assign]
+    pipeline._translator.ensure_chinese_markdown_summary = AsyncMock(  # type: ignore[method-assign]
+        return_value="- **总结**\n    - 内容"
+    )
+    pipeline._sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    pipeline._try_send_bibigpt_chapter_summary = AsyncMock()  # type: ignore[method-assign]
+    return pipeline
+
+
+async def test_repeat_summary_uses_cached_lookup_instead_of_regenerating() -> None:
+    pipeline = _cached_summary_pipeline(_summary_archive_mock())
+    pipeline._bibi_client.summarize = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+    pipeline._bibi_client.summarize_cached = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+
+    await pipeline._try_send_bibigpt_summary("https://youtu.be/abc123", _summary_event())
+    pipeline._bibi_client.summarize.assert_awaited_once()
+
+    await pipeline._try_send_bibigpt_summary("https://youtu.be/abc123", _summary_event())
+
+    pipeline._bibi_client.summarize.assert_awaited_once()
+    pipeline._bibi_client.summarize_cached.assert_awaited_once()
+
+
+async def test_summary_cache_marker_survives_via_archive_column() -> None:
+    pipeline = _cached_summary_pipeline(_summary_archive_mock(content_id="content-999"))
+    pipeline._bibi_client.summarize = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+    pipeline._bibi_client.summarize_cached = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+
+    await pipeline._try_send_bibigpt_summary("https://youtu.be/abc123", _summary_event())
+
+    pipeline._bibi_client.summarize_cached.assert_awaited_once()
+    pipeline._bibi_client.summarize.assert_not_called()
+
+
+async def test_summary_cache_lookup_failure_falls_back_to_regeneration() -> None:
+    pipeline = _cached_summary_pipeline(_summary_archive_mock(content_id="content-999"))
+    pipeline._bibi_client.summarize = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+    pipeline._bibi_client.summarize_cached = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    await pipeline._try_send_bibigpt_summary("https://youtu.be/abc123", _summary_event())
+
+    pipeline._bibi_client.summarize_cached.assert_awaited_once()
+    pipeline._bibi_client.summarize.assert_awaited_once()
+
+
+async def test_summary_with_custom_prompt_skips_cache() -> None:
+    pipeline = _cached_summary_pipeline(_summary_archive_mock(content_id="content-999"))
+    pipeline._bibi_client.summarize = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+    pipeline._bibi_client.summarize_cached = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+
+    event = MessageEvent(
+        message_id="msg_prompt",
+        chat_id="oc_chat",
+        sender_id="ou_sender",
+        chat_type="group",
+        timestamp_utc=0,
+        message_type="text",
+        content=json.dumps({"text": "@_user_1 重点讲马编经历 https://youtu.be/abc123"}),
+        mentions=[],
+    )
+    await pipeline._try_send_bibigpt_summary("https://youtu.be/abc123", event)
+
+    pipeline._bibi_client.summarize_cached.assert_not_called()
+    pipeline._bibi_client.summarize.assert_awaited_once()

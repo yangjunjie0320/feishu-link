@@ -300,6 +300,20 @@ class BitableArchive:
                 e,
             )
 
+    async def find_bibigpt_content_id(self, url: str) -> str:
+        """Read the contentId back from the archived row's "BibiGPT 链接"
+        column ({origin}/content/{contentId}). Empty when the row is missing,
+        the column is empty, or the stored link is the prefix-form fallback
+        (which carries no contentId)."""
+        found = await self._find_records_by_normalized_url(normalize_url(url))
+        if not found:
+            return ""
+        link = _decode_url_value(found[0][1].get(_DISPLAY["bibigpt_url"]))
+        marker = "/content/"
+        if marker not in link:
+            return ""
+        return link.split(marker, 1)[1].split("?", 1)[0].strip("/")
+
     async def _set_bibigpt_url(self, task: BibiLinkUpdate) -> None:
         found = await self._find_records_by_normalized_url(normalize_url(task.url))
         if not found:

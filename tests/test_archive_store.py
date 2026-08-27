@@ -546,3 +546,35 @@ def test_decode_row_reads_remark_and_bibigpt_link() -> None:
 
     assert row.remark == "[08-27 10:00] 张三: 不错"
     assert row.bibigpt_url == "https://aitodo.co/zh/https://youtu.be/abc"
+
+
+async def test_find_bibigpt_content_id_parses_content_link() -> None:
+    client = _client(
+        _api_response(
+            _stale_search_page(
+                "rec1",
+                "https://youtu.be/abc",
+                {"BibiGPT 链接": {"link": "https://aitodo.co/content/content-123"}},
+            )
+        )
+    )
+    archive = _archive(client)
+
+    assert await archive.find_bibigpt_content_id("https://youtu.be/abc") == "content-123"
+
+
+async def test_find_bibigpt_content_id_empty_for_prefix_form_or_missing() -> None:
+    client = _client(
+        _api_response(
+            _stale_search_page(
+                "rec1",
+                "https://youtu.be/abc",
+                {"BibiGPT 链接": {"link": "https://aitodo.co/zh/https://youtu.be/abc"}},
+            )
+        ),
+        _api_response({"items": [], "has_more": False}),
+    )
+    archive = _archive(client)
+
+    assert await archive.find_bibigpt_content_id("https://youtu.be/abc") == ""
+    assert await archive.find_bibigpt_content_id("https://youtu.be/other") == ""

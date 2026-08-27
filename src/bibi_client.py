@@ -124,6 +124,29 @@ class BibiClient:
             return result
         return await self._summarize_web(video_url, effective_prompt)
 
+    async def summarize_cached(
+        self,
+        video_url: str,
+        prompt: str | None = None,
+    ) -> SummaryResult | None:
+        """Fetch the already-generated summary for a video: isRefresh=false
+        returns BibiGPT's stored record without regenerating (no quota, no
+        1-2 minute wait). Returns None when the lookup fails or yields no
+        usable summary so callers can fall back to a full summarize()."""
+        if self._cookie_error and self._settings.bibigpt_access_mode != "browser":
+            return None
+        base_prompt = (prompt or self._settings.bibigpt_default_prompt).strip()
+        effective_prompt = _with_output_instructions(base_prompt) if base_prompt else ""
+        try:
+            if self._settings.bibigpt_access_mode == "browser":
+                return await self._summarize_browser(video_url, effective_prompt, refresh=False)
+            return await self._summarize_web(video_url, effective_prompt)
+        except Exception as e:
+            logger.warning(
+                "BibiGPT cached summary lookup failed, falling back to regeneration: %s", e
+            )
+            return None
+
     async def _recover_content_id(
         self,
         result: SummaryResult,

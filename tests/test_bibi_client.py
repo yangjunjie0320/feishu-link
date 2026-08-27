@@ -911,3 +911,77 @@ def test_share_page_url_falls_back_to_prefix_form_without_content_id() -> None:
         share_page_url("https://bibigpt.co", "https://youtu.be/abc")
         == "https://bibigpt.co/https://youtu.be/abc"
     )
+
+
+def _browser_settings(tmp_path) -> Settings:
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text(
+        "\n".join(
+            [
+                "# Netscape HTTP Cookie File",
+                "aitodo.co\tFALSE\t/\tFALSE\t2147483647\t"
+                "sb-hxtizkasyxsfnzgphrtk-auth-token.0\tbase64-abcde",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return Settings(
+        bibigpt_base_url="https://aitodo.co/zh",
+        bibigpt_access_mode="browser",
+        cookie_file=str(cookie_file),
+        bibigpt_browser_profile_dir=str(tmp_path / "profile"),
+    )
+
+
+async def test_summarize_cached_browser_sends_is_refresh_false(monkeypatch, tmp_path) -> None:
+    settings = _browser_settings(tmp_path)
+    captured: dict[str, object] = {}
+
+    async def fake_browser_fetch(self, url, body, *, method="POST"):
+        captured["body"] = body
+        return [
+            {
+                "result": {
+                    "data": {
+                        "json": {
+                            "summary": "- Cached point",
+                            "fromCache": True,
+                            "contentId": "content-123",
+                        }
+                    }
+                }
+            }
+        ]
+
+    monkeypatch.setattr(BibiClient, "_browser_fetch_json", fake_browser_fetch)
+
+    result = await BibiClient(settings).summarize_cached("https://youtu.be/abc123")
+
+    assert result is not None
+    assert result.content == "- Cached point"
+    assert result.from_cache is True
+    assert result.content_id == "content-123"
+    prompt_config = captured["body"]["0"]["json"]["promptConfig"]  # type: ignore[index]
+    assert prompt_config["isRefresh"] is False
+
+
+async def test_summarize_cached_returns_none_on_lookup_failure(monkeypatch, tmp_path) -> None:
+    settings = _browser_settings(tmp_path)
+
+    async def fake_browser_fetch(self, url, body, *, method="POST"):
+        raise RuntimeError("browser exploded")
+
+    monkeypatch.setattr(BibiClient, "_browser_fetch_json", fake_browser_fetch)
+
+    assert await BibiClient(settings).summarize_cached("https://youtu.be/abc123") is None
+
+
+async def test_summarize_cached_returns_none_on_empty_summary(monkeypatch, tmp_path) -> None:
+    settings = _browser_settings(tmp_path)
+
+    async def fake_browser_fetch(self, url, body, *, method="POST"):
+        return [{"result": {"data": {"json": {"summary": ""}}}}]
+
+    monkeypatch.setattr(BibiClient, "_browser_fetch_json", fake_browser_fetch)
+
+    assert await BibiClient(settings).summarize_cached("https://youtu.be/abc123") is None
