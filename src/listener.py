@@ -29,6 +29,11 @@ class MessageEvent:
     content: str
     timestamp_utc: datetime
     mentions: list[str]
+    # Reply context: both thread replies and quote replies carry these; empty
+    # for top-level messages. root_id points at the first message of the chain
+    # (the original link message even when the reply targets the bot's card).
+    root_id: str = ""
+    parent_id: str = ""
 
 
 @dataclass
@@ -66,13 +71,17 @@ class LarkEventListener:
                     event.message_id,
                 )
                 loop.call_soon_threadsafe(self._queue.put_nowait, event)
-                return P2CardActionTriggerResponse({
-                    "toast": {"type": "info", "content": "已开始处理"},
-                })
+                return P2CardActionTriggerResponse(
+                    {
+                        "toast": {"type": "info", "content": "已开始处理"},
+                    }
+                )
             logger.warning("card action callback ignored: unrecognized payload")
-            return P2CardActionTriggerResponse({
-                "toast": {"type": "warning", "content": "无法识别这个按钮动作"},
-            })
+            return P2CardActionTriggerResponse(
+                {
+                    "toast": {"type": "warning", "content": "无法识别这个按钮动作"},
+                }
+            )
 
         handler = (
             lark.EventDispatcherHandler.builder("", "")
@@ -114,6 +123,8 @@ def _parse_event(data: lark.im.v1.P2ImMessageReceiveV1) -> MessageEvent | None:
             content=msg.content,
             timestamp_utc=datetime.now(UTC),
             mentions=mention_ids,
+            root_id=str(getattr(msg, "root_id", "") or ""),
+            parent_id=str(getattr(msg, "parent_id", "") or ""),
         )
     except AttributeError as e:
         logger.warning("failed to parse event: %s", e)
