@@ -75,6 +75,16 @@ async def _init_bitable(settings: Settings) -> None:
     logger.info("fill bitable_app_token/bitable_table_id into config.yaml to enable archiving")
 
 
+async def _migrate_bitable(settings: Settings) -> None:
+    client = _build_lark_client(settings)
+    archive = BitableArchive(settings, client, ChatDirectory(client))
+    created = await archive.migrate()
+    if created:
+        logger.info("bitable fields added: %s", ", ".join(created))
+    else:
+        logger.info("bitable table already up to date, no fields added")
+
+
 async def _send_report(settings: Settings, day_arg: str | None) -> bool:
     from datetime import date
 
@@ -97,6 +107,11 @@ def main() -> None:
         "--init-bitable",
         action="store_true",
         help="One-time: create the archive bitable base/table and print its tokens",
+    )
+    parser.add_argument(
+        "--migrate-bitable",
+        action="store_true",
+        help="One-time: add newly defined columns to the existing archive table",
     )
     parser.add_argument(
         "--send-report",
@@ -122,6 +137,10 @@ def main() -> None:
 
     if args.init_bitable:
         asyncio.run(_init_bitable(settings))
+        sys.exit(0)
+
+    if args.migrate_bitable:
+        asyncio.run(_migrate_bitable(settings))
         sys.exit(0)
 
     if args.send_report:

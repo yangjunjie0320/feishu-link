@@ -32,12 +32,17 @@ _FIELDS: tuple[tuple[str, str, int], ...] = (
     ("sender", "发送人", _USER),
     ("chat", "发送的群", _SINGLE_SELECT),
     ("recorded_at", "记录时间", _DATE_TIME),
+    ("remark", "备注", _TEXT),
+    ("bibigpt_url", "BibiGPT 链接", _URL),
 )
 _DISPLAY = {logical: display for logical, display, _ in _FIELDS}
 
 # Human-friendly Beijing time; zero-padded so lexical order equals time order
 # and the daily report can filter by date prefix.
 _RECORDED_AT_FMT = "%Y-%m-%d %H:%M"
+# Remark lines are read inside a single table cell, so a compact month-day
+# prefix is enough to tell replies apart.
+_REMARK_AT_FMT = "%m-%d %H:%M"
 
 
 class ArchiveError(Exception):
@@ -60,6 +65,30 @@ class ArchiveEntry:
 
 
 @dataclass
+class RemarkAppend:
+    """Append one reply line to the "备注" cell of the archived row for url.
+    The sender name is resolved by the consumer coroutine, like chat names."""
+
+    url: str
+    text: str
+    sender_open_id: str
+    chat_id: str
+    chat_type: str
+    replied_at_utc: datetime = field(default_factory=now_utc)
+
+
+@dataclass
+class BibiLinkUpdate:
+    """Set the "BibiGPT 链接" cell of the archived row for url (idempotent)."""
+
+    url: str
+    bibigpt_url: str
+
+
+ArchiveTask = ArchiveEntry | RemarkAppend | BibiLinkUpdate
+
+
+@dataclass
 class ArchivedRow:
     """A row read back from the bitable table (all values as displayed)."""
 
@@ -71,6 +100,8 @@ class ArchivedRow:
     sender: str
     chat: str
     recorded_at: str
+    remark: str = ""
+    bibigpt_url: str = ""
 
 
 async def _bitable_request(
@@ -108,6 +139,7 @@ class ChatDirectory:
     def __init__(self, client: lark.Client) -> None:
         self._client = client
         self._chat_names: dict[str, str] = {}
+        self._member_names: dict[tuple[str, str], str] = {}
         self._warned: set[str] = set()
 
     async def chat_name(self, chat_id: str, chat_type: str) -> str:
@@ -126,6 +158,48 @@ class ChatDirectory:
             return chat_id
         self._chat_names[chat_id] = name
         return name
+
+    async def member_name(self, chat_id: str, chat_type: str, open_id: str) -> str:
+        """Resolve a member open_id to a display name for the remark column
+        (plain text, so Feishu does no server-side resolution there). Uses the
+        chat member list (im:chat:readonly, the scope already held for chat
+        names) and caches the whole roster per chat. p2p chats have no member
+        list; those and any failure degrade to the raw open_id."""
+        if chat_type == "p2p":
+            return open_id
+        cached = self._member_names.get((chat_id, open_id))
+        if cached is not None:
+            return cached
+        try:
+            page_token = ""
+            while True:
+                queries: list[tuple[str, str]] = [
+                    ("member_id_type", "open_id"),
+                    ("page_size", "100"),
+                ]
+                if page_token:
+                    queries.append(("page_token", page_token))
+                data = await _bitable_request(
+                    self._client,
+                    lark.HttpMethod.GET,
+                    f"/open-apis/im/v1/chats/{chat_id}/members",
+                    queries=queries,
+                )
+                for item in data.get("items") or []:
+                    member_id = str(item.get("member_id") or "")
+                    name = str(item.get("name") or "")
+                    if member_id and name:
+                        self._member_names[(chat_id, member_id)] = name
+                page_token = str(data.get("page_token") or "")
+                if not data.get("has_more") or not page_token:
+                    break
+        except Exception as e:
+            self._warn_once(
+                f"members:{chat_id}",
+                f"failed to resolve chat members: chat_id={chat_id} error={e}",
+            )
+            return open_id
+        return self._member_names.get((chat_id, open_id)) or open_id
 
     def _warn_once(self, key: str, message: str) -> None:
         if key in self._warned:
@@ -146,34 +220,74 @@ class BitableArchive:
         self._settings = settings
         self._client = client
         self._directory = directory
-        self._queue: asyncio.Queue[ArchiveEntry] = asyncio.Queue()
+        self._queue: asyncio.Queue[ArchiveTask] = asyncio.Queue()
 
-    def enqueue(self, entry: ArchiveEntry) -> None:
-        self._queue.put_nowait(entry)
+    def enqueue(self, task: ArchiveTask) -> None:
+        self._queue.put_nowait(task)
 
     async def run(self) -> None:
         logger.info("bitable archive consumer started")
         while True:
-            entry = await self._queue.get()
+            task = await self._queue.get()
             try:
-                await self._process_one(entry)
+                if isinstance(task, ArchiveEntry):
+                    await self._process_one(task)
+                elif isinstance(task, RemarkAppend):
+                    await self._append_remark(task)
+                else:
+                    await self._set_bibigpt_url(task)
             except Exception as e:
-                logger.warning("bitable archive failed, row dropped: url=%s error=%s", entry.url, e)
+                logger.warning(
+                    "bitable archive %s failed, dropped: url=%s error=%s",
+                    task.__class__.__name__,
+                    task.url,
+                    e,
+                )
 
     async def _process_one(self, entry: ArchiveEntry) -> None:
         entry.chat_name = await self._directory.chat_name(entry.chat_id, entry.chat_type)
         normalized = normalize_url(entry.url)
-        stale_ids = await self._find_record_ids_by_normalized_url(normalized)
+        stale = await self._find_records_by_normalized_url(normalized)
+        fields = self._encode_fields(entry)
+        # A fresh entry never carries remark/BibiGPT-link values of its own,
+        # so re-sharing a link must inherit them from the row it replaces.
+        fields.update(_carried_over_fields(stale))
         # Create the new row before deleting the stale one(s): if create fails
         # and raises, the old row is still there instead of both being gone.
-        await self._create_record(entry)
-        for record_id in stale_ids:
+        await self._create_record(fields)
+        for record_id, _ in stale:
             await self._delete_record(record_id)
         logger.info(
             "archived: url=%s platform=%s chat=%s", entry.url, entry.platform, entry.chat_name
         )
 
-    async def _create_record(self, entry: ArchiveEntry) -> None:
+    async def _append_remark(self, task: RemarkAppend) -> None:
+        found = await self._find_records_by_normalized_url(normalize_url(task.url))
+        if not found:
+            logger.warning("remark dropped, no archived row for url=%s", task.url)
+            return
+        record_id, fields = found[0]
+        name = await self._directory.member_name(task.chat_id, task.chat_type, task.sender_open_id)
+        stamp = format_beijing(task.replied_at_utc, _REMARK_AT_FMT)
+        line = f"[{stamp}] {name}: {task.text}"
+        existing = _flatten_value(fields.get(_DISPLAY["remark"]))
+        value = f"{existing}\n{line}" if existing else line
+        await self._update_record(record_id, {_DISPLAY["remark"]: value})
+        logger.info("remark appended: url=%s record_id=%s", task.url, record_id)
+
+    async def _set_bibigpt_url(self, task: BibiLinkUpdate) -> None:
+        found = await self._find_records_by_normalized_url(normalize_url(task.url))
+        if not found:
+            logger.warning("bibigpt link dropped, no archived row for url=%s", task.url)
+            return
+        record_id, _ = found[0]
+        await self._update_record(
+            record_id,
+            {_DISPLAY["bibigpt_url"]: {"link": task.bibigpt_url, "text": task.bibigpt_url}},
+        )
+        logger.info("bibigpt link set: url=%s record_id=%s", task.url, record_id)
+
+    async def _create_record(self, fields: dict[str, object]) -> None:
         @tenacity.retry(
             stop=tenacity.stop_after_attempt(3),
             wait=tenacity.wait_exponential(multiplier=1, min=1, max=9),
@@ -185,17 +299,37 @@ class BitableArchive:
                 lark.HttpMethod.POST,
                 f"/open-apis/bitable/v1/apps/{self._settings.bitable_app_token}"
                 f"/tables/{self._settings.bitable_table_id}/records",
-                body={"fields": self._encode_fields(entry)},
+                body={"fields": fields},
             )
 
         await _attempt()
 
-    async def _find_record_ids_by_normalized_url(self, normalized: str) -> list[str]:
-        """Full-table scan for rows whose "链接" normalizes to the same key.
+    async def _update_record(self, record_id: str, fields: dict[str, object]) -> None:
+        @tenacity.retry(
+            stop=tenacity.stop_after_attempt(3),
+            wait=tenacity.wait_exponential(multiplier=1, min=1, max=9),
+            reraise=True,
+        )
+        async def _attempt() -> None:
+            await _bitable_request(
+                self._client,
+                lark.HttpMethod.PUT,
+                f"/open-apis/bitable/v1/apps/{self._settings.bitable_app_token}"
+                f"/tables/{self._settings.bitable_table_id}/records/{record_id}",
+                body={"fields": fields},
+            )
+
+        await _attempt()
+
+    async def _find_records_by_normalized_url(
+        self, normalized: str
+    ) -> list[tuple[str, dict[str, object]]]:
+        """Full-table scan for rows whose "链接" normalizes to the same key,
+        returning (record_id, fields) so callers can carry values over.
 
         The stored URL string varies by share-tracking params, so the server
         can't filter by the normalized value directly; this fetches only
-        record_id + the URL field (cheap payload) and compares client-side,
+        record_id + a few fields (cheap payload) and compares client-side,
         the same fetch-all-then-filter approach `fetch_day` already uses for
         the same reason (unreliable server-side filtering).
         """
@@ -203,8 +337,11 @@ class BitableArchive:
             f"/open-apis/bitable/v1/apps/{self._settings.bitable_app_token}"
             f"/tables/{self._settings.bitable_table_id}/records/search"
         )
-        body = {"field_names": [_DISPLAY["url"]], "automatic_fields": False}
-        matches: list[str] = []
+        body = {
+            "field_names": [_DISPLAY["url"], _DISPLAY["remark"], _DISPLAY["bibigpt_url"]],
+            "automatic_fields": False,
+        }
+        matches: list[tuple[str, dict[str, object]]] = []
         page_token = ""
         while True:
             queries: list[tuple[str, str]] = [("page_size", "500")]
@@ -214,11 +351,12 @@ class BitableArchive:
                 self._client, lark.HttpMethod.POST, uri, body=body, queries=queries
             )
             for item in data.get("items") or []:
-                url_value = (item.get("fields") or {}).get(_DISPLAY["url"])
+                fields = item.get("fields") or {}
+                url_value = fields.get(_DISPLAY["url"])
                 url = str(url_value.get("link") or "") if isinstance(url_value, dict) else ""
                 record_id = str(item.get("record_id") or "")
                 if record_id and url and normalize_url(url) == normalized:
-                    matches.append(record_id)
+                    matches.append((record_id, fields))
             page_token = str(data.get("page_token") or "")
             if not data.get("has_more") or not page_token:
                 break
@@ -354,6 +492,43 @@ class BitableArchive:
             )
         return app_token, table_id
 
+    async def migrate(self) -> list[str]:
+        """One-time: add any _FIELDS column missing from the existing table
+        (via the API, not the UI, so no shadow fields). Returns the display
+        names of the columns it created."""
+        uri = (
+            f"/open-apis/bitable/v1/apps/{self._settings.bitable_app_token}"
+            f"/tables/{self._settings.bitable_table_id}/fields"
+        )
+        existing: set[str] = set()
+        page_token = ""
+        while True:
+            queries: list[tuple[str, str]] = [("page_size", "100")]
+            if page_token:
+                queries.append(("page_token", page_token))
+            data = await _bitable_request(self._client, lark.HttpMethod.GET, uri, queries=queries)
+            for item in data.get("items") or []:
+                name = str(item.get("field_name") or "")
+                if name:
+                    existing.add(name)
+            page_token = str(data.get("page_token") or "")
+            if not data.get("has_more") or not page_token:
+                break
+
+        created: list[str] = []
+        for _, display, ftype in _FIELDS:
+            if display in existing:
+                continue
+            await _bitable_request(
+                self._client,
+                lark.HttpMethod.POST,
+                uri,
+                body=_bootstrap_field_spec(display, ftype),
+            )
+            created.append(display)
+            logger.info("bitable field created: %s", display)
+        return created
+
 
 def _bootstrap_field_spec(display: str, ftype: int) -> dict[str, object]:
     spec: dict[str, object] = {"field_name": display, "type": ftype}
@@ -364,24 +539,47 @@ def _bootstrap_field_spec(display: str, ftype: int) -> dict[str, object]:
     return spec
 
 
+def _carried_over_fields(
+    stale: list[tuple[str, dict[str, object]]],
+) -> dict[str, object]:
+    """Extract the remark / BibiGPT-link values a replacement row must inherit
+    from the stale duplicate row(s) it is about to displace."""
+    carried: dict[str, object] = {}
+    remarks: list[str] = []
+    for _, fields in stale:
+        remark = _flatten_value(fields.get(_DISPLAY["remark"]))
+        if remark and remark not in remarks:
+            remarks.append(remark)
+        if _DISPLAY["bibigpt_url"] not in carried:
+            link = _decode_url_value(fields.get(_DISPLAY["bibigpt_url"]))
+            if link:
+                carried[_DISPLAY["bibigpt_url"]] = {"link": link, "text": link}
+    if remarks:
+        carried[_DISPLAY["remark"]] = "\n".join(remarks)
+    return carried
+
+
+def _decode_url_value(value: object) -> str:
+    if isinstance(value, dict):
+        return str(value.get("link") or value.get("text") or "")
+    return _flatten_value(value)
+
+
 def _decode_row(fields: dict[str, object]) -> ArchivedRow:
     def text(logical: str) -> str:
         return _flatten_value(fields.get(_DISPLAY[logical]))
 
-    url_value = fields.get(_DISPLAY["url"])
-    if isinstance(url_value, dict):
-        url = str(url_value.get("link") or url_value.get("text") or "")
-    else:
-        url = _flatten_value(url_value)
     return ArchivedRow(
         title=text("title"),
-        url=url,
+        url=_decode_url_value(fields.get(_DISPLAY["url"])),
         platform=text("platform"),
         channel=text("channel"),
         duration=text("duration"),
         sender=_decode_sender(fields.get(_DISPLAY["sender"])),
         chat=text("chat"),
         recorded_at=_decode_recorded_at(fields.get(_DISPLAY["recorded_at"])),
+        remark=text("remark"),
+        bibigpt_url=_decode_url_value(fields.get(_DISPLAY["bibigpt_url"])),
     )
 
 
