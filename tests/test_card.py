@@ -323,6 +323,37 @@ def test_markdown_card_uses_markdown_component_and_normalizes_bullets() -> None:
     assert link["content"] == "[打开视频](https://youtu.be/abc123)"
 
 
+def test_markdown_card_appends_extra_links_on_the_same_line() -> None:
+    card = json.loads(
+        build_markdown_card(
+            "BibiGPT 总结",
+            "- 内容",
+            source_url="https://youtu.be/abc123",
+            extra_links=[("BibiGPT 页面", "https://aitodo.co/content/content-123")],
+        )
+    )
+
+    link = card["body"]["elements"][1]
+    assert link["content"] == (
+        "[打开视频](https://youtu.be/abc123)"
+        " · [BibiGPT 页面](https://aitodo.co/content/content-123)"
+    )
+
+
+def test_markdown_card_skips_empty_extra_links() -> None:
+    card = json.loads(
+        build_markdown_card(
+            "BibiGPT 总结",
+            "- 内容",
+            source_url="https://youtu.be/abc123",
+            extra_links=[("BibiGPT 页面", "")],
+        )
+    )
+
+    link = card["body"]["elements"][1]
+    assert link["content"] == "[打开视频](https://youtu.be/abc123)"
+
+
 def test_split_markdown_extracts_preamble() -> None:
     markdown = "`#AI` `#技术`\n\n- **总结**\n    - 一句话\n- **亮点**\n    - 亮点1"
     preamble, sections = _split_markdown(markdown)

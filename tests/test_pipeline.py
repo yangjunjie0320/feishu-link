@@ -618,6 +618,9 @@ async def test_summary_success_enqueues_bibigpt_link() -> None:
     # The site's share page, built from the summary's contentId at the origin
     # of the default bibigpt_base_url (https://aitodo.co/zh).
     assert update.bibigpt_url == "https://aitodo.co/content/content-123"
+    # The same link is shown inside the summary card itself.
+    card_json = pipeline._sender.send.call_args.args[0]
+    assert "[BibiGPT 页面](https://aitodo.co/content/content-123)" in card_json
 
 
 async def test_summary_success_maps_source_url_to_archived_url() -> None:

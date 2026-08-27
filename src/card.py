@@ -74,6 +74,7 @@ def build_markdown_card(
     collapsed: bool = False,
     panel_title: str = "正文",
     sectioned: bool = False,
+    extra_links: Sequence[tuple[str, str]] = (),
 ) -> str:
     safe_title = _strip_emoji_symbols(title).strip() or "Summary"
     content = _normalize_summary_markdown(markdown)
@@ -108,11 +109,14 @@ def build_markdown_card(
     else:
         elements = [{"tag": "markdown", "content": content}]
 
-    if source_url:
+    links = ([("打开视频", source_url)] if source_url else []) + [
+        (label, url) for label, url in extra_links if label and url
+    ]
+    if links:
         elements.append(
             {
                 "tag": "markdown",
-                "content": f"[打开视频]({source_url})",
+                "content": " · ".join(f"[{label}]({url})" for label, url in links),
             }
         )
 

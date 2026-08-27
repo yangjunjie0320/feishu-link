@@ -504,6 +504,7 @@ class Pipeline:
                 )
                 return
 
+            bibigpt_url = share_page_url(self._settings.bibigpt_base_url, url, result.content_id)
             try:
                 card_json = build_markdown_card(
                     "BibiGPT 总结",
@@ -512,6 +513,7 @@ class Pipeline:
                     collapsed=True,
                     panel_title="总结正文",
                     sectioned=True,
+                    extra_links=[("BibiGPT 页面", bibigpt_url)],
                 )
                 card_sent = await self._sender.send(card_json, event.chat_id, event.message_id)
                 if not card_sent:
@@ -539,9 +541,7 @@ class Pipeline:
                 self._archive.enqueue(
                     BibiLinkUpdate(
                         url=self._source_archive_url.get(url, url),
-                        bibigpt_url=share_page_url(
-                            self._settings.bibigpt_base_url, url, result.content_id
-                        ),
+                        bibigpt_url=bibigpt_url,
                     )
                 )
 
