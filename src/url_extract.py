@@ -77,6 +77,13 @@ def _flatten_post(obj: Any) -> str:
     return " ".join(parts)
 
 
+def decode_plain_text(message_type: str, raw: str) -> str:
+    """Decode a text/post message to plain text with @mention placeholders
+    stripped; used for reply remarks."""
+    text = _decode_content(message_type, raw)
+    return _MENTION_PLACEHOLDER_RE.sub("", text).strip()
+
+
 def extract_prompt(message_type: str, raw: str, video_url: str) -> str | None:
     """Extract custom prompt from message text.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections import OrderedDict
@@ -8,12 +9,13 @@ from collections import OrderedDict
 import httpx
 import lark_oapi as lark
 
-from .archive_store import ArchiveEntry, BitableArchive
+from .archive_store import ArchiveEntry, BibiLinkUpdate, BitableArchive, RemarkAppend
 from .bibi_client import (
     AuthenticationError,
     BibiAPIError,
     BibiClient,
     TranscriptUnavailableError,
+    share_page_url,
 )
 from .bibi_models import SummaryResult
 from .card import (
@@ -32,12 +34,24 @@ from .parsers.base import LinkMetadata, ParserError
 from .platforms import is_short_video_platform
 from .sender import CardSender, TextSender, TypingReactionSender, VideoSender
 from .translator import TitleTranslator
-from .url_extract import extract_prompt, extract_urls, is_manual_download_command
+from .url_extract import (
+    decode_plain_text,
+    extract_prompt,
+    extract_urls,
+    is_manual_download_command,
+)
 
 logger = logging.getLogger(__name__)
 
 _SEEN_CAPACITY = 500
 _CHAPTER_SUMMARY_SEND_INTERVAL_SECONDS = 0.25
+
+
+def _remember(cache: OrderedDict[str, str], key: str, value: str) -> None:
+    cache[key] = value
+    cache.move_to_end(key)
+    if len(cache) > _SEEN_CAPACITY:
+        cache.popitem(last=False)
 
 
 class Pipeline:
@@ -61,6 +75,11 @@ class Pipeline:
         self._lark_client = lark_client
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._bot_open_id: str | None = None
+        # Reply-remark and BibiGPT-link lookups: original message_id -> the URL
+        # archived for it, and meta.source_url -> that same archived URL (they
+        # differ when canonical_url rewrites a short link like b23.tv).
+        self._msg_archive_url: OrderedDict[str, str] = OrderedDict()
+        self._source_archive_url: OrderedDict[str, str] = OrderedDict()
 
     async def handle(self, event: ListenerEvent) -> None:
         if isinstance(event, CardActionEvent):
@@ -84,7 +103,7 @@ class Pipeline:
 
         urls = extract_urls(event.message_type, event.content, self._settings)
         if not urls:
-            logger.debug("skip: no URLs in message_id=%s", event.message_id)
+            await self._maybe_handle_reply_remark(event)
             return
         if len(urls) > 1:
             logger.info(
@@ -173,6 +192,91 @@ class Pipeline:
                 show_typing=False,
             )
 
+    async def _maybe_handle_reply_remark(self, event: MessageEvent) -> None:
+        """A URL-less message replying (thread or quote) to an archived link
+        message or to the bot's card gets its text appended to the archived
+        row's remark column. Anything unresolvable is a silent skip: replies
+        about unrelated messages are normal chat, not an error."""
+        if (
+            self._archive is None
+            or event.message_type not in ("text", "post")
+            or not (event.root_id or event.parent_id)
+        ):
+            logger.debug("skip: no URLs in message_id=%s", event.message_id)
+            return
+        text = decode_plain_text(event.message_type, event.content)
+        if not text:
+            return
+        archive_url = await self._resolve_replied_archive_url(event)
+        if not archive_url:
+            logger.debug(
+                "reply does not target an archived link: message_id=%s root_id=%s parent_id=%s",
+                event.message_id,
+                event.root_id,
+                event.parent_id,
+            )
+            return
+        self._archive.enqueue(
+            RemarkAppend(
+                url=archive_url,
+                text=text,
+                sender_open_id=event.sender_id,
+                chat_id=event.chat_id,
+                chat_type=event.chat_type,
+            )
+        )
+        logger.info("reply remark enqueued: url=%s message_id=%s", archive_url, event.message_id)
+
+    async def _resolve_replied_archive_url(self, event: MessageEvent) -> str | None:
+        """root_id points at the first message of the reply chain, i.e. the
+        original link message even when the reply targets the bot's card, so
+        the in-process map filled at card-send time answers most lookups. The
+        message-read API is the fallback for replies to cards sent before a
+        restart; it needs a message read scope and degrades to a WARNING."""
+        ref_ids = [i for i in dict.fromkeys((event.root_id, event.parent_id)) if i]
+        for ref_id in ref_ids:
+            cached = self._msg_archive_url.get(ref_id)
+            if cached:
+                return cached
+        for ref_id in ref_ids:
+            url = await self._fetch_replied_url(ref_id)
+            if url:
+                return self._source_archive_url.get(url, url)
+        return None
+
+    async def _fetch_replied_url(self, message_id: str) -> str | None:
+        request = (
+            lark.BaseRequest.builder()
+            .http_method(lark.HttpMethod.GET)
+            .uri(f"/open-apis/im/v1/messages/{message_id}")
+            .token_types({lark.AccessTokenType.TENANT})
+            .build()
+        )
+        try:
+            resp = await self._lark_client.arequest(request)
+            if not resp.success():
+                logger.warning(
+                    "failed to fetch replied message (missing im:message read scope?): "
+                    "message_id=%s code=%s msg=%s",
+                    message_id,
+                    resp.code,
+                    resp.msg,
+                )
+                return None
+            data = json.loads(resp.raw.content.decode("utf-8")).get("data") or {}
+        except Exception as e:
+            logger.warning("failed to fetch replied message: message_id=%s error=%s", message_id, e)
+            return None
+        # Text/post messages decode normally; interactive card content falls
+        # through extract_urls' raw path where the URL regex still applies.
+        for item in data.get("items") or []:
+            content = str((item.get("body") or {}).get("content") or "")
+            msg_type = str(item.get("msg_type") or "")
+            for url in extract_urls(msg_type, content, self._settings):
+                if is_short_video_platform(url):
+                    return url
+        return None
+
     async def _process_url(
         self,
         url: str,
@@ -225,10 +329,11 @@ class Pipeline:
             )
 
             if self._archive is not None:
+                archive_url = meta.canonical_url or meta.source_url
                 self._archive.enqueue(
                     ArchiveEntry(
                         title=meta.translated_title or meta.title,
-                        url=meta.canonical_url or meta.source_url,
+                        url=archive_url,
                         platform=meta.platform,
                         channel=meta.channel or "",
                         duration_seconds=meta.duration_seconds,
@@ -237,6 +342,8 @@ class Pipeline:
                         chat_type=event.chat_type,
                     )
                 )
+                _remember(self._msg_archive_url, event.message_id, archive_url)
+                _remember(self._source_archive_url, meta.source_url, archive_url)
 
         domain = ""
         url_lower = url.lower()
@@ -427,6 +534,14 @@ class Pipeline:
                     e,
                 )
                 return
+
+            if self._archive is not None:
+                self._archive.enqueue(
+                    BibiLinkUpdate(
+                        url=self._source_archive_url.get(url, url),
+                        bibigpt_url=share_page_url(self._settings.bibigpt_base_url, url),
+                    )
+                )
 
             await self._try_send_bibigpt_chapter_summary(event, result)
 

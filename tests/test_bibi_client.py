@@ -889,3 +889,16 @@ async def test_fetch_chapter_summary_browser_uses_profile_request(
             summary="浏览器摘要",
         ),
     )
+
+
+def test_share_page_url_joins_base_and_video_url() -> None:
+    from src.bibi_client import share_page_url
+
+    assert (
+        share_page_url("https://aitodo.co/zh", "https://youtu.be/abc")
+        == "https://aitodo.co/zh/https://youtu.be/abc"
+    )
+    assert (
+        share_page_url("https://bibigpt.co", "https://youtu.be/abc")
+        == "https://bibigpt.co/https://youtu.be/abc"
+    )

@@ -120,3 +120,16 @@ def test_manual_download_command_requires_url_after_download() -> None:
     content = json.dumps({"text": "@_user_1 下载"})
 
     assert is_manual_download_command("text", content) is False
+
+
+def test_decode_plain_text_strips_mention_placeholders() -> None:
+    from src.url_extract import decode_plain_text
+
+    raw = json.dumps({"text": "@_user_1 讲得不错 "})
+    assert decode_plain_text("text", raw) == "讲得不错"
+
+
+def test_decode_plain_text_empty_for_whitespace_only() -> None:
+    from src.url_extract import decode_plain_text
+
+    assert decode_plain_text("text", json.dumps({"text": " @_user_1 "})) == ""

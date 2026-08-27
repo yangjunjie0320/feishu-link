@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.archive_store import BibiLinkUpdate, RemarkAppend
 from src.bibi_client import AuthenticationError, BibiAPIError, TranscriptUnavailableError
 from src.bibi_models import (
     ChapterSummaryFetchResult,
@@ -467,3 +468,186 @@ async def test_handle_processes_duplicate_url_message() -> None:
     await pipeline.handle(event)
 
     pipeline._process_url.assert_awaited_once()
+
+
+def _reply_event(
+    text: str = "讲得不错",
+    *,
+    message_id: str = "msg_reply",
+    root_id: str = "",
+    parent_id: str = "",
+) -> MessageEvent:
+    return MessageEvent(
+        message_id=message_id,
+        chat_id="oc_chat",
+        sender_id="ou_replier",
+        chat_type="group",
+        timestamp_utc=0,
+        message_type="text",
+        content=json.dumps({"text": text}),
+        mentions=[],
+        root_id=root_id,
+        parent_id=parent_id,
+    )
+
+
+def _message_fetch_response(items: list[dict], success: bool = True):
+    from types import SimpleNamespace
+
+    payload = json.dumps({"code": 0, "data": {"items": items}}).encode("utf-8")
+    return SimpleNamespace(
+        success=lambda: success,
+        code=0 if success else 99991672,
+        msg="ok" if success else "forbidden",
+        raw=SimpleNamespace(content=payload),
+    )
+
+
+async def test_reply_remark_enqueued_via_in_process_map() -> None:
+    archive = MagicMock()
+    pipeline = _prepare_card_pipeline(archive)
+    await pipeline._process_url("https://youtu.be/abc123", _link_message_event(), False, False)
+
+    await pipeline.handle(_reply_event(root_id="msg_arch"))
+
+    remark = archive.enqueue.call_args_list[-1].args[0]
+    assert isinstance(remark, RemarkAppend)
+    assert remark.url == "https://www.youtube.com/watch?v=abc123"
+    assert remark.text == "讲得不错"
+    assert remark.sender_open_id == "ou_replier"
+    assert remark.chat_id == "oc_chat"
+    assert remark.chat_type == "group"
+
+
+async def test_reply_to_card_resolves_via_root_id_map_too() -> None:
+    archive = MagicMock()
+    pipeline = _prepare_card_pipeline(archive)
+    await pipeline._process_url("https://youtu.be/abc123", _link_message_event(), False, False)
+
+    # Quote-replying the bot's card: parent_id is the card message, root_id
+    # still points at the original link message recorded in the map.
+    await pipeline.handle(_reply_event(root_id="msg_arch", parent_id="om_card"))
+
+    remark = archive.enqueue.call_args_list[-1].args[0]
+    assert isinstance(remark, RemarkAppend)
+    assert remark.url == "https://www.youtube.com/watch?v=abc123"
+
+
+async def test_reply_remark_falls_back_to_message_fetch() -> None:
+    archive = MagicMock()
+    lark_client = MagicMock()
+    lark_client.arequest = AsyncMock(
+        return_value=_message_fetch_response(
+            [
+                {
+                    "msg_type": "text",
+                    "body": {"content": json.dumps({"text": "看这个 https://youtu.be/abc123"})},
+                }
+            ]
+        )
+    )
+    pipeline = Pipeline(Settings(), lark_client, archive=archive)
+
+    await pipeline.handle(_reply_event(root_id="om_before_restart"))
+
+    remark = archive.enqueue.call_args.args[0]
+    assert isinstance(remark, RemarkAppend)
+    assert remark.url == "https://youtu.be/abc123"
+    request = lark_client.arequest.call_args.args[0]
+    assert request.uri == "/open-apis/im/v1/messages/om_before_restart"
+
+
+async def test_reply_remark_fetch_failure_drops_with_warning(caplog) -> None:
+    import logging
+
+    archive = MagicMock()
+    lark_client = MagicMock()
+    lark_client.arequest = AsyncMock(return_value=_message_fetch_response([], success=False))
+    pipeline = Pipeline(Settings(), lark_client, archive=archive)
+
+    with caplog.at_level(logging.WARNING):
+        await pipeline.handle(_reply_event(root_id="om_unknown"))
+
+    archive.enqueue.assert_not_called()
+    assert any("failed to fetch replied message" in r.message for r in caplog.records)
+
+
+async def test_reply_to_unarchived_message_is_silently_skipped() -> None:
+    archive = MagicMock()
+    lark_client = MagicMock()
+    lark_client.arequest = AsyncMock(
+        return_value=_message_fetch_response(
+            [{"msg_type": "text", "body": {"content": json.dumps({"text": "普通聊天"})}}]
+        )
+    )
+    pipeline = Pipeline(Settings(), lark_client, archive=archive)
+
+    await pipeline.handle(_reply_event(root_id="om_smalltalk"))
+
+    archive.enqueue.assert_not_called()
+
+
+async def test_non_reply_without_urls_is_ignored() -> None:
+    archive = MagicMock()
+    lark_client = MagicMock()
+    lark_client.arequest = AsyncMock()
+    pipeline = Pipeline(Settings(), lark_client, archive=archive)
+
+    await pipeline.handle(_reply_event("随便聊聊"))
+
+    archive.enqueue.assert_not_called()
+    lark_client.arequest.assert_not_called()
+
+
+async def test_summary_success_enqueues_bibigpt_link() -> None:
+    archive = MagicMock()
+    pipeline = Pipeline(Settings(), MagicMock(), archive=archive)
+    pipeline._typing_sender.hold = MagicMock(return_value=_NoopHold())  # type: ignore[method-assign]
+    pipeline._translator.ensure_chinese_markdown_summary = AsyncMock(  # type: ignore[method-assign]
+        return_value="- **总结**\n    - 内容"
+    )
+    pipeline._bibi_client.summarize = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+    pipeline._sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    pipeline._try_send_bibigpt_chapter_summary = AsyncMock()  # type: ignore[method-assign]
+
+    await pipeline._try_send_bibigpt_summary("https://youtu.be/abc123", _summary_event())
+
+    update = archive.enqueue.call_args.args[0]
+    assert isinstance(update, BibiLinkUpdate)
+    assert update.url == "https://youtu.be/abc123"
+    # Settings default bibigpt_base_url is https://aitodo.co/zh.
+    assert update.bibigpt_url == "https://aitodo.co/zh/https://youtu.be/abc123"
+
+
+async def test_summary_success_maps_source_url_to_archived_url() -> None:
+    archive = MagicMock()
+    pipeline = _prepare_card_pipeline(archive)
+    await pipeline._process_url("https://youtu.be/abc123", _link_message_event(), False, False)
+    pipeline._bibi_client.summarize = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+    pipeline._translator.ensure_chinese_markdown_summary = AsyncMock(  # type: ignore[method-assign]
+        return_value="- **总结**\n    - 内容"
+    )
+    pipeline._try_send_bibigpt_chapter_summary = AsyncMock()  # type: ignore[method-assign]
+
+    await pipeline._try_send_bibigpt_summary("https://youtu.be/abc123", _summary_event())
+
+    update = archive.enqueue.call_args.args[0]
+    assert isinstance(update, BibiLinkUpdate)
+    assert update.url == "https://www.youtube.com/watch?v=abc123"
+    assert update.bibigpt_url == "https://aitodo.co/zh/https://youtu.be/abc123"
+
+
+async def test_summary_card_send_failure_does_not_enqueue_bibigpt_link() -> None:
+    archive = MagicMock()
+    pipeline = Pipeline(Settings(), MagicMock(), archive=archive)
+    pipeline._typing_sender.hold = MagicMock(return_value=_NoopHold())  # type: ignore[method-assign]
+    pipeline._translator.ensure_chinese_markdown_summary = AsyncMock(  # type: ignore[method-assign]
+        return_value="- **总结**\n    - 内容"
+    )
+    pipeline._bibi_client.summarize = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+    pipeline._sender.send = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    pipeline._text_sender.send = AsyncMock()  # type: ignore[method-assign]
+
+    await pipeline._try_send_bibigpt_summary("https://youtu.be/abc123", _summary_event())
+
+    archive.enqueue.assert_not_called()
