@@ -315,16 +315,18 @@ def _remark(**overrides) -> RemarkAppend:
         sender_open_id="ou_sender",
         chat_id="oc_chat",
         chat_type="group",
+        message_id="om_reply",
         replied_at_utc=datetime(2026, 8, 27, 2, 0, tzinfo=UTC),
     )
     defaults.update(overrides)
     return RemarkAppend(**defaults)
 
 
-async def test_append_remark_first_line() -> None:
+async def test_append_remark_first_line_and_acknowledges_with_done_reaction() -> None:
     client = _client(
         _api_response(_stale_search_page("rec1", "https://youtu.be/abc")),
         _api_response({"record": {"record_id": "rec1"}}),
+        _api_response({"reaction_id": "react1"}),
     )
     archive = _archive(client)
     archive._directory.member_name = AsyncMock(return_value="张三")  # type: ignore[method-assign]
@@ -336,6 +338,9 @@ async def test_append_remark_first_line() -> None:
     assert update_request.uri.endswith("/records/rec1")
     # 2026-08-27 02:00 UTC == 10:00 Beijing.
     assert update_request.body["fields"] == {"备注": "[08-27 10:00] 张三: 讲得不错"}
+    reaction_request = client.arequest.call_args_list[2].args[0]
+    assert reaction_request.uri == "/open-apis/im/v1/messages/om_reply/reactions"
+    assert reaction_request.body == {"reaction_type": {"emoji_type": "DONE"}}
 
 
 async def test_append_remark_appends_below_existing_lines() -> None:
@@ -348,6 +353,7 @@ async def test_append_remark_appends_below_existing_lines() -> None:
             )
         ),
         _api_response({"record": {"record_id": "rec1"}}),
+        _api_response({"reaction_id": "react1"}),
     )
     archive = _archive(client)
     archive._directory.member_name = AsyncMock(return_value="张三")  # type: ignore[method-assign]
@@ -358,6 +364,34 @@ async def test_append_remark_appends_below_existing_lines() -> None:
     assert update_request.body["fields"] == {
         "备注": "[08-26 09:00] 李四: 先看\n[08-27 10:00] 张三: 讲得不错"
     }
+
+
+async def test_append_remark_reaction_failure_only_warns(caplog) -> None:
+    client = _client(
+        _api_response(_stale_search_page("rec1", "https://youtu.be/abc")),
+        _api_response({"record": {"record_id": "rec1"}}),
+        _api_response({}, success=False),
+    )
+    archive = _archive(client)
+    archive._directory.member_name = AsyncMock(return_value="张三")  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.WARNING):
+        await archive._append_remark(_remark())
+
+    assert any("DONE reaction failed" in r.message for r in caplog.records)
+
+
+async def test_append_remark_without_message_id_skips_reaction() -> None:
+    client = _client(
+        _api_response(_stale_search_page("rec1", "https://youtu.be/abc")),
+        _api_response({"record": {"record_id": "rec1"}}),
+    )
+    archive = _archive(client)
+    archive._directory.member_name = AsyncMock(return_value="张三")  # type: ignore[method-assign]
+
+    await archive._append_remark(_remark(message_id=""))
+
+    assert client.arequest.await_count == 2
 
 
 async def test_append_remark_without_archived_row_warns_and_drops(caplog) -> None:

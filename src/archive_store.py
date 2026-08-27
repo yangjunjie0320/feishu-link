@@ -67,13 +67,17 @@ class ArchiveEntry:
 @dataclass
 class RemarkAppend:
     """Append one reply line to the "备注" cell of the archived row for url.
-    The sender name is resolved by the consumer coroutine, like chat names."""
+    The sender name is resolved by the consumer coroutine, like chat names.
+    message_id is the reply message itself: it gets a DONE (✅) reaction once
+    the remark actually lands in the table, so chat members can tell recorded
+    replies from ignored ones."""
 
     url: str
     text: str
     sender_open_id: str
     chat_id: str
     chat_type: str
+    message_id: str = ""
     replied_at_utc: datetime = field(default_factory=now_utc)
 
 
@@ -274,6 +278,27 @@ class BitableArchive:
         value = f"{existing}\n{line}" if existing else line
         await self._update_record(record_id, {_DISPLAY["remark"]: value})
         logger.info("remark appended: url=%s record_id=%s", task.url, record_id)
+        await self._acknowledge_remark(task.message_id)
+
+    async def _acknowledge_remark(self, message_id: str) -> None:
+        """React DONE (✅) on the reply so the chat can see it was recorded.
+        Purely cosmetic: the remark is already in the table, so failures only
+        warn."""
+        if not message_id:
+            return
+        try:
+            await _bitable_request(
+                self._client,
+                lark.HttpMethod.POST,
+                f"/open-apis/im/v1/messages/{message_id}/reactions",
+                body={"reaction_type": {"emoji_type": "DONE"}},
+            )
+        except Exception as e:
+            logger.warning(
+                "remark recorded but DONE reaction failed: message_id=%s error=%s",
+                message_id,
+                e,
+            )
 
     async def _set_bibigpt_url(self, task: BibiLinkUpdate) -> None:
         found = await self._find_records_by_normalized_url(normalize_url(task.url))

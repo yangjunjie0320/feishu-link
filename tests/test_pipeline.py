@@ -517,6 +517,7 @@ async def test_reply_remark_enqueued_via_in_process_map() -> None:
     assert remark.sender_open_id == "ou_replier"
     assert remark.chat_id == "oc_chat"
     assert remark.chat_type == "group"
+    assert remark.message_id == "msg_reply"
 
 
 async def test_reply_to_card_resolves_via_root_id_map_too() -> None:

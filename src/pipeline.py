@@ -223,6 +223,7 @@ class Pipeline:
                 sender_open_id=event.sender_id,
                 chat_id=event.chat_id,
                 chat_type=event.chat_type,
+                message_id=event.message_id,
             )
         )
         logger.info("reply remark enqueued: url=%s message_id=%s", archive_url, event.message_id)
