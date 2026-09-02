@@ -24,6 +24,7 @@ report_enabled: false
 report_time: "22:00"
 report_timezone: "Asia/Shanghai"
 report_chat_id: ""   # empty falls back to archive_chat_id
+report_chat_ids: []  # extra chats that also receive the same report card
 
 # Optional: YouTube Data API v3 key (for duration + channel info)
 # Without this, falls back to OG scraping (no duration).

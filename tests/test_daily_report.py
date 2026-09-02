@@ -88,6 +88,22 @@ async def test_send_report_falls_back_to_archive_chat() -> None:
     assert sender.send_to_chat.await_args.args[1] == "oc_a"
 
 
+async def test_send_report_fans_out_to_every_chat() -> None:
+    archive = MagicMock()
+    archive.fetch_day = AsyncMock(return_value=[_row("a", "youtube")])
+    sender = MagicMock()
+    # First chat fails after retries, second succeeds: report still counts as sent.
+    sender.send_to_chat = AsyncMock(side_effect=[False, True])
+    settings = Settings(report_chat_id="oc_r", report_chat_ids=["oc_x"])
+    reporter = DailyReporter(settings, archive, sender)
+
+    assert await reporter.send_report(date(2026, 7, 21)) is True
+    targets = [call.args[1] for call in sender.send_to_chat.await_args_list]
+    assert targets == ["oc_r", "oc_x"]
+    cards = {call.args[0] for call in sender.send_to_chat.await_args_list}
+    assert len(cards) == 1
+
+
 async def test_send_report_without_target_chat_skips() -> None:
     archive = MagicMock()
     archive.fetch_day = AsyncMock()

@@ -57,10 +57,12 @@ def test_cookie_refresh_defaults_to_bilibili() -> None:
 def test_bibi_client_uses_bibigpt_platform_cookie_file(tmp_path: Path) -> None:
     cookie_file = tmp_path / "bibigpt.txt"
     cookie_file.write_text(
-        "\n".join([
-            "# Netscape HTTP Cookie File",
-            ".aitodo.co\tTRUE\t/\tTRUE\t1800000000\tsession\tabc",
-        ]),
+        "\n".join(
+            [
+                "# Netscape HTTP Cookie File",
+                ".aitodo.co\tTRUE\t/\tTRUE\t1800000000\tsession\tabc",
+            ]
+        ),
         encoding="utf-8",
     )
     settings = Settings(
@@ -109,12 +111,25 @@ def test_report_time_rejects_invalid_format() -> None:
         Settings(report_time="2200")
 
 
-def test_effective_report_chat_id_falls_back_to_archive() -> None:
-    assert Settings(archive_chat_id="oc_a").effective_report_chat_id() == "oc_a"
-    assert (
-        Settings(archive_chat_id="oc_a", report_chat_id="oc_r").effective_report_chat_id()
-        == "oc_r"
+def test_effective_report_chat_ids_falls_back_to_archive() -> None:
+    assert Settings(archive_chat_id="oc_a").effective_report_chat_ids() == ["oc_a"]
+    assert Settings(archive_chat_id="oc_a", report_chat_id="oc_r").effective_report_chat_ids() == [
+        "oc_r"
+    ]
+    assert Settings().effective_report_chat_ids() == []
+
+
+def test_effective_report_chat_ids_merges_and_dedups() -> None:
+    settings = Settings(
+        archive_chat_id="oc_a",
+        report_chat_id="oc_r",
+        report_chat_ids=["oc_x", " oc_r ", "oc_x", ""],
     )
+    assert settings.effective_report_chat_ids() == ["oc_r", "oc_x"]
+    # report_chat_ids alone is enough; the archive chat is not added on top.
+    assert Settings(
+        archive_chat_id="oc_a", report_chat_ids=["oc_x"]
+    ).effective_report_chat_ids() == ["oc_x"]
 
 
 def test_comment_fetch_timeout_is_platform_specific_for_tiktok() -> None:

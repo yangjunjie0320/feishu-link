@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     report_time: str = "22:00"
     report_timezone: str = "Asia/Shanghai"
     report_chat_id: str = ""  # empty falls back to archive_chat_id
+    report_chat_ids: list[str] = []  # extra chats that also receive the report
 
     youtube_api_key: str = ""
     link_allowlist: list[str] = []
@@ -199,8 +200,19 @@ class Settings(BaseSettings):
     def is_blacklisted(self, url: str) -> bool:
         return any(p.search(url) for p in self._blacklist_patterns)
 
-    def effective_report_chat_id(self) -> str:
-        return self.report_chat_id or self.archive_chat_id
+    def effective_report_chat_ids(self) -> list[str]:
+        """Report targets in config order, de-duplicated; falls back to the
+        archive chat when neither report_chat_id nor report_chat_ids is set."""
+        seen: set[str] = set()
+        targets: list[str] = []
+        for chat_id in [self.report_chat_id, *self.report_chat_ids]:
+            chat_id = chat_id.strip()
+            if chat_id and chat_id not in seen:
+                seen.add(chat_id)
+                targets.append(chat_id)
+        if not targets and self.archive_chat_id:
+            targets.append(self.archive_chat_id)
+        return targets
 
     def comment_fetch_timeout_for(self, platform: str) -> float:
         """Wall-clock budget for one platform's comment fetch.

@@ -98,9 +98,9 @@ class DailyReporter:
         if day is None:
             zone = tz.gettz(self._settings.report_timezone)
             day = datetime.now(tz=zone).date()
-        chat_id = self._settings.effective_report_chat_id()
-        if not chat_id:
-            logger.warning("daily report skipped: no report_chat_id or archive_chat_id")
+        chat_ids = self._settings.effective_report_chat_ids()
+        if not chat_ids:
+            logger.warning("daily report skipped: no report_chat_id(s) or archive_chat_id")
             return False
 
         rows = await self._archive.fetch_day(day)
@@ -109,12 +109,16 @@ class DailyReporter:
             return False
 
         card_json = build_report_card(day, rows)
-        sent = await self._sender.send_to_chat(card_json, chat_id)
-        if sent:
-            logger.info(
-                "daily report sent: day=%s entries=%d chat_id=%s",
-                day.isoformat(),
-                len(rows),
-                chat_id,
-            )
-        return sent
+        any_sent = False
+        for chat_id in chat_ids:
+            # send_to_chat already logs CRITICAL on exhausted retries; one
+            # failing chat must not stop the report reaching the others.
+            if await self._sender.send_to_chat(card_json, chat_id):
+                any_sent = True
+                logger.info(
+                    "daily report sent: day=%s entries=%d chat_id=%s",
+                    day.isoformat(),
+                    len(rows),
+                    chat_id,
+                )
+        return any_sent
