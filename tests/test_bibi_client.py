@@ -10,6 +10,7 @@ from src.bibi_client import (
     AuthenticationError,
     BibiAPIError,
     BibiClient,
+    BibiTimeoutError,
     TranscriptUnavailableError,
     _resolve_routes,
     _source_url_for_log,
@@ -417,6 +418,123 @@ async def test_bibi_client_browser_content_id_recovery_exhausts_retries(
     assert result.content_id == ""
     assert result.content == "- Point"
     assert len(calls) == 3
+
+
+def _browser_settings(tmp_path) -> Settings:
+    return Settings(
+        bibigpt_base_url="https://aitodo.co/zh",
+        bibigpt_access_mode="browser",
+        cookie_file="",
+        bibigpt_browser_profile_dir=str(tmp_path / "profile"),
+    )
+
+
+def _scripted_browser_fetch(monkeypatch, script: list[Any]) -> list[dict[str, Any]]:
+    """Each script entry is either an exception to raise or a summary string
+    to return (with a contentId so contentId recovery never kicks in)."""
+    calls: list[dict[str, Any]] = []
+
+    async def fake_browser_fetch(self, url, body, *, method="POST"):
+        calls.append(body)
+        step = script[len(calls) - 1]
+        if isinstance(step, BaseException):
+            raise step
+        payload = {"summary": step, "fromCache": False, "contentId": "cid-1"}
+        return [{"result": {"data": {"json": payload}}}]
+
+    monkeypatch.setattr(BibiClient, "_browser_fetch_json", fake_browser_fetch)
+    monkeypatch.setattr("src.bibi_client._TRANSIENT_RETRY_DELAY", 0.0)
+    monkeypatch.setattr("src.bibi_client._TIMEOUT_RECOVERY_DELAYS", (0.0, 0.0))
+    return calls
+
+
+def _is_refresh(call: dict[str, Any]) -> bool:
+    return call["0"]["json"]["promptConfig"]["isRefresh"]
+
+
+async def test_summarize_retries_once_after_transient_500(tmp_path, monkeypatch) -> None:
+    calls = _scripted_browser_fetch(monkeypatch, [BibiAPIError(500, "Connection error."), "- ok"])
+
+    result = await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
+
+    assert result.content == "- ok"
+    assert [_is_refresh(c) for c in calls] == [True, True]
+
+
+async def test_summarize_gives_up_after_second_500(tmp_path, monkeypatch) -> None:
+    calls = _scripted_browser_fetch(
+        monkeypatch, [BibiAPIError(500, "cdn"), BibiAPIError(502, "bad gateway")]
+    )
+
+    with pytest.raises(BibiAPIError) as excinfo:
+        await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
+
+    assert excinfo.value.status_code == 502
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "error",
+    [AuthenticationError(401, "expired"), TranscriptUnavailableError(200, "no transcript")],
+)
+async def test_summarize_does_not_retry_auth_or_transcript_errors(
+    tmp_path, monkeypatch, error
+) -> None:
+    calls = _scripted_browser_fetch(monkeypatch, [error, "- never"])
+
+    with pytest.raises(type(error)):
+        await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
+
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "error", [BibiAPIError(524, "cloudflare"), BibiTimeoutError(0, "browser timed out")]
+)
+async def test_summarize_recovers_stored_result_after_timeout(tmp_path, monkeypatch, error) -> None:
+    calls = _scripted_browser_fetch(monkeypatch, [error, "", "- late"])
+
+    result = await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
+
+    assert result.content == "- late"
+    assert [_is_refresh(c) for c in calls] == [True, False, False]
+
+
+async def test_summarize_raises_original_timeout_when_recovery_exhausted(
+    tmp_path, monkeypatch
+) -> None:
+    calls = _scripted_browser_fetch(monkeypatch, [BibiAPIError(524, "cloudflare"), "", ""])
+
+    with pytest.raises(BibiAPIError) as excinfo:
+        await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
+
+    assert excinfo.value.status_code == 524
+    assert len(calls) == 3
+
+
+async def test_summarize_timeout_on_retry_still_polls_stored_result(tmp_path, monkeypatch) -> None:
+    calls = _scripted_browser_fetch(
+        monkeypatch, [BibiAPIError(500, "cdn"), BibiAPIError(524, "cf"), "- late"]
+    )
+
+    result = await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
+
+    assert result.content == "- late"
+    assert [_is_refresh(c) for c in calls] == [True, True, False]
+
+
+async def test_web_mode_timeout_raises_bibi_timeout_error(tmp_path) -> None:
+    settings = Settings(
+        bibigpt_base_url="https://aitodo.co/zh",
+        bibigpt_access_mode="web",
+        cookie_file="",
+        bibigpt_timeout=0.001,
+    )
+    client = BibiClient(settings)
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(url__regex=r".*summaryBySetting.*").mock(side_effect=httpx.ReadTimeout("slow"))
+        with pytest.raises(BibiTimeoutError):
+            await client._summarize_web("https://youtu.be/abc", "")
 
 
 async def test_bibi_client_browser_user_probe_reports_missing_login(

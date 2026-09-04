@@ -83,6 +83,9 @@ class Pipeline:
         # url -> contentId of an already-generated summary; its presence is
         # the duplicate-summarize marker that switches to the cached lookup.
         self._bibigpt_content_id: OrderedDict[str, str] = OrderedDict()
+        # url -> (initiating message_id, pending result) for default-prompt
+        # summaries still being generated, so repeated requests share one run.
+        self._inflight_summaries: dict[str, tuple[str, asyncio.Future[SummaryResult]]] = {}
 
     async def handle(self, event: ListenerEvent) -> None:
         if isinstance(event, CardActionEvent):
@@ -489,21 +492,23 @@ class Pipeline:
             )
 
             try:
-                result = None
-                if not (prompt and prompt.strip()):
-                    result = await self._lookup_cached_summary(url, prompt, event.message_id)
-                if result is None:
+                if prompt and prompt.strip():
                     result = await self._bibi_client.summarize(url, prompt=prompt)
+                else:
+                    result = await self._shared_default_summary(url, event.message_id)
+                    if result is None:
+                        return
                 summary_content = await self._translator.ensure_chinese_markdown_summary(
                     result.content,
                     source_url=url,
                 )
             except Exception as e:
                 logger.error(
-                    "summarize failed: message_id=%s error_type=%s status=%s",
+                    "summarize failed: message_id=%s error_type=%s status=%s reason=%s",
                     event.message_id,
                     e.__class__.__name__,
                     getattr(e, "status_code", "n/a"),
+                    str(e)[:300],
                 )
                 await self._text_sender.send(
                     _summary_failure_message(e),
@@ -556,6 +561,45 @@ class Pipeline:
                 )
 
             await self._try_send_bibigpt_chapter_summary(event, result)
+
+    async def _shared_default_summary(self, url: str, message_id: str) -> SummaryResult | None:
+        """Default-prompt summary with in-flight de-duplication. Concurrent
+        requests for the same URL wait on the first run's result instead of
+        launching another browser; a repeat from the very same message is
+        dropped (None) because the first run already replies to that thread."""
+        inflight = self._inflight_summaries.get(url)
+        if inflight is not None:
+            owner_message_id, future = inflight
+            if owner_message_id == message_id:
+                logger.info(
+                    "summary already in progress, ignoring repeat: message_id=%s", message_id
+                )
+                return None
+            logger.info(
+                "summary in progress for the same url, waiting: message_id=%s owner=%s",
+                message_id,
+                owner_message_id,
+            )
+            return await future
+
+        future: asyncio.Future[SummaryResult] = asyncio.get_running_loop().create_future()
+        self._inflight_summaries[url] = (message_id, future)
+        try:
+            result = await self._lookup_cached_summary(url, None, message_id)
+            if result is None:
+                result = await self._bibi_client.summarize(url, prompt=None)
+        except BaseException as e:
+            if isinstance(e, Exception):
+                future.set_exception(e)
+            else:  # cancellation: waiters get a normal failure, not our cancel
+                future.set_exception(BibiAPIError(0, "summary generation was cancelled"))
+            future.exception()  # mark retrieved so an unwaited future stays quiet on GC
+            raise
+        else:
+            future.set_result(result)
+            return result
+        finally:
+            self._inflight_summaries.pop(url, None)
 
     async def _lookup_cached_summary(
         self,

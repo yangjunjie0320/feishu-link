@@ -1,4 +1,6 @@
+import asyncio
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -598,6 +600,101 @@ async def test_non_reply_without_urls_is_ignored() -> None:
 
     archive.enqueue.assert_not_called()
     lark_client.arequest.assert_not_called()
+
+
+async def test_summary_failure_log_includes_reason(caplog: pytest.LogCaptureFixture) -> None:
+    pipeline = _prepare_summary_pipeline()
+    pipeline._bibi_client.summarize = AsyncMock(  # type: ignore[method-assign]
+        side_effect=BibiAPIError(500, '{"message":"request to bilivideo.com failed"}')
+    )
+    pipeline._text_sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.ERROR, logger="src.pipeline"):
+        await pipeline._try_send_bibigpt_summary("https://youtu.be/abc123", _summary_event())
+
+    assert "status=500" in caplog.text
+    assert "reason=BibiGPT API error (HTTP 500): " in caplog.text
+    assert "bilivideo.com failed" in caplog.text
+
+
+def _gated_summary_pipeline(outcome: SummaryResult | Exception) -> tuple[Pipeline, asyncio.Event]:
+    pipeline = _prepare_summary_pipeline()
+    release = asyncio.Event()
+
+    async def slow_summarize(url, prompt=None):
+        await release.wait()
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    pipeline._bibi_client.summarize = AsyncMock(side_effect=slow_summarize)  # type: ignore[method-assign]
+    pipeline._sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    pipeline._text_sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    pipeline._try_send_bibigpt_chapter_summary = AsyncMock()  # type: ignore[method-assign]
+    return pipeline, release
+
+
+def _other_summary_event() -> CardActionEvent:
+    return CardActionEvent(
+        action="summarize_video",
+        source_url="https://youtu.be/abc123",
+        message_id="om_other",
+        chat_id="oc_other_chat",
+        operator_open_id="ou_user2",
+    )
+
+
+async def test_summary_repeat_from_same_message_is_ignored_while_in_flight() -> None:
+    pipeline, release = _gated_summary_pipeline(_summary_result())
+    url = "https://youtu.be/abc123"
+
+    first = asyncio.create_task(pipeline._try_send_bibigpt_summary(url, _summary_event()))
+    await asyncio.sleep(0)
+    assert url in pipeline._inflight_summaries
+    await pipeline._try_send_bibigpt_summary(url, _summary_event())
+    assert pipeline._sender.send.await_count == 0
+
+    release.set()
+    await first
+
+    assert pipeline._bibi_client.summarize.await_count == 1
+    assert pipeline._sender.send.await_count == 1
+    assert pipeline._inflight_summaries == {}
+
+
+async def test_summary_concurrent_messages_share_one_generation() -> None:
+    pipeline, release = _gated_summary_pipeline(_summary_result())
+    url = "https://youtu.be/abc123"
+
+    first = asyncio.create_task(pipeline._try_send_bibigpt_summary(url, _summary_event()))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(pipeline._try_send_bibigpt_summary(url, _other_summary_event()))
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert pipeline._bibi_client.summarize.await_count == 1
+    chats = sorted(call.args[1] for call in pipeline._sender.send.await_args_list)
+    assert chats == ["oc_chat", "oc_other_chat"]
+    assert pipeline._inflight_summaries == {}
+
+
+async def test_summary_shared_generation_failure_reaches_every_waiter() -> None:
+    pipeline, release = _gated_summary_pipeline(BibiAPIError(500, "cdn"))
+    url = "https://youtu.be/abc123"
+
+    first = asyncio.create_task(pipeline._try_send_bibigpt_summary(url, _summary_event()))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(pipeline._try_send_bibigpt_summary(url, _other_summary_event()))
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert pipeline._bibi_client.summarize.await_count == 1
+    assert pipeline._sender.send.await_count == 0
+    chats = sorted(call.args[1] for call in pipeline._text_sender.send.await_args_list)
+    assert chats == ["oc_chat", "oc_other_chat"]
+    assert pipeline._inflight_summaries == {}
 
 
 def _summary_archive_mock(content_id: str = "") -> MagicMock:
