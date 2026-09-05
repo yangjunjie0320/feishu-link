@@ -956,7 +956,7 @@ def _summary_failure_message(exc: Exception) -> str:
         if "平台风控" in body:
             return (
                 "BibiGPT 总结失败: BibiGPT 抓取 B 站字幕被风控拦截, "
-                "已自动等待并重试三次仍失败, 请过几分钟再点一次“总结视频”。"
+                "已自动排队等待转写仍失败, 请过几分钟再点一次“总结视频”。"
             )
         if "service returned an HTML error page" in str(exc):
             return (

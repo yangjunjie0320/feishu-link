@@ -87,6 +87,10 @@ def test_bibigpt_defaults() -> None:
     assert settings.bibigpt_model == "openai/gpt-5.5"
     assert settings.bibigpt_summary_cache_ttl_seconds == 1800
     assert settings.bibigpt_failure_cooldown_seconds == 300
+    assert settings.bibigpt_web_queue_enabled is True
+    assert settings.bibigpt_web_queue_poll_seconds == 45
+    assert settings.bibigpt_web_queue_wait_seconds == 600
+    assert settings.bibigpt_web_queue_regenerate is False
 
 
 def test_deepseek_model_defaults_to_v4_flash_and_allows_override() -> None:

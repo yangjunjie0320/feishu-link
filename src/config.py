@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     # so a re-click never re-triggers bilibili's risk control. 0 disables.
     bibigpt_summary_cache_ttl_seconds: int = 1800
     bibigpt_failure_cooldown_seconds: int = 300
+    # When bilibili risk control blocks BibiGPT's fetch (500 "平台风控"), submit
+    # the link through the web UI in our browser so BibiGPT's server-side queue
+    # transcribes the audio, then poll for the stored record. Browser mode only.
+    bibigpt_web_queue_enabled: bool = True
+    bibigpt_web_queue_poll_seconds: int = 45
+    bibigpt_web_queue_wait_seconds: int = 600
+    # After the queue delivers, regenerate once with our own prompt/model.
+    bibigpt_web_queue_regenerate: bool = False
 
     # Cookie auto-refresh. Source "chrome" extracts from the system Chrome's
     # cookie store (login state maintained by the human using that browser);

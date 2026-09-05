@@ -159,7 +159,7 @@ def test_summary_failure_message_for_bilibili_risk_control() -> None:
         BibiAPIError(500, '[{"error":{"json":{"message":"平台风控，稍后再试"}}}]')
     )
     assert "风控" in message
-    assert "重试三次" in message
+    assert "排队" in message
 
 
 def test_summary_failure_message_for_rate_limit() -> None:

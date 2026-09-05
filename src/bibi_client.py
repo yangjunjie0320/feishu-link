@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -37,6 +38,20 @@ _CONTENT_ID_RECOVERY_DELAYS: tuple[float, ...] = (3.0, 8.0)
 # repeating the same request only trips the same block again.
 _RECOVERABLE_STATUSES = frozenset({500, 502, 504, 524})
 _RECOVERY_DELAYS: tuple[float, ...] = (30.0, 60.0, 90.0)
+# bilibili risk control is the one failure the lookups above cannot fix: only
+# BibiGPT's server-side queue (what the web UI submits to) falls back to audio
+# transcription. So we submit through the web UI like a person would.
+_RISK_CONTROL_MARKER = "平台风控"
+_WEB_QUEUE_INPUT_SELECTOR = 'textarea[placeholder*="音视频链接"]'
+_WEB_QUEUE_ACCEPT_TIMEOUT_MS = 8000
+# Accepted once the box is cleared (also how the UI de-duplicates a link that
+# is already queued) or the "added to queue" toast shows up.
+_WEB_QUEUE_ACCEPTED_JS = """(selector) => {
+    const box = document.querySelector(selector);
+    const cleared = !!box && box.value.trim() === '';
+    const text = document.body ? document.body.innerText : '';
+    return cleared || text.includes('已添加到处理队列');
+}"""
 _OUTPUT_INSTRUCTIONS = """\
 
 输出要求:
@@ -160,10 +175,115 @@ class BibiClient:
         except BibiAPIError as exc:
             if not _is_recoverable(exc):
                 raise
+            if self._web_queue_applies(exc):
+                return await self._recover_via_web_queue(video_url, prompt, exc)
             return await self._recover_via_lookup(video_url, prompt, exc)
         except ValueError as exc:
             # Record exists but carries no summary yet: BibiGPT is still on it.
             return await self._recover_via_lookup(video_url, prompt, exc)
+
+    def _web_queue_applies(self, exc: BibiAPIError) -> bool:
+        return (
+            self._settings.bibigpt_web_queue_enabled
+            and self._settings.bibigpt_access_mode == "browser"
+            and _RISK_CONTROL_MARKER in (exc.body or "")
+        )
+
+    async def _enqueue_via_web_ui(self, video_url: str) -> bool:
+        """Type the link into the desktop page's input box and press Enter,
+        exactly as a person would, so BibiGPT's server-side queue takes it."""
+        try:
+            async with self._browser_page() as page:
+                box = page.locator(_WEB_QUEUE_INPUT_SELECTOR)
+                if await box.count() == 0:
+                    logger.warning(
+                        "BibiGPT web queue: input box not found on %s",
+                        self._routes.browser_page_url,
+                    )
+                    return False
+                await box.first.fill(video_url)
+                await page.keyboard.press("Enter")
+                await page.wait_for_function(
+                    _WEB_QUEUE_ACCEPTED_JS,
+                    arg=_WEB_QUEUE_INPUT_SELECTOR,
+                    timeout=_WEB_QUEUE_ACCEPT_TIMEOUT_MS,
+                )
+                return True
+        except BibiAPIError as exc:  # _browser_page wraps Playwright failures
+            logger.warning("BibiGPT web queue submit failed: %s", exc)
+            return False
+        except Exception as exc:
+            logger.warning(
+                "BibiGPT web queue submit not confirmed: %s: %s",
+                exc.__class__.__name__,
+                str(exc)[:200],
+            )
+            return False
+
+    async def _recover_via_web_queue(
+        self,
+        video_url: str,
+        prompt: str,
+        original: BibiAPIError,
+    ) -> SummaryResult:
+        source = _source_url_for_log(video_url)
+        logger.warning(
+            "BibiGPT blocked by bilibili risk control, submitting through web queue: %s",
+            source,
+        )
+        if not await self._enqueue_via_web_ui(video_url):
+            return await self._recover_via_lookup(video_url, prompt, original)
+        logger.info("BibiGPT web queue enqueued: %s", source)
+
+        poll = max(self._settings.bibigpt_web_queue_poll_seconds, 0)
+        wait = max(self._settings.bibigpt_web_queue_wait_seconds, 0)
+        started = time.monotonic()
+        deadline = started + wait
+        attempt = 0
+        result: SummaryResult | None = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(poll, remaining))
+            attempt += 1
+            try:
+                lookup = await self._summarize_once(video_url, prompt, refresh=False)
+            except (AuthenticationError, TranscriptUnavailableError):
+                raise
+            except (BibiAPIError, ValueError) as exc:
+                logger.info("BibiGPT web queue poll %d not ready: %s", attempt, str(exc)[:160])
+                continue
+            if lookup.content.strip():
+                result = lookup
+                break
+            logger.info("BibiGPT web queue poll %d returned no summary yet", attempt)
+        if result is None:
+            logger.warning(
+                "BibiGPT web queue exhausted after %ds (%d polls): %s", wait, attempt, source
+            )
+            raise original
+        logger.info(
+            "BibiGPT web queue succeeded after %.0fs (%d polls, content_id=%s)",
+            time.monotonic() - started,
+            attempt,
+            result.content_id or "missing",
+        )
+        if not self._settings.bibigpt_web_queue_regenerate:
+            return result
+        try:
+            regenerated = await self._summarize_once(video_url, prompt, refresh=True)
+        except (AuthenticationError, TranscriptUnavailableError):
+            raise
+        except (BibiAPIError, ValueError) as exc:
+            logger.warning(
+                "BibiGPT regenerate after web queue failed, keeping queue result: %s", exc
+            )
+            return result
+        if regenerated.content.strip():
+            logger.info("BibiGPT regenerated with own prompt after web queue")
+            return regenerated
+        return result
 
     async def _recover_via_lookup(
         self,
