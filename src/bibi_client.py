@@ -30,16 +30,13 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 )
 _CONTENT_ID_RECOVERY_DELAYS: tuple[float, ...] = (3.0, 8.0)
-# One same-request retry for BibiGPT-side transient failures (its source fetch
-# or model upstream). Fast bilibili 500s often repeat, so the delay is long
-# enough to land on a different upstream state rather than the same one.
-_TRANSIENT_RETRY_STATUSES = frozenset({500, 502})
-_TRANSIENT_RETRY_DELAY = 45.0
-# Cloudflare cuts the connection at ~100 s (524) while BibiGPT keeps
-# generating server-side; an isRefresh=false lookup afterwards returns the
-# stored record without spending another generation. Same for local timeouts.
-_TIMEOUT_RECOVERY_STATUSES = frozenset({504, 524})
-_TIMEOUT_RECOVERY_DELAYS: tuple[float, ...] = (30.0, 60.0, 90.0)
+# Failures BibiGPT keeps working on after answering: bilibili risk control
+# (500 "平台风控") while its backend still transcribes in the background, and
+# Cloudflare cutting the connection at ~100 s (524) mid-generation. In both
+# cases an isRefresh=false request ~30 s later returns the finished record;
+# repeating the same request only trips the same block again.
+_RECOVERABLE_STATUSES = frozenset({500, 502, 504, 524})
+_RECOVERY_DELAYS: tuple[float, ...] = (30.0, 60.0, 90.0)
 _OUTPUT_INSTRUCTIONS = """\
 
 输出要求:
@@ -131,7 +128,10 @@ class BibiClient:
         base_prompt = (prompt or self._settings.bibigpt_default_prompt).strip()
         effective_prompt = _with_output_instructions(base_prompt) if base_prompt else ""
 
-        result = await self._summarize_with_recovery(video_url, effective_prompt)
+        # isRefresh=true makes BibiGPT generate with our prompt/model instead of
+        # handing back whatever record it has (possibly made with other settings
+        # on the web). Recovery lookups after a failure drop the flag on purpose.
+        result = await self._summarize_with_recovery(video_url, effective_prompt, refresh=True)
         if self._settings.bibigpt_access_mode == "browser" and not result.content_id:
             result = await self._recover_content_id(result, effective_prompt)
         return result
@@ -143,67 +143,58 @@ class BibiClient:
             return await self._summarize_browser(video_url, prompt, refresh=refresh)
         return await self._summarize_web(video_url, prompt)
 
-    async def _summarize_with_recovery(self, video_url: str, prompt: str) -> SummaryResult:
-        """Generate once; retry once on 500/502; after a timeout poll the stored
-        record with isRefresh=false instead of paying for a second generation.
-        Auth and missing-transcript errors propagate untouched."""
-        try:
-            return await self._summarize_once(video_url, prompt, refresh=True)
-        except (AuthenticationError, TranscriptUnavailableError):
-            raise
-        except BibiAPIError as exc:
-            if exc.status_code in _TRANSIENT_RETRY_STATUSES:
-                logger.warning(
-                    "BibiGPT transient failure (HTTP %d), retrying once in %gs: %s",
-                    exc.status_code,
-                    _TRANSIENT_RETRY_DELAY,
-                    _source_url_for_log(video_url),
-                )
-                await asyncio.sleep(_TRANSIENT_RETRY_DELAY)
-                try:
-                    return await self._summarize_once(video_url, prompt, refresh=True)
-                except (AuthenticationError, TranscriptUnavailableError):
-                    raise
-                except BibiAPIError as retry_exc:
-                    if not _is_timeout_error(retry_exc):
-                        raise
-                    exc = retry_exc
-            if not _is_timeout_error(exc):
-                raise
-            return await self._recover_after_timeout(video_url, prompt, exc)
-
-    async def _recover_after_timeout(
+    async def _summarize_with_recovery(
         self,
         video_url: str,
         prompt: str,
-        original: BibiAPIError,
+        *,
+        refresh: bool,
+    ) -> SummaryResult:
+        """One request, then on a recoverable failure (see _RECOVERABLE_STATUSES)
+        poll the stored record with isRefresh=false instead of repeating the
+        request. Auth and missing-transcript errors propagate untouched."""
+        try:
+            return await self._summarize_once(video_url, prompt, refresh=refresh)
+        except (AuthenticationError, TranscriptUnavailableError):
+            raise
+        except BibiAPIError as exc:
+            if not _is_recoverable(exc):
+                raise
+            return await self._recover_via_lookup(video_url, prompt, exc)
+        except ValueError as exc:
+            # Record exists but carries no summary yet: BibiGPT is still on it.
+            return await self._recover_via_lookup(video_url, prompt, exc)
+
+    async def _recover_via_lookup(
+        self,
+        video_url: str,
+        prompt: str,
+        original: Exception,
     ) -> SummaryResult:
         logger.warning(
-            "BibiGPT request timed out (HTTP %d), polling stored result for %s: %s",
-            original.status_code,
+            "BibiGPT request failed, polling stored result for %s: %s",
             _source_url_for_log(video_url),
             original,
         )
-        for delay in _TIMEOUT_RECOVERY_DELAYS:
+        for delay in _RECOVERY_DELAYS:
             await asyncio.sleep(delay)
             try:
                 lookup = await self._summarize_once(video_url, prompt, refresh=False)
             except (AuthenticationError, TranscriptUnavailableError):
                 raise
             except (BibiAPIError, ValueError) as exc:
-                # ValueError: the record exists but carries no summary yet.
-                logger.warning("BibiGPT timeout recovery lookup failed: %s", exc)
+                logger.warning("BibiGPT recovery lookup failed: %s", exc)
                 continue
             if lookup.content.strip():
                 logger.info(
-                    "BibiGPT timeout recovery succeeded (content_id=%s, cached=%s)",
+                    "BibiGPT recovery lookup succeeded (content_id=%s, cached=%s)",
                     lookup.content_id or "missing",
                     lookup.from_cache,
                 )
                 return lookup
-            logger.warning("BibiGPT timeout recovery lookup returned no summary yet")
+            logger.warning("BibiGPT recovery lookup returned no summary yet")
         logger.warning(
-            "BibiGPT timeout recovery exhausted retries for %s",
+            "BibiGPT recovery exhausted retries for %s",
             _source_url_for_log(video_url),
         )
         raise original
@@ -625,8 +616,8 @@ class BibiClient:
         logger.debug("Wrote back %d BibiGPT cookies to %s", len(cookies), self._cookie_file)
 
 
-def _is_timeout_error(exc: BibiAPIError) -> bool:
-    return isinstance(exc, BibiTimeoutError) or exc.status_code in _TIMEOUT_RECOVERY_STATUSES
+def _is_recoverable(exc: BibiAPIError) -> bool:
+    return isinstance(exc, BibiTimeoutError) or exc.status_code in _RECOVERABLE_STATUSES
 
 
 def _domain_matches_writeback(cookie_domain: str, want: str) -> bool:

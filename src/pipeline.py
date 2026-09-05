@@ -4,7 +4,9 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections import OrderedDict
+from typing import Any
 
 import httpx
 import lark_oapi as lark
@@ -47,11 +49,20 @@ _SEEN_CAPACITY = 500
 _CHAPTER_SUMMARY_SEND_INTERVAL_SECONDS = 0.25
 
 
-def _remember(cache: OrderedDict[str, str], key: str, value: str) -> None:
+def _remember(cache: OrderedDict[str, Any], key: str, value: Any) -> None:
     cache[key] = value
     cache.move_to_end(key)
     if len(cache) > _SEEN_CAPACITY:
         cache.popitem(last=False)
+
+
+class SummaryCooldownError(Exception):
+    """The same video failed moments ago; refusing to hit BibiGPT again yet."""
+
+    def __init__(self, remaining_seconds: int, reason: str) -> None:
+        self.remaining_seconds = remaining_seconds
+        self.reason = reason
+        super().__init__(f"summary cooling down for {remaining_seconds}s: {reason}")
 
 
 class Pipeline:
@@ -86,6 +97,12 @@ class Pipeline:
         # url -> (initiating message_id, pending result) for default-prompt
         # summaries still being generated, so repeated requests share one run.
         self._inflight_summaries: dict[str, tuple[str, asyncio.Future[SummaryResult]]] = {}
+        # Default-prompt results kept for a while so a re-click reuses them
+        # without another browser run: url -> (expires_at, result). And after a
+        # failed run, url -> (expires_at, user-facing reason): requests inside
+        # that window are answered from here instead of hitting BibiGPT again.
+        self._recent_summaries: OrderedDict[str, tuple[float, SummaryResult]] = OrderedDict()
+        self._summary_failures: OrderedDict[str, tuple[float, str]] = OrderedDict()
 
     async def handle(self, event: ListenerEvent) -> None:
         if isinstance(event, CardActionEvent):
@@ -503,13 +520,20 @@ class Pipeline:
                     source_url=url,
                 )
             except Exception as e:
-                logger.error(
-                    "summarize failed: message_id=%s error_type=%s status=%s reason=%s",
-                    event.message_id,
-                    e.__class__.__name__,
-                    getattr(e, "status_code", "n/a"),
-                    str(e)[:300],
-                )
+                if isinstance(e, SummaryCooldownError):
+                    logger.info(
+                        "summary cooling down: message_id=%s remaining=%ds",
+                        event.message_id,
+                        e.remaining_seconds,
+                    )
+                else:
+                    logger.error(
+                        "summarize failed: message_id=%s error_type=%s status=%s reason=%s",
+                        event.message_id,
+                        e.__class__.__name__,
+                        getattr(e, "status_code", "n/a"),
+                        str(e)[:300],
+                    )
                 await self._text_sender.send(
                     _summary_failure_message(e),
                     event.chat_id,
@@ -567,6 +591,21 @@ class Pipeline:
         requests for the same URL wait on the first run's result instead of
         launching another browser; a repeat from the very same message is
         dropped (None) because the first run already replies to that thread."""
+        now = time.monotonic()
+        cached = self._recent_summaries.get(url)
+        if cached is not None:
+            expires_at, cached_result = cached
+            if expires_at > now:
+                logger.info("using recent summary cache: url=%s message_id=%s", url, message_id)
+                return cached_result
+            self._recent_summaries.pop(url, None)
+        failed = self._summary_failures.get(url)
+        if failed is not None:
+            expires_at, reason = failed
+            if expires_at > now:
+                raise SummaryCooldownError(int(expires_at - now) + 1, reason)
+            self._summary_failures.pop(url, None)
+
         inflight = self._inflight_summaries.get(url)
         if inflight is not None:
             owner_message_id, future = inflight
@@ -591,12 +630,22 @@ class Pipeline:
         except BaseException as e:
             if isinstance(e, Exception):
                 future.set_exception(e)
+                cooldown = self._settings.bibigpt_failure_cooldown_seconds
+                if cooldown > 0:
+                    _remember(
+                        self._summary_failures,
+                        url,
+                        (time.monotonic() + cooldown, _summary_failure_message(e)),
+                    )
             else:  # cancellation: waiters get a normal failure, not our cancel
                 future.set_exception(BibiAPIError(0, "summary generation was cancelled"))
             future.exception()  # mark retrieved so an unwaited future stays quiet on GC
             raise
         else:
             future.set_result(result)
+            ttl = self._settings.bibigpt_summary_cache_ttl_seconds
+            if ttl > 0:
+                _remember(self._recent_summaries, url, (time.monotonic() + ttl, result))
             return result
         finally:
             self._inflight_summaries.pop(url, None)
@@ -872,6 +921,15 @@ def _friendly_download_reason(reason: str) -> str:
 
 
 def _summary_failure_message(exc: Exception) -> str:
+    if isinstance(exc, SummaryCooldownError):
+        wait = exc.remaining_seconds
+        wait_text = f"{wait} 秒" if wait < 120 else f"{round(wait / 60)} 分钟"
+        reason = exc.reason.removeprefix("BibiGPT 总结失败: ")
+        return (
+            f"BibiGPT 总结失败: 该视频刚失败过, 已进入冷却, 请 {wait_text}后再试。"
+            f"上次原因: {reason}"
+        )
+
     if isinstance(exc, AuthenticationError):
         if exc.status_code == 0:
             return (
@@ -895,6 +953,11 @@ def _summary_failure_message(exc: Exception) -> str:
             )
         if status == 429:
             return "BibiGPT 总结失败: 触发接口限流, 请稍后重试。"
+        if "平台风控" in body:
+            return (
+                "BibiGPT 总结失败: BibiGPT 抓取 B 站字幕被风控拦截, "
+                "已自动等待并重试三次仍失败, 请过几分钟再点一次“总结视频”。"
+            )
         if "service returned an HTML error page" in str(exc):
             return (
                 f"BibiGPT 总结失败: 服务返回了 HTML 错误页 (HTTP {status}), "

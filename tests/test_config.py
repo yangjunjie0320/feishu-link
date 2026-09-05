@@ -85,6 +85,8 @@ def test_bibigpt_defaults() -> None:
 
     assert settings.bibigpt_base_url == "https://aitodo.co/zh"
     assert settings.bibigpt_model == "openai/gpt-5.5"
+    assert settings.bibigpt_summary_cache_ttl_seconds == 1800
+    assert settings.bibigpt_failure_cooldown_seconds == 300
 
 
 def test_deepseek_model_defaults_to_v4_flash_and_allows_override() -> None:

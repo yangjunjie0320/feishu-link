@@ -443,8 +443,7 @@ def _scripted_browser_fetch(monkeypatch, script: list[Any]) -> list[dict[str, An
         return [{"result": {"data": {"json": payload}}}]
 
     monkeypatch.setattr(BibiClient, "_browser_fetch_json", fake_browser_fetch)
-    monkeypatch.setattr("src.bibi_client._TRANSIENT_RETRY_DELAY", 0.0)
-    monkeypatch.setattr("src.bibi_client._TIMEOUT_RECOVERY_DELAYS", (0.0, 0.0))
+    monkeypatch.setattr("src.bibi_client._RECOVERY_DELAYS", (0.0, 0.0, 0.0))
     return calls
 
 
@@ -452,25 +451,56 @@ def _is_refresh(call: dict[str, Any]) -> bool:
     return call["0"]["json"]["promptConfig"]["isRefresh"]
 
 
-async def test_summarize_retries_once_after_transient_500(tmp_path, monkeypatch) -> None:
-    calls = _scripted_browser_fetch(monkeypatch, [BibiAPIError(500, "Connection error."), "- ok"])
+async def test_summarize_forces_regeneration_on_first_request(tmp_path, monkeypatch) -> None:
+    calls = _scripted_browser_fetch(monkeypatch, ["- ok"])
 
     result = await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
 
     assert result.content == "- ok"
-    assert [_is_refresh(c) for c in calls] == [True, True]
+    assert [_is_refresh(c) for c in calls] == [True]
 
 
-async def test_summarize_gives_up_after_second_500(tmp_path, monkeypatch) -> None:
+async def test_summarize_custom_prompt_forces_regeneration(tmp_path, monkeypatch) -> None:
+    calls = _scripted_browser_fetch(monkeypatch, ["- ok"])
+
+    await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc", prompt="要点")
+
+    assert [_is_refresh(c) for c in calls] == [True]
+    assert "要点" in calls[0]["0"]["json"]["promptConfig"]["customPrompt"]
+
+
+async def test_summarize_recovers_via_lookup_after_risk_control_500(tmp_path, monkeypatch) -> None:
+    blocked = BibiAPIError(500, '{"message":"平台风控，稍后再试"}')
+    calls = _scripted_browser_fetch(monkeypatch, [blocked, blocked, "- late"])
+
+    result = await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
+
+    assert result.content == "- late"
+    assert [_is_refresh(c) for c in calls] == [True, False, False]
+
+
+async def test_summarize_custom_prompt_recovery_drops_refresh(tmp_path, monkeypatch) -> None:
+    calls = _scripted_browser_fetch(monkeypatch, [BibiAPIError(500, "blocked"), "- late"])
+
+    result = await BibiClient(_browser_settings(tmp_path)).summarize(
+        "https://youtu.be/abc", prompt="要点"
+    )
+
+    assert result.content == "- late"
+    assert [_is_refresh(c) for c in calls] == [True, False]
+
+
+async def test_summarize_raises_original_when_recovery_exhausted(tmp_path, monkeypatch) -> None:
+    blocked = BibiAPIError(500, "blocked")
     calls = _scripted_browser_fetch(
-        monkeypatch, [BibiAPIError(500, "cdn"), BibiAPIError(502, "bad gateway")]
+        monkeypatch, [blocked, BibiAPIError(502, "gw"), blocked, BibiAPIError(524, "cf")]
     )
 
     with pytest.raises(BibiAPIError) as excinfo:
         await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
 
-    assert excinfo.value.status_code == 502
-    assert len(calls) == 2
+    assert excinfo.value is blocked
+    assert len(calls) == 4
 
 
 @pytest.mark.parametrize(
@@ -488,6 +518,16 @@ async def test_summarize_does_not_retry_auth_or_transcript_errors(
     assert len(calls) == 1
 
 
+async def test_summarize_does_not_retry_unrecoverable_status(tmp_path, monkeypatch) -> None:
+    calls = _scripted_browser_fetch(monkeypatch, [BibiAPIError(402, "quota"), "- never"])
+
+    with pytest.raises(BibiAPIError) as excinfo:
+        await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
+
+    assert excinfo.value.status_code == 402
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize(
     "error", [BibiAPIError(524, "cloudflare"), BibiTimeoutError(0, "browser timed out")]
 )
@@ -500,27 +540,13 @@ async def test_summarize_recovers_stored_result_after_timeout(tmp_path, monkeypa
     assert [_is_refresh(c) for c in calls] == [True, False, False]
 
 
-async def test_summarize_raises_original_timeout_when_recovery_exhausted(
-    tmp_path, monkeypatch
-) -> None:
-    calls = _scripted_browser_fetch(monkeypatch, [BibiAPIError(524, "cloudflare"), "", ""])
-
-    with pytest.raises(BibiAPIError) as excinfo:
-        await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
-
-    assert excinfo.value.status_code == 524
-    assert len(calls) == 3
-
-
-async def test_summarize_timeout_on_retry_still_polls_stored_result(tmp_path, monkeypatch) -> None:
-    calls = _scripted_browser_fetch(
-        monkeypatch, [BibiAPIError(500, "cdn"), BibiAPIError(524, "cf"), "- late"]
-    )
+async def test_summarize_treats_empty_first_response_as_pending(tmp_path, monkeypatch) -> None:
+    calls = _scripted_browser_fetch(monkeypatch, ["", "- late"])
 
     result = await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
 
     assert result.content == "- late"
-    assert [_is_refresh(c) for c in calls] == [True, True, False]
+    assert len(calls) == 2
 
 
 async def test_web_mode_timeout_raises_bibi_timeout_error(tmp_path) -> None:

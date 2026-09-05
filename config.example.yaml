@@ -107,6 +107,11 @@ bibigpt_default_prompt: ""
 # After a successful browser-mode request, write the live context cookies back to
 # the BibiGPT cookie file so the HTTP path stays fresh as supabase tokens rotate.
 bibigpt_cookie_writeback: true
+# Reuse a successful default-prompt summary for this long (seconds) without
+# calling BibiGPT again, and refuse repeat requests for a video that just failed
+# until the cooldown passes. 0 disables either.
+bibigpt_summary_cache_ttl_seconds: 1800
+bibigpt_failure_cooldown_seconds: 300
 
 # Cookie auto-refresh for platforms whose exported cookies expire
 # (e.g. Bilibili SESSDATA). Bilibili is enabled by default.

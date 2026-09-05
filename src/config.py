@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     bibigpt_browser_timeout: float = 120.0
     bibigpt_default_prompt: str = ""
     bibigpt_cookie_writeback: bool = True
+    # In-process reuse of default-prompt summaries and back-off after failures,
+    # so a re-click never re-triggers bilibili's risk control. 0 disables.
+    bibigpt_summary_cache_ttl_seconds: int = 1800
+    bibigpt_failure_cooldown_seconds: int = 300
 
     # Cookie auto-refresh. Source "chrome" extracts from the system Chrome's
     # cookie store (login state maintained by the human using that browser);

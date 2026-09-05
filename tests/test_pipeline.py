@@ -19,6 +19,7 @@ from src.listener import CardActionEvent, MessageEvent
 from src.parsers.base import LinkMetadata
 from src.pipeline import (
     Pipeline,
+    SummaryCooldownError,
     _comment_analysis_failure_message,
     _friendly_download_reason,
     _summary_failure_message,
@@ -151,6 +152,14 @@ def test_summary_failure_message_for_quota_exhausted() -> None:
     assert message == (
         "BibiGPT 总结失败: 账号额度不足或会员已过期, 需要为 aitodo.co 账号充值/续费后重试。"
     )
+
+
+def test_summary_failure_message_for_bilibili_risk_control() -> None:
+    message = _summary_failure_message(
+        BibiAPIError(500, '[{"error":{"json":{"message":"平台风控，稍后再试"}}}]')
+    )
+    assert "风控" in message
+    assert "重试三次" in message
 
 
 def test_summary_failure_message_for_rate_limit() -> None:
@@ -697,6 +706,105 @@ async def test_summary_shared_generation_failure_reaches_every_waiter() -> None:
     assert pipeline._inflight_summaries == {}
 
 
+def _summary_pipeline_with(settings: Settings) -> Pipeline:
+    pipeline = Pipeline(settings, MagicMock())
+    pipeline._typing_sender.hold = MagicMock(return_value=_NoopHold())  # type: ignore[method-assign]
+    pipeline._translator.ensure_chinese_markdown_summary = AsyncMock(  # type: ignore[method-assign]
+        return_value="- **总结**\n    - 内容"
+    )
+    pipeline._sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    pipeline._text_sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    pipeline._try_send_bibigpt_chapter_summary = AsyncMock()  # type: ignore[method-assign]
+    return pipeline
+
+
+async def test_summary_recent_cache_serves_repeat_without_bibigpt() -> None:
+    pipeline = _summary_pipeline_with(Settings())
+    pipeline._bibi_client.summarize = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+    url = "https://youtu.be/abc123"
+
+    await pipeline._try_send_bibigpt_summary(url, _summary_event())
+    await pipeline._try_send_bibigpt_summary(url, _other_summary_event())
+
+    assert pipeline._bibi_client.summarize.await_count == 1
+    chats = [call.args[1] for call in pipeline._sender.send.await_args_list]
+    assert chats == ["oc_chat", "oc_other_chat"]
+
+
+async def test_summary_failure_cooldown_answers_repeat_without_bibigpt(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pipeline = _summary_pipeline_with(Settings())
+    pipeline._bibi_client.summarize = AsyncMock(  # type: ignore[method-assign]
+        side_effect=BibiAPIError(500, '{"message":"平台风控，稍后再试"}')
+    )
+    url = "https://youtu.be/abc123"
+
+    await pipeline._try_send_bibigpt_summary(url, _summary_event())
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="src.pipeline"):
+        await pipeline._try_send_bibigpt_summary(url, _other_summary_event())
+
+    assert pipeline._bibi_client.summarize.await_count == 1
+    texts = [call.args[0] for call in pipeline._text_sender.send.await_args_list]
+    assert "风控" in texts[0]
+    assert "冷却" in texts[1] and "风控" in texts[1]
+    assert texts[1].count("BibiGPT 总结失败") == 1
+    assert "summary cooling down" in caplog.text
+    assert "summarize failed" not in caplog.text
+
+
+async def test_summary_cache_and_cooldown_disabled_by_zero() -> None:
+    settings = Settings(bibigpt_summary_cache_ttl_seconds=0, bibigpt_failure_cooldown_seconds=0)
+    pipeline = _summary_pipeline_with(settings)
+    pipeline._bibi_client.summarize = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            BibiAPIError(500, "x"),
+            BibiAPIError(500, "x"),
+            _summary_result(),
+            _summary_result(),
+        ]
+    )
+    url = "https://youtu.be/abc123"
+
+    for _ in range(4):
+        await pipeline._try_send_bibigpt_summary(url, _summary_event())
+
+    assert pipeline._bibi_client.summarize.await_count == 4
+    assert pipeline._recent_summaries == {}
+    assert pipeline._summary_failures == {}
+
+
+async def test_summary_custom_prompt_bypasses_recent_cache() -> None:
+    pipeline = _summary_pipeline_with(Settings())
+    pipeline._bibi_client.summarize = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+    url = "https://youtu.be/abc123"
+    await pipeline._try_send_bibigpt_summary(url, _summary_event())
+    assert url in pipeline._recent_summaries
+
+    event = MessageEvent(
+        message_id="msg_prompt",
+        chat_id="oc_chat",
+        sender_id="ou_sender",
+        chat_type="group",
+        timestamp_utc=0,
+        message_type="text",
+        content=json.dumps({"text": "@_user_1 重点讲马编经历 https://youtu.be/abc123"}),
+        mentions=[],
+    )
+    await pipeline._try_send_bibigpt_summary(url, event)
+
+    assert pipeline._bibi_client.summarize.await_count == 2
+
+
+def test_summary_failure_message_for_cooldown() -> None:
+    message = _summary_failure_message(SummaryCooldownError(90, "BibiGPT 总结失败: 上游故障"))
+    assert "90 秒" in message
+    assert message.endswith("上次原因: 上游故障")
+    assert message.count("BibiGPT 总结失败") == 1
+    assert "3 分钟" in _summary_failure_message(SummaryCooldownError(170, "x"))
+
+
 def _summary_archive_mock(content_id: str = "") -> MagicMock:
     archive = MagicMock()
     archive.find_bibigpt_content_id = AsyncMock(return_value=content_id)
@@ -780,6 +888,9 @@ async def test_repeat_summary_uses_cached_lookup_instead_of_regenerating() -> No
     await pipeline._try_send_bibigpt_summary("https://youtu.be/abc123", _summary_event())
     pipeline._bibi_client.summarize.assert_awaited_once()
 
+    # Once the in-process result cache has expired, the contentId marker still
+    # steers the repeat to the cheap stored-record lookup.
+    pipeline._recent_summaries.clear()
     await pipeline._try_send_bibigpt_summary("https://youtu.be/abc123", _summary_event())
 
     pipeline._bibi_client.summarize.assert_awaited_once()
