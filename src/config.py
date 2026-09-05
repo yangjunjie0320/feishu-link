@@ -51,7 +51,9 @@ class Settings(BaseSettings):
     bibigpt_web_queue_enabled: bool = True
     bibigpt_web_queue_poll_seconds: int = 45
     bibigpt_web_queue_wait_seconds: int = 600
-    # After the queue delivers, regenerate once with our own prompt/model.
+    # After the queue delivers, regenerate once with our own prompt/model. Off
+    # by default: the delivering poll already generates with our promptConfig
+    # (verified 2026-09-05), so this only costs another minute and generation.
     bibigpt_web_queue_regenerate: bool = False
 
     # Cookie auto-refresh. Source "chrome" extracts from the system Chrome's
