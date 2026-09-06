@@ -29,6 +29,7 @@ from src.pipeline import (
     _friendly_download_reason,
     _summary_failure_message,
 )
+from src.sender import TypingReactionSender
 
 
 class _NoopHold:
@@ -658,21 +659,53 @@ def _other_summary_event() -> CardActionEvent:
     )
 
 
-async def test_summary_repeat_from_same_message_is_ignored_while_in_flight() -> None:
-    pipeline, release = _gated_summary_pipeline(_summary_result())
+@pytest.mark.parametrize(
+    "pending_stage", ["reaction", "generation", "translation", "card", "chapter"]
+)
+async def test_summary_repeat_preserves_original_reaction_until_all_replies_finish(
+    pending_stage: str,
+) -> None:
+    pipeline = _summary_pipeline_with(Settings())
+    pipeline._bibi_client.summarize = AsyncMock(return_value=_summary_result())  # type: ignore[method-assign]
+    pipeline._typing_sender = TypingReactionSender(MagicMock())
+    pipeline._typing_sender.start = AsyncMock(return_value="reaction_shared")  # type: ignore[method-assign]
+    pipeline._typing_sender.stop = AsyncMock()  # type: ignore[method-assign]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    stage_owner, stage_method, stage_result = {
+        "reaction": (pipeline._typing_sender, "start", "reaction_shared"),
+        "generation": (pipeline._bibi_client, "summarize", _summary_result()),
+        "translation": (pipeline._translator, "ensure_chinese_markdown_summary", "总结"),
+        "card": (pipeline._sender, "send", True),
+        "chapter": (pipeline, "_try_send_bibigpt_chapter_summary", None),
+    }[pending_stage]
+
+    async def wait_at_stage(*args: object, **kwargs: object) -> object:
+        entered.set()
+        await release.wait()
+        return stage_result
+
+    setattr(stage_owner, stage_method, AsyncMock(side_effect=wait_at_stage))
     url = "https://youtu.be/abc123"
 
     first = asyncio.create_task(pipeline._try_send_bibigpt_summary(url, _summary_event()))
-    await asyncio.sleep(0)
-    assert url in pipeline._inflight_summaries
-    await pipeline._try_send_bibigpt_summary(url, _summary_event())
-    assert pipeline._sender.send.await_count == 0
-
-    release.set()
-    await first
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        await asyncio.wait_for(
+            pipeline._try_send_bibigpt_summary(url, _summary_event()), timeout=1
+        )
+        pipeline._typing_sender.start.assert_awaited_once_with("om_summary", label="bibigpt")
+        pipeline._typing_sender.stop.assert_not_awaited()
+    finally:
+        release.set()
+        await first
 
     assert pipeline._bibi_client.summarize.await_count == 1
     assert pipeline._sender.send.await_count == 1
+    assert pipeline._try_send_bibigpt_chapter_summary.await_count == 1
+    pipeline._typing_sender.stop.assert_awaited_once_with(
+        "om_summary", "reaction_shared", label="bibigpt"
+    )
     assert pipeline._inflight_summaries == {}
 
 
@@ -684,6 +717,10 @@ async def test_summary_concurrent_messages_share_one_generation() -> None:
     await asyncio.sleep(0)
     second = asyncio.create_task(pipeline._try_send_bibigpt_summary(url, _other_summary_event()))
     await asyncio.sleep(0)
+    await asyncio.wait_for(
+        pipeline._try_send_bibigpt_summary(url, _other_summary_event()), timeout=1
+    )
+    assert pipeline._typing_sender.hold.call_count == 2
     release.set()
     await asyncio.gather(first, second)
 
@@ -691,6 +728,23 @@ async def test_summary_concurrent_messages_share_one_generation() -> None:
     chats = sorted(call.args[1] for call in pipeline._sender.send.await_args_list)
     assert chats == ["oc_chat", "oc_other_chat"]
     assert pipeline._inflight_summaries == {}
+
+
+async def test_cancelled_summary_releases_message_for_retry() -> None:
+    pipeline, release = _gated_summary_pipeline(_summary_result())
+    url = "https://youtu.be/abc123"
+    first = asyncio.create_task(pipeline._try_send_bibigpt_summary(url, _summary_event()))
+    await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    release.set()
+    await pipeline._try_send_bibigpt_summary(url, _summary_event())
+
+    assert pipeline._bibi_client.summarize.await_count == 2
+    pipeline._sender.send.assert_awaited_once()
+    assert pipeline._typing_sender.hold.call_count == 2
 
 
 async def test_summary_shared_generation_failure_reaches_every_waiter() -> None:

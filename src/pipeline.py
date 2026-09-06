@@ -100,6 +100,9 @@ class Pipeline:
         # url -> (initiating message_id, pending result) for default-prompt
         # summaries still being generated, so repeated requests share one run.
         self._inflight_summaries: dict[str, tuple[str, asyncio.Future[SummaryResult]]] = {}
+        # Keep one full reply per message, including reaction setup and chapter
+        # delivery, so a re-click cannot remove the original request's reaction.
+        self._active_summary_messages: set[str] = set()
         # Default-prompt results kept for a while so a re-click reuses them
         # without another browser run: url -> (expires_at, result). And after a
         # failed run, url -> (expires_at, user-facing reason): requests inside
@@ -495,6 +498,22 @@ class Pipeline:
             video.cleanup()
 
     async def _try_send_bibigpt_summary(
+        self,
+        url: str,
+        event: MessageEvent | CardActionEvent,
+    ) -> None:
+        if event.message_id in self._active_summary_messages:
+            logger.info(
+                "summary already in progress, ignoring repeat: message_id=%s", event.message_id
+            )
+            return
+        self._active_summary_messages.add(event.message_id)
+        try:
+            await self._send_bibigpt_summary(url, event)
+        finally:
+            self._active_summary_messages.discard(event.message_id)
+
+    async def _send_bibigpt_summary(
         self,
         url: str,
         event: MessageEvent | CardActionEvent,

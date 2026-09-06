@@ -5,6 +5,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -32,9 +33,17 @@ class SendError(Exception):
     pass
 
 
+@dataclass
+class _TypingHold:
+    start_task: asyncio.Task[str | None]
+    users: int = 0
+    cleanup_task: asyncio.Task[None] | None = None
+
+
 class TypingReactionSender:
     def __init__(self, client: lark.Client) -> None:
         self._client = client
+        self._holds: dict[str, _TypingHold] = {}
 
     @asynccontextmanager
     async def hold(
@@ -43,11 +52,33 @@ class TypingReactionSender:
         *,
         label: str,
     ) -> AsyncIterator[None]:
-        reaction_id = await self.start(message_id, label=label)
+        # Feishu returns one reaction for the same bot/message/emoji, regardless
+        # of our operation label. Reuse it until every operation has finished.
+        while (state := self._holds.get(message_id)) is not None and state.cleanup_task:
+            await asyncio.shield(state.cleanup_task)
+        if state is None:
+            state = _TypingHold(asyncio.create_task(self.start(message_id, label=label)))
+            self._holds[message_id] = state
+        state.users += 1
         try:
+            await asyncio.shield(state.start_task)
             yield
         finally:
+            state.users -= 1
+            if state.users == 0:
+                state.cleanup_task = asyncio.create_task(
+                    self._clear_hold(message_id, state, label=label)
+                )
+                await asyncio.shield(state.cleanup_task)
+
+    async def _clear_hold(self, message_id: str, state: _TypingHold, *, label: str) -> None:
+        try:
+            # Even a cancelled initializer may already have sent its SDK call.
+            # Wait for its reaction id so that it cannot leave an orphan behind.
+            reaction_id = await state.start_task
             await self.stop(message_id, reaction_id, label=label)
+        finally:
+            self._holds.pop(message_id, None)
 
     async def start(self, message_id: str, *, label: str = "work") -> str | None:
         request = (
