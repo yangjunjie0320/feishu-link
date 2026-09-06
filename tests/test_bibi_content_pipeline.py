@@ -22,6 +22,13 @@ from src.config import Settings
 
 _VIDEO_URL = "https://www.bilibili.com/video/BV1test123456"
 _CONTENT_ID = "server-content-id"
+_TIKTOK_URL = "https://www.tiktok.com/@dylan.page/video/7681700718713048342"
+_DOUYIN_URL = "https://www.douyin.com/video/7668528121813954545"
+
+
+@pytest.fixture(params=(_VIDEO_URL, _TIKTOK_URL, _DOUYIN_URL))
+def pipeline_video_url(request: pytest.FixtureRequest) -> str:
+    return request.param
 
 
 def _client(tmp_path: Path, **overrides: Any) -> BibiClient:
@@ -83,8 +90,8 @@ async def test_pipeline_uses_current_trpc_protocol(
         assert kwargs.get("method", "POST") == "POST"
 
 
-async def test_bilibili_waits_for_server_ready_before_one_configured_summary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_supported_video_waits_for_server_ready_before_one_configured_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline_video_url: str
 ) -> None:
     client = _client(tmp_path)
     calls: list[tuple[str, dict[str, Any], bool]] = []
@@ -108,11 +115,11 @@ async def test_bilibili_waits_for_server_ready_before_one_configured_summary(
     direct = AsyncMock(side_effect=AssertionError("must not start synchronous summary"))
     monkeypatch.setattr(client, "_summarize_once", direct)
 
-    result = await client.summarize(_VIDEO_URL, prompt="Preserve the technical examples")
+    result = await client.summarize(pipeline_video_url, prompt="Preserve the technical examples")
 
     assert [call[0] for call in calls] == ["fetch", "observe", "observe", "observe", "summarize"]
     assert calls[0][1] == {
-        "url": _VIDEO_URL,
+        "url": pipeline_video_url,
         "target": "subtitle",
         "forceFresh": False,
         "audioConfig": {"audioLanguage": "auto", "transcribeProvider": "auto"},
@@ -121,7 +128,7 @@ async def test_bilibili_waits_for_server_ready_before_one_configured_summary(
     assert all(call[1:] == ({"contentId": _CONTENT_ID}, True) for call in calls[1:4])
     summary_payload = calls[-1][1]
     assert set(summary_payload) == {"url", "promptConfig"}
-    assert summary_payload["url"] == _VIDEO_URL
+    assert summary_payload["url"] == pipeline_video_url
     assert summary_payload["promptConfig"]["model"] == "configured-model"
     assert summary_payload["promptConfig"]["customPrompt"].startswith(
         "Preserve the technical examples"
@@ -160,7 +167,7 @@ async def test_observation_temporary_error_preserves_accepted_content(
 
 @pytest.mark.parametrize("error_class", ["download_failed", "auth_required"])
 async def test_terminal_subtitle_failure_stops_without_summary_or_new_task(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_class: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline_video_url: str, error_class: str
 ) -> None:
     client = _client(tmp_path)
     request = AsyncMock(
@@ -171,7 +178,7 @@ async def test_terminal_subtitle_failure_stops_without_summary_or_new_task(
     )
     monkeypatch.setattr(client, "_content_pipeline_call", request)
     with pytest.raises(BibiContentTaskError, match="specific server reason") as error:
-        await client.summarize(_VIDEO_URL)
+        await client.summarize(pipeline_video_url)
 
     assert error.value.error_class == error_class
     assert error.value.content_id == _CONTENT_ID
@@ -180,7 +187,7 @@ async def test_terminal_subtitle_failure_stops_without_summary_or_new_task(
 
 
 async def test_watchdog_requeues_at_most_twice_using_the_accepted_content_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline_video_url: str
 ) -> None:
     client = _client(tmp_path)
     fetch_payloads: list[dict[str, Any]] = []
@@ -198,7 +205,7 @@ async def test_watchdog_requeues_at_most_twice_using_the_accepted_content_id(
     monkeypatch.setattr(client, "_content_pipeline_call", request)
 
     with pytest.raises(BibiContentTaskError, match="worker expired") as error:
-        await client.summarize(_VIDEO_URL)
+        await client.summarize(pipeline_video_url)
 
     assert error.value.content_id == _CONTENT_ID
     assert len(fetch_payloads) == 3
@@ -278,7 +285,7 @@ async def test_wait_timeout_cancels_a_hanging_observation_and_keeps_last_error(
 
 
 async def test_external_cancellation_is_not_reported_as_upstream_timeout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline_video_url: str
 ) -> None:
     client = _client(tmp_path)
     observation_started = asyncio.Event()
@@ -293,7 +300,7 @@ async def test_external_cancellation_is_not_reported_as_upstream_timeout(
         raise AssertionError("a cancelled request cannot finish")
 
     monkeypatch.setattr(client, "_content_pipeline_call", request)
-    task = asyncio.create_task(client.summarize(_VIDEO_URL))
+    task = asyncio.create_task(client.summarize(pipeline_video_url))
     await observation_started.wait()
     task.cancel()
 
@@ -325,6 +332,10 @@ async def test_later_risk_control_upgrades_recovery_to_content_pipeline(
         ("web", True, _VIDEO_URL),
         ("browser", False, _VIDEO_URL),
         ("browser", True, "https://www.youtube.com/watch?v=example"),
+        ("web", True, _TIKTOK_URL),
+        ("web", True, _DOUYIN_URL),
+        ("browser", False, _TIKTOK_URL),
+        ("browser", False, _DOUYIN_URL),
     ],
 )
 async def test_pipeline_opt_in_preserves_other_entry_paths(
@@ -346,6 +357,94 @@ async def test_pipeline_opt_in_preserves_other_entry_paths(
 
     direct.assert_awaited_once_with(video_url, "", refresh=True)
     pipeline.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        "https://www.tiktok.com/@snowatwee/photo/7470966924462132486",
+        "https://www.douyin.com/note/7658101922843080169",
+        "https://vm.tiktok.com/ZSvalidShare",
+        "https://v.douyin.com/7JK2hU2p0QI",
+        "https://www.tiktok.com/@dylan.page",
+        "https://www.douyin.com/discover",
+    ],
+)
+async def test_unconfirmed_social_video_never_enters_subtitle_pipeline_on_risk_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_url: str
+) -> None:
+    client = _client(tmp_path)
+    error = BibiAPIError(500, "平台风控，稍后再试")
+    direct = AsyncMock(side_effect=error)
+    pipeline = AsyncMock(side_effect=AssertionError("this URL does not prove video content"))
+    monkeypatch.setattr(client, "_summarize_once", direct)
+    monkeypatch.setattr(client, "_summarize_content_pipeline", pipeline)
+    monkeypatch.setattr("src.bibi_client._RECOVERY_DELAYS", (0,))
+
+    with pytest.raises(BibiAPIError) as caught:
+        await client.summarize(source_url)
+
+    assert caught.value is error
+    assert direct.await_count == 2
+    pipeline.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "source_url,target_url",
+    [
+        (f"{_TIKTOK_URL}?is_from_webapp=1&sender_device=pc#video", _TIKTOK_URL),
+        ("https://www.iesdouyin.com/share/video/7668528121813954545/?u_code=secret", _DOUYIN_URL),
+    ],
+)
+async def test_social_summary_recovery_and_cached_lookup_keep_one_canonical_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_url: str, target_url: str
+) -> None:
+    client = _client(tmp_path)
+    requests: list[tuple[str, dict[str, Any]]] = []
+    summaries = 0
+
+    async def request(
+        url: str, body: dict[str, Any] | None, *, method: str = "POST"
+    ) -> list[dict[str, Any]]:
+        nonlocal summaries
+        operation = urlsplit(url).path.rsplit("/", 1)[-1]
+        if method == "GET":
+            payload = json.loads(parse_qs(urlsplit(url).query)["input"][0])["json"]
+        else:
+            assert body is not None
+            payload = body["0"]["json"]
+        requests.append((operation, payload))
+        if operation == "contentPipeline.fetch":
+            data = _fetched()
+        elif operation == "contentPipeline.observe":
+            data = _status("ready")
+        elif operation == "contentPipeline.summarize":
+            summaries += 1
+            if summaries == 1:
+                raise BibiAPIError(503, "temporary model overload")
+            data = {"summaryText": "- prepared summary"}
+        else:
+            assert operation == "video.summaryBySetting"
+            data = {"summary": "- stored summary", "contentId": _CONTENT_ID}
+        return [{"result": {"data": {"json": data}}}]
+
+    monkeypatch.setattr(client, "_browser_fetch_json", request)
+    monkeypatch.setattr("src.bibi_client._RECOVERY_DELAYS", (0,))
+
+    result = await client.summarize(source_url)
+    cached = await client.summarize_cached(source_url)
+
+    assert result.video_url == target_url
+    assert cached is not None and cached.video_url == target_url
+    assert [operation for operation, _ in requests] == [
+        "contentPipeline.fetch", "contentPipeline.observe", "contentPipeline.summarize",
+        "contentPipeline.summarize", "video.summaryBySetting",
+    ]
+    assert [payload["url"] for _, payload in requests if "url" in payload] == [target_url] * 4
+    assert [
+        payload["promptConfig"]["isRefresh"]
+        for _, payload in requests if "promptConfig" in payload
+    ] == [True, False, False]
 
 
 @pytest.mark.parametrize("summary", [None, "", " \n ", {"text": "wrong type"}])
@@ -420,7 +519,7 @@ async def test_prepared_summary_recovers_without_restarting_subtitle_processing(
 
 
 async def test_real_browser_summary_timeout_cancels_request_then_recovers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline_video_url: str
 ) -> None:
     client = _client(tmp_path, bibigpt_browser_timeout=0.02)
     calls: list[tuple[str, dict[str, Any] | None]] = []
@@ -457,7 +556,7 @@ async def test_real_browser_summary_timeout_cancels_request_then_recovers(
     monkeypatch.setattr(client, "_browser_request_json", browser_request)
     monkeypatch.setattr("src.bibi_client._RECOVERY_DELAYS", (0, 0, 0))
 
-    result = await client.summarize(_VIDEO_URL)
+    result = await client.summarize(pipeline_video_url)
 
     assert result.content == "- browser recovery"
     assert timed_out_request_cancelled.is_set()
@@ -467,7 +566,7 @@ async def test_real_browser_summary_timeout_cancels_request_then_recovers(
 
 
 async def test_repeated_summary_risk_control_exhausts_only_summary_recovery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline_video_url: str
 ) -> None:
     client = _client(tmp_path)
     errors = [BibiAPIError(500, f"平台风控，attempt {attempt}") for attempt in range(1, 5)]
@@ -476,7 +575,7 @@ async def test_repeated_summary_risk_control_exhausts_only_summary_recovery(
     monkeypatch.setattr("src.bibi_client._RECOVERY_DELAYS", (0, 0, 0))
 
     with pytest.raises(BibiContentPendingError) as error:
-        await client.summarize(_VIDEO_URL)
+        await client.summarize(pipeline_video_url)
 
     assert [call.args[0] for call in request.await_args_list] == [
         "fetch", "observe", "summarize", "summarize", "summarize", "summarize"
@@ -618,7 +717,7 @@ async def test_fetch_invalid_trpc_projection_uses_legacy_compatibility_path(
 
 
 async def test_legacy_fetch_waits_for_pipeline_ready_then_uses_legacy_summary_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipeline_video_url: str
 ) -> None:
     client = _client(tmp_path)
     calls: list[str] = []
@@ -655,7 +754,7 @@ async def test_legacy_fetch_waits_for_pipeline_ready_then_uses_legacy_summary_on
     monkeypatch.setattr(client, "_summarize_with_recovery", forbidden)
     monkeypatch.setattr(client, "_recover_via_lookup", forbidden)
 
-    result = await client.summarize(_VIDEO_URL, prompt="Preserve each technical example")
+    result = await client.summarize(pipeline_video_url, prompt="Preserve each technical example")
 
     assert result.content == "- legacy completed"
     assert result.content_id == _CONTENT_ID

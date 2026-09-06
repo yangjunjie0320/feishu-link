@@ -85,5 +85,5 @@ def detect_platform(url: str) -> str:
 
 def is_short_video_platform(url: str) -> bool:
     # Historical name: this is the card-processing allowlist, not permission
-    # to download a video. Douyin is deliberately card-only.
+    # to download a video. Douyin supports cards and summaries, but no downloads.
     return detect_platform(url) in {"bilibili", "instagram", "tiktok", "youtube", "x", "douyin"}

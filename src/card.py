@@ -11,6 +11,8 @@ from urllib.parse import quote
 from .bibi_models import ChapterSummarySection
 from .card_metadata import is_placeholder
 from .parsers.base import LinkMetadata, MediaType
+from .platforms import detect_platform
+from .summary_support import summary_url_for_metadata, supports_video_summary
 
 _SOURCE_COLORS = {
     "youtube": "red",
@@ -528,7 +530,7 @@ def _build_actions(meta: LinkMetadata) -> list[dict[str, object]]:
     action_url = _action_url(meta)
     actions: list[dict[str, object]] = []
 
-    if meta.media_type == MediaType.VIDEO and _supports_summary_action(meta):
+    if supports_video_summary(meta):
         actions.append(
             {
                 "tag": "button",
@@ -536,7 +538,7 @@ def _build_actions(meta: LinkMetadata) -> list[dict[str, object]]:
                 "type": "default",
                 "value": {
                     "action": "summarize_video",
-                    "url": action_url,
+                    "url": summary_url_for_metadata(meta),
                 },
             }
         )
@@ -561,34 +563,15 @@ def _action_url(meta: LinkMetadata) -> str:
     return meta.canonical_url or meta.source_url
 
 
-def _supports_summary_action(meta: LinkMetadata) -> bool:
-    platform = meta.platform.strip().lower()
-    if platform in {"bilibili", "youtube"}:
-        return True
-
-    url = meta.source_url.lower()
-    return any(domain in url for domain in ("bilibili.com", "b23.tv", "youtube.com", "youtu.be"))
-
-
 def _supports_comment_analysis_action(meta: LinkMetadata) -> bool:
     platform = meta.platform.strip().lower()
+    if platform == "douyin":
+        return False
     if platform in {"bilibili", "instagram", "tiktok", "youtube", "x"}:
         return True
-
-    url = meta.source_url.lower()
-    return any(
-        domain in url
-        for domain in (
-            "bilibili.com",
-            "b23.tv",
-            "instagram.com",
-            "tiktok.com",
-            "youtube.com",
-            "youtu.be",
-            "x.com",
-            "twitter.com",
-        )
-    )
+    return detect_platform(meta.canonical_url or meta.source_url) in {
+        "bilibili", "instagram", "tiktok", "youtube", "x",
+    }
 
 
 def _description_should_be_primary(meta: LinkMetadata, description_block: str) -> bool:

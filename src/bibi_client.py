@@ -24,6 +24,7 @@ from .config import Settings
 from .cookie_refresh import write_netscape
 from .cookie_utils import get_cookie_header, playwright_cookies_from_file
 from .platforms import detect_platform, normalize_url
+from .summary_support import canonical_summary_url, is_summary_video_url
 
 logger = logging.getLogger(__name__)
 
@@ -161,13 +162,21 @@ class BibiClient:
         if self._cookie_error and self._settings.bibigpt_access_mode != "browser":
             raise AuthenticationError(0, self._cookie_error)
 
+        # The caller resolves short links and proves the actual media type.
+        # Keep one canonical target throughout preparation and recovery so the
+        # server does not create separate tasks for aliases or tracking params.
+        video_url = _summary_request_url(video_url)
         base_prompt = (prompt or self._settings.bibigpt_default_prompt).strip()
         effective_prompt = _with_output_instructions(base_prompt) if base_prompt else ""
 
         # isRefresh=true makes BibiGPT generate with our prompt/model instead of
         # handing back whatever record it has (possibly made with other settings
         # on the web). Recovery lookups after a failure drop the flag on purpose.
-        if self._content_pipeline_enabled() and detect_platform(video_url) == "bilibili":
+        platform = detect_platform(video_url)
+        if self._content_pipeline_enabled() and (
+            platform == "bilibili"
+            or (platform in {"tiktok", "douyin"} and is_summary_video_url(video_url))
+        ):
             result = await self._summarize_content_pipeline(video_url, effective_prompt)
         else:
             result = await self._summarize_with_recovery(video_url, effective_prompt, refresh=True)
@@ -197,7 +206,7 @@ class BibiClient:
         except (AuthenticationError, TranscriptUnavailableError):
             raise
         except BibiAPIError as exc:
-            if self._web_queue_applies(exc):
+            if self._web_queue_applies(exc, video_url):
                 return await self._summarize_content_pipeline(video_url, prompt)
             if not _is_recoverable(exc):
                 raise
@@ -212,7 +221,13 @@ class BibiClient:
             and self._settings.bibigpt_access_mode == "browser"
         )
 
-    def _web_queue_applies(self, exc: BibiAPIError) -> bool:
+    def _web_queue_applies(self, exc: BibiAPIError, video_url: str) -> bool:
+        # A photo or unresolved social short link is not evidence of a video,
+        # even when the legacy endpoint happens to return a risk-control error.
+        if detect_platform(video_url) in {"tiktok", "douyin"} and not is_summary_video_url(
+            video_url
+        ):
+            return False
         return self._content_pipeline_enabled() and is_risk_control(exc)
 
     async def _content_pipeline_call(
@@ -264,6 +279,7 @@ class BibiClient:
 
     async def _prepare_content(self, video_url: str) -> _PreparedContent:
         """Wait for the server's subtitle task, without reading subtitle text."""
+        video_url = _summary_request_url(video_url)
         source = _source_url_for_log(video_url)
         content_id = ""
         summary_via_pipeline = True
@@ -358,6 +374,7 @@ class BibiClient:
 
     async def _summarize_content_pipeline(self, video_url: str, prompt: str) -> SummaryResult:
         """Match the desktop's server protocol, not its local task queue."""
+        video_url = _summary_request_url(video_url)
         prepared = await self._prepare_content(video_url)
         content_id = prepared.content_id
         operation = (
@@ -437,7 +454,7 @@ class BibiClient:
             except (AuthenticationError, TranscriptUnavailableError):
                 raise
             except BibiAPIError as exc:
-                if self._web_queue_applies(exc):
+                if self._web_queue_applies(exc, video_url):
                     return await self._summarize_content_pipeline(video_url, prompt)
                 if not _is_recoverable(exc):
                     raise
@@ -465,6 +482,7 @@ class BibiClient:
         fall back to the content pipeline or full summarize()."""
         if self._cookie_error and self._settings.bibigpt_access_mode != "browser":
             return None
+        video_url = _summary_request_url(video_url)
         base_prompt = (prompt or self._settings.bibigpt_default_prompt).strip()
         effective_prompt = _with_output_instructions(base_prompt) if base_prompt else ""
         try:
@@ -1013,8 +1031,15 @@ def _is_recoverable(exc: BibiAPIError) -> bool:
 
 
 def is_risk_control(exc: BibiAPIError) -> bool:
-    """BibiGPT's fetch of the bilibili page was blocked by bilibili risk control."""
+    """BibiGPT reported that the source platform blocked content extraction."""
     return _RISK_CONTROL_MARKER in exc.body
+
+
+def _summary_request_url(url: str) -> str:
+    """Normalize newly supported social videos without changing legacy URLs."""
+    if detect_platform(url) in {"tiktok", "douyin"}:
+        return canonical_summary_url(url)
+    return url
 
 
 def _domain_matches_writeback(cookie_domain: str, want: str) -> bool:

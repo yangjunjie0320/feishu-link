@@ -1,6 +1,6 @@
 # Content cards and operations
 
-The card path is independent from video preparation. `Dispatcher.parse_card` returns metadata, `complete`/`partial`/`unavailable`/`unsupported`, content presence, failure category and sources. `prepare_video` runs after delivery for automatic video append, the manual command and legacy download callbacks. Existing YouTube/Bilibili summary actions remain available. Platform labels link to the original share URL; titles use the canonical content URL when available. Partial and unavailable cards retain this link without adding action buttons. Douyin only supports cards and archive; it has no video, summary or comment action.
+The card path is independent from video preparation. `Dispatcher.parse_card` returns metadata, `complete`/`partial`/`unavailable`/`unsupported`, content presence, failure category and sources. `prepare_video` runs after delivery for automatic video append, the manual command and legacy download callbacks. YouTube/Bilibili summary actions remain available; verified TikTok/Douyin videos also support on-demand summaries and chapters. Platform labels link to the original share URL; titles use the canonical content URL when available. Partial and unavailable cards retain this link without adding action buttons. Douyin supports cards, archive and on-demand video summaries; photo posts have no summary action, and video download/comment actions remain disabled.
 
 ## Sources and completeness
 

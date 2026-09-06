@@ -525,7 +525,7 @@ def test_card_actions_prefer_canonical_url() -> None:
 
     assert len(action_block["actions"]) == 2
     assert (
-        action_block["actions"][0]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
+        action_block["actions"][0]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P"
     )
     assert (
         action_block["actions"][1]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
@@ -599,11 +599,14 @@ def test_social_video_card_displays_real_caption_instead_of_generic_title(platfo
     assert "原文: Three vintage monitors" in body_text
     assert "Generic Video" not in body_text
     actions = next(e["actions"] for e in card["elements"] if e.get("tag") == "action")
-    assert [action["value"]["action"] for action in actions] == ["analyze_comments"]
+    expected = ["summarize_video", "analyze_comments"] if platform == "tiktok" else [
+        "analyze_comments"
+    ]
+    assert [action["value"]["action"] for action in actions] == expected
 
 
 @pytest.mark.parametrize("media_type", [MediaType.ARTICLE, MediaType.VIDEO])
-def test_douyin_card_links_title_and_preserves_caption_without_action_buttons(
+def test_douyin_card_links_title_and_preserves_caption_with_video_only_summary(
     media_type: MediaType,
 ) -> None:
     meta = LinkMetadata(
@@ -620,7 +623,16 @@ def test_douyin_card_links_title_and_preserves_caption_without_action_buttons(
 
     assert body_text.startswith("**[雨后的小城](https://www.douyin.com/video/123)**")
     assert "街边的积水映着路灯，远处有人慢慢走来。" in body_text
-    assert all(element.get("tag") != "action" for element in card["elements"])
+    actions = [
+        action for element in card["elements"] if element.get("tag") == "action"
+        for action in element["actions"]
+    ]
+    if media_type == MediaType.VIDEO:
+        assert [action["value"] for action in actions] == [
+            {"action": "summarize_video", "url": "https://www.douyin.com/video/123"}
+        ]
+    else:
+        assert not actions
 
 
 def test_card_with_parse_warning() -> None:
@@ -808,3 +820,86 @@ def test_every_platform_card_keeps_original_link_without_an_open_button(
         for element in card["elements"] if element.get("tag") == "action"
         for action in element["actions"]
     )
+
+
+@pytest.mark.parametrize(
+    ("platform", "original", "canonical"),
+    [
+        (
+            "douyin", "https://v.douyin.com/share/",
+            "https://www.douyin.com/video/123?from=share",
+        ),
+        (
+            "tiktok", "https://vm.tiktok.com/share/",
+            "https://www.tiktok.com/@creator/video/123?is_from_webapp=1",
+        ),
+    ],
+)
+def test_new_video_summary_buttons_keep_real_caption_and_original_link(
+    platform: str, original: str, canonical: str,
+) -> None:
+    meta = LinkMetadata(
+        source_url=original, canonical_url=canonical, platform=platform,
+        description="A real caption with the cover temporarily unavailable.",
+        media_type=MediaType.VIDEO, parse_warnings=["封面暂未获取"],
+    )
+    card = json.loads(build_card(meta))
+    body = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
+    assert f"]({original})" in body
+    assert meta.description in body
+    actions = next(e["actions"] for e in card["elements"] if e.get("tag") == "action")
+    assert actions[0]["value"] == {
+        "action": "summarize_video", "url": canonical.split("?", 1)[0],
+    }
+    assert all(action["value"]["action"] != "download_video" for action in actions)
+    if platform == "douyin":
+        assert len(actions) == 1
+
+
+@pytest.mark.parametrize("platform", ["tiktok", "douyin"])
+@pytest.mark.parametrize("media_type", [MediaType.ARTICLE, MediaType.UNKNOWN])
+def test_unconfirmed_social_video_cards_have_no_summary_button(
+    platform: str, media_type: MediaType,
+) -> None:
+    meta = LinkMetadata(
+        source_url=f"https://www.{platform}.com/video/123", platform=platform,
+        description="A real post caption.", media_type=media_type,
+    )
+    card = json.loads(build_card(meta))
+    assert all(
+        action["value"]["action"] != "summarize_video"
+        for element in card["elements"] if element.get("tag") == "action"
+        for action in element["actions"]
+    )
+
+
+def test_error_only_douyin_video_card_keeps_link_without_summary_button() -> None:
+    meta = LinkMetadata(
+        source_url="https://www.douyin.com/video/123", platform="douyin",
+        title="内容暂未获取", media_type=MediaType.VIDEO,
+    )
+    card = json.loads(build_card(meta))
+    assert all(element.get("tag") != "action" for element in card["elements"])
+    assert "](https://www.douyin.com/video/123)" in card["elements"][0]["text"]["content"]
+
+
+def test_lookalike_domain_card_gets_no_platform_actions() -> None:
+    meta = LinkMetadata(
+        source_url="https://example.com/?target=youtube.com/watch?v=RMzaJHBSPCw",
+        title="Example", media_type=MediaType.VIDEO,
+    )
+    card = json.loads(build_card(meta))
+    assert all(element.get("tag") != "action" for element in card["elements"])
+
+
+def test_bilibili_summary_button_preserves_selected_part_omitted_by_page_metadata() -> None:
+    meta = LinkMetadata(
+        source_url="https://www.bilibili.com/video/BV1BCGB66E8P/?p=2",
+        canonical_url="https://www.bilibili.com/video/BV1BCGB66E8P/",
+        title="The second episode", platform="bilibili", media_type=MediaType.VIDEO,
+    )
+    card = json.loads(build_card(meta))
+    actions = next(element["actions"] for element in card["elements"] if element["tag"] == "action")
+    assert actions[0]["value"] == {
+        "action": "summarize_video", "url": "https://www.bilibili.com/video/BV1BCGB66E8P?p=2",
+    }

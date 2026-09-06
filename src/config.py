@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # so a re-click never re-triggers bilibili's risk control. 0 disables.
     bibigpt_summary_cache_ttl_seconds: int = 1800
     bibigpt_failure_cooldown_seconds: int = 300
-    # Browser mode: prepare Bilibili content with the desktop's server protocol,
+    # Browser mode: prepare Bilibili/TikTok/Douyin videos with the desktop protocol,
     # observe subtitle readiness, then summarize once. Also handles risk control
     # encountered during legacy recovery. Does not use the browser's local queue.
     bibigpt_web_queue_enabled: bool = True

@@ -11,7 +11,7 @@ The project is designed for personal or team link collection workflows: send a s
 - Content cards for YouTube, Instagram, TikTok, Bilibili, X/Twitter, and Douyin. Generic web parsing is available internally; the bot accepts the configured supported platforms.
 - Video metrics when available: views, likes, comments, and reposts.
 - Optional short-video append. Videos up to 180 seconds are downloaded, converted to Feishu-friendly MP4, uploaded, and sent after the card.
-- **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube or Bilibili link to receive an AI-generated summary followed by BibiGPT's timeline chapter summary in collapsed Feishu cards.
+- **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube, Bilibili, TikTok or Douyin video link, or use its summary button, to receive an AI-generated summary followed by timeline chapters in collapsed Feishu cards. Photo posts are excluded.
 - Manual download command: mention the bot and send `下载 <link>` to force video download instead of summarization, without the automatic short-video duration cap.
 - Card action buttons: supported cards retain `总结视频` and `分析评论`. Open/download buttons are hidden; the manual download command and older card callbacks still work.
 - Optional title translation through DeepSeek. Non-Chinese titles are translated and shown together with the original title.
@@ -27,7 +27,7 @@ The project is designed for personal or team link collection workflows: send a s
 | TikTok | Caption/title, author, duration | Yes | Views, likes, comments, reposts when available | Yes, when enabled and downloadable |
 | Bilibili | Title, UP, duration | Yes | Views, likes, comments, reposts when available | Yes, when <= 180 seconds and downloadable |
 | X / Twitter | Text summary, author, duration | Yes | Likes, comments, reposts when available | Yes, for accessible media posts |
-| Douyin | Public video/photo caption, author; share links resolve to the original post | Cover or first photo | When already present | No; cards and archive only |
+| Douyin | Public video/photo caption, author; share links resolve to the original post | Cover or first photo | When already present | No; video summaries are available on request |
 
 Card preparation has a 60-second budget, including parsing, cover upload and translation. It sends one final card. Missing fields are explicitly marked; a platform slogan, login page or domain name is not successful content. Actual text may still be archived when its cover is unavailable. See [card reliability and operations](docs/card-reliability.md) for sources, limits, cookies, validation and rollback.
 
@@ -163,13 +163,13 @@ See `config.example.yaml` for the full reference. Common settings:
 | `max_video_file_mb` | `30` | Max uploaded video size; Feishu `im/v1/files` rejects files over 30 MB |
 | `allowed_video_platforms` | Config example | Platforms allowed for video append |
 | `cookie_file` | `cookies/cookies.txt` | Unified Netscape cookie file path |
-| `bibigpt_access_mode` | `web` | `web` uses tRPC over HTTP; `browser` reuses Chromium login cookies in isolated request pages and uses the desktop content pipeline for Bilibili |
+| `bibigpt_access_mode` | `web` | `web` uses tRPC over HTTP; `browser` reuses Chromium login cookies in isolated request pages and uses the desktop content pipeline for Bilibili/TikTok/Douyin videos |
 | `bibigpt_base_url` | `https://aitodo.co/zh` | Base URL for BibiGPT |
 | `bibigpt_timeout` | `120.0` | Timeout in seconds for BibiGPT summary and chapter-summary requests |
 | `bibigpt_browser_profile_dir` | `browser-data/bibigpt` | Chromium profile path for BibiGPT browser mode |
 | `bibigpt_browser_headless` | `true` | Run Chromium headless in browser mode |
 | `bibigpt_browser_timeout` | `120.0` | Total request budget including profile-lock waiting, startup, navigation, and fetch; browser cleanup may add a bounded delay |
-| `bibigpt_web_queue_enabled` | `true` | Use the desktop server content pipeline for Bilibili in browser mode, also as recovery for risk-control errors |
+| `bibigpt_web_queue_enabled` | `true` | Use the desktop server content pipeline for Bilibili/TikTok/Douyin videos in browser mode, also as recovery for risk-control errors |
 | `bibigpt_web_queue_poll_seconds` | `45` | Interval between server subtitle-status checks |
 | `bibigpt_web_queue_wait_seconds` | `600` | Content-preparation wait budget; expiry reports pending rather than claiming the server task failed |
 | `bibigpt_default_prompt` | Empty | Optional default custom prompt. Leave empty to use BibiGPT's built-in prompt |
@@ -262,14 +262,14 @@ Manual downloads bypass BibiGPT summaries and the automatic short-video duration
 
 New link cards include only the action buttons supported by the platform:
 
-- `总结视频` triggers the same BibiGPT summary-and-chapter-summary path as mentioning the bot with a YouTube or Bilibili URL.
+- `总结视频` triggers the same BibiGPT summary-and-chapter-summary path as mentioning the bot with a YouTube, Bilibili, TikTok or Douyin video URL. Douyin has no download or comment action; its photo posts have no summary action.
 - `分析评论` fetches up to 200 comments, ranks comments by likes and replies, translates the top 3, and sends a fixed-template comment analysis card with total-comment and sample counts.
 
 Cards omit the action row when neither feature is supported. The `打开链接` and `下载视频` buttons are no longer included in new cards; existing cards keep their original layout. Summary work uses Feishu's `Typing` reaction; comment analysis uses `THINKING`. When both run on one message, each reaction remains until its corresponding work finishes.
 
 BibiGPT summary output is treated as draft material. When `deepseek_api_key` is configured, the bot sends that output through DeepSeek with fixed Chinese Markdown output requirements before rendering the Feishu card. After the summary card succeeds, the bot requests BibiGPT's `timeline` chapter summary using the returned content ID and appends a collapsed `字幕总结` card. DeepSeek may translate and proofread the chapter introduction, titles, and summaries, but timestamps remain code-owned and raw subtitles are never sent or used as a fallback. If the BibiGPT account cannot generate chapter summaries, the original summary remains available and the bot reports that the chapter summary is unavailable.
 
-In browser mode, Bilibili requests first prepare content through BibiGPT's desktop server protocol, confirm a server content ID, and observe subtitle readiness before requesting a summary. Content preparation uses the desktop's `content.info` fallback after a recoverable pipeline failure and selects the matching summary endpoint. Request pages share login cookies without restoring the browser profile's old local task queue. Temporary summary errors receive bounded cache-permitting recovery; waiting expiry retains the content link and does not trigger the failure cooldown. See the [investigation and verification limits](docs/bibigpt-reliability.md). The legacy `bibigpt_web_queue_regenerate` setting remains accepted but no longer triggers an extra generation.
+In browser mode, Bilibili, TikTok and Douyin videos first prepare content through BibiGPT's desktop server protocol, confirm a server content ID, and observe subtitle readiness before requesting a summary. Short shares use the verified canonical video URL; cache and shared requests use that same target while custom prompts are extracted using the original share URL. Content preparation uses the desktop's `content.info` fallback after a recoverable pipeline failure and selects the matching summary endpoint. Request pages share login cookies without restoring the browser profile's old local task queue. Temporary summary errors receive bounded cache-permitting recovery; waiting expiry retains the content link and does not trigger the failure cooldown. The 60-second card budget is independent from summary preparation. See the [investigation and verification limits](docs/bibigpt-reliability.md). The legacy `bibigpt_web_queue_regenerate` setting remains accepted but no longer triggers an extra generation.
 
 ## Development
 

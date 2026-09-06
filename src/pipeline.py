@@ -40,6 +40,12 @@ from .media_downloader import VideoSkipReason, download_video
 from .parsers.base import CardParseResult, CardStatus, LinkMetadata, MediaType, ParserError
 from .platforms import detect_platform, is_short_video_platform
 from .sender import CardSender, TextSender, TypingReactionSender, VideoSender
+from .summary_support import (
+    canonical_summary_url,
+    is_summary_video_url,
+    summary_url_for_metadata,
+    supports_video_summary,
+)
 from .translator import TitleTranslator
 from .url_extract import (
     decode_plain_text,
@@ -90,6 +96,10 @@ class SummaryCooldownError(Exception):
         super().__init__(f"summary cooling down for {remaining_seconds}s: {reason}")
 
 
+class SummaryUnavailableError(Exception):
+    """The requested content has not been confirmed as a supported video."""
+
+
 class Pipeline:
     def __init__(
         self,
@@ -116,6 +126,9 @@ class Pipeline:
         # differ when canonical_url rewrites a short link like b23.tv).
         self._msg_archive_url: OrderedDict[str, str] = OrderedDict()
         self._source_archive_url: OrderedDict[str, str] = OrderedDict()
+        # Verified card URLs and share aliases resolve to the same video before
+        # entering summary cache, cooldown or shared-generation lookups.
+        self._summary_targets: OrderedDict[str, str] = OrderedDict()
         # url -> contentId of an already-generated summary; its presence is
         # the duplicate-summarize marker that switches to the cached lookup.
         self._bibigpt_content_id: OrderedDict[str, str] = OrderedDict()
@@ -369,6 +382,8 @@ class Pipeline:
                 meta.title[:50] if meta.title else "",
                 event.message_id,
             )
+            if result.has_content and supports_video_summary(meta):
+                self._remember_summary_target(url, meta)
 
             if self._archive is not None and result.has_content:
                 archive_url = meta.canonical_url or meta.source_url
@@ -387,13 +402,27 @@ class Pipeline:
                 )
                 _remember(self._msg_archive_url, event.message_id, archive_url)
                 _remember(self._source_archive_url, meta.source_url, archive_url)
+                _remember(
+                    self._source_archive_url, canonical_summary_url(archive_url), archive_url
+                )
+                if supports_video_summary(meta):
+                    _remember(
+                        self._source_archive_url, summary_url_for_metadata(meta), archive_url
+                    )
 
         domain = detect_platform(url)
 
-        if domain == "douyin" or not result.has_content:
+        if not result.has_content:
             return
 
         if manual_download:
+            if domain == "douyin":
+                await self._text_sender.send(
+                    "抖音暂不支持视频下载。",
+                    event.chat_id,
+                    event.message_id,
+                )
+                return
             await self._try_send_video(
                 meta,
                 event,
@@ -401,9 +430,15 @@ class Pipeline:
                 notify_user=True,
                 enforce_duration_limit=False,
             )
-        elif is_bot_mentioned and domain in ("youtube", "bilibili"):
+        elif is_bot_mentioned and supports_video_summary(meta):
             await self._try_send_bibigpt_summary(url, event)
-        else:
+        elif is_bot_mentioned and domain in {"tiktok", "douyin"}:
+            await self._text_sender.send(
+                "暂未确认这是可总结的视频；图文或照片帖暂不支持视频总结。",
+                event.chat_id,
+                event.message_id,
+            )
+        elif domain != "douyin":
             await self._try_send_video(meta, event, img_key)
 
     async def _prepare_card(self, url: str, started: float) -> tuple[CardParseResult, str | None]:
@@ -621,6 +656,7 @@ class Pipeline:
         event: MessageEvent | CardActionEvent,
     ) -> None:
         async with self._typing_sender.hold(event.message_id, label="bibigpt"):
+            source_url = url
             prompt = (
                 extract_prompt(event.message_type, event.content, url)
                 if isinstance(event, MessageEvent)
@@ -633,6 +669,11 @@ class Pipeline:
             )
 
             try:
+                url = await self._resolve_summary_target(source_url)
+                logger.info(
+                    "summary target resolved: platform=%s source=%s target=%s message_id=%s",
+                    detect_platform(url), source_url, url, event.message_id,
+                )
                 if prompt and prompt.strip():
                     result = await self._bibi_client.summarize(url, prompt=prompt)
                 else:
@@ -683,7 +724,7 @@ class Pipeline:
                 card_json = build_markdown_card(
                     "BibiGPT 总结",
                     summary_content,
-                    source_url=url,
+                    source_url=source_url,
                     collapsed=True,
                     panel_title="总结正文",
                     sectioned=True,
@@ -722,6 +763,44 @@ class Pipeline:
                 )
 
             await self._try_send_bibigpt_chapter_summary(event, result)
+
+    def _remember_summary_target(self, source_url: str, meta: LinkMetadata) -> str:
+        target = summary_url_for_metadata(meta)
+        for alias in (source_url, meta.source_url, target):
+            _remember(self._summary_targets, canonical_summary_url(alias), target)
+        return target
+
+    async def _resolve_summary_target(self, source_url: str) -> str:
+        platform = detect_platform(source_url)
+        if platform not in {"bilibili", "youtube", "tiktok", "douyin"}:
+            raise SummaryUnavailableError("目前仅支持 B站、YouTube、TikTok 和抖音的视频总结。")
+        normalized = canonical_summary_url(source_url)
+        target = self._summary_targets.get(normalized)
+        if target:
+            return target
+        if platform not in {"tiktok", "douyin"}:
+            return normalized
+        # A callback can come from an old card, or carry a short URL. Confirm
+        # actual content type instead of trusting a button payload or path.
+        try:
+            async with asyncio.timeout(self._settings.card_parse_timeout):
+                parsed = await self._dispatcher.parse_card(source_url)
+        except TimeoutError as exc:
+            raise SummaryUnavailableError("视频信息确认超时，请稍后重试。") from exc
+        meta = parsed.metadata
+        if not parsed.has_content:
+            raise SummaryUnavailableError(_card_failure_description(parsed.reason))
+        if not supports_video_summary(meta):
+            raise SummaryUnavailableError("暂未确认这是可总结的视频；图文或照片帖暂不支持。")
+        target = canonical_summary_url(meta.canonical_url or meta.source_url)
+        if detect_platform(target) != platform or not is_summary_video_url(target):
+            raise SummaryUnavailableError("没有取得已确认的视频链接，请发送作品的完整链接。")
+        if self._archive is not None:
+            _remember(
+                self._source_archive_url, target,
+                self._source_archive_url.get(source_url, meta.canonical_url or meta.source_url),
+            )
+        return self._remember_summary_target(source_url, meta)
 
     async def _shared_default_summary(self, url: str, message_id: str) -> SummaryResult | None:
         """Default-prompt summary with in-flight de-duplication. Concurrent
@@ -1060,6 +1139,9 @@ def _friendly_download_reason(reason: str) -> str:
 
 
 def _summary_failure_message(exc: Exception) -> str:
+    if isinstance(exc, SummaryUnavailableError):
+        return f"BibiGPT 总结暂不可用: {exc}"
+
     if isinstance(exc, BibiContentPendingError):
         if not exc.content_id:
             return "BibiGPT 暂未确认任务是否提交成功，请稍后再点一次“总结视频”。"
@@ -1113,7 +1195,7 @@ def _summary_failure_message(exc: Exception) -> str:
             return "BibiGPT 总结失败: 触发接口限流, 请稍后重试。"
         if is_risk_control(exc):
             return (
-                "BibiGPT 总结失败: 上游返回 B 站风控错误, "
+                "BibiGPT 总结失败: 上游受到视频来源平台风控限制, "
                 "请稍后再点一次“总结视频”。"
             )
         if "service returned an HTML error page" in str(exc):

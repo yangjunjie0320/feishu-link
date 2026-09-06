@@ -106,7 +106,7 @@ platform_cookie_files: {}
 #   youtube: "cookies/youtube.txt"
 #   douyin: "cookies/douyin.txt"
 
-# Optional BibiGPT integration. Mention the bot with a YouTube or Bilibili URL
+# Optional BibiGPT integration. Mention the bot with a YouTube, Bilibili, TikTok or Douyin video URL
 # to send a summary instead of appending the video.
 # Use "web" to call the normal BibiGPT web endpoint. Use "browser" to call the
 # same web endpoint from a persisted Chromium profile when direct HTTP fails.
@@ -131,7 +131,7 @@ bibigpt_cookie_writeback: true
 # until the cooldown passes. 0 disables either.
 bibigpt_summary_cache_ttl_seconds: 1800
 bibigpt_failure_cooldown_seconds: 300
-# Browser mode: Bilibili uses the desktop's server content pipeline directly.
+# Browser mode: Bilibili, TikTok and Douyin videos use the desktop content pipeline.
 # Confirm the server content ID, observe subtitle readiness, then summarize once
 # with our prompt/model. wait_seconds bounds preparation; it is not a verdict
 # that the backend task failed. regenerate is a legacy compatibility setting.
