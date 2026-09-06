@@ -108,6 +108,12 @@ class _BibiRoutes:
     cookie_domain: str
 
 
+@dataclass(frozen=True)
+class _PreparedContent:
+    content_id: str
+    summary_via_pipeline: bool
+
+
 class BibiClient:
     """BibiGPT web API client using cookie-based authentication."""
 
@@ -221,10 +227,46 @@ class BibiClient:
             raw = await self._browser_fetch_json(url, {"0": {"json": payload}})
         return _extract_trpc_data(raw)
 
-    async def _prepare_content(self, video_url: str) -> str:
+    async def _fetch_content_detail(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Match the desktop's fetch-to-content.info compatibility path."""
+        try:
+            fetched = await self._content_pipeline_call("fetch", payload)
+            detail = fetched.get("detail")
+            content_id = detail.get("dbId") if isinstance(detail, dict) else None
+            if not isinstance(content_id, str) or not content_id.strip():
+                raise BibiAPIError(200, "contentPipeline.fetch returned no detail projection.")
+            return detail, True
+        except (BibiAPIError, ValueError) as exc:
+            # Don't send an alternate request for expired auth, rate limits or
+            # bad input. The frontend also uses content.info after wind errors,
+            # transient failures and unavailable pipeline wire projections.
+            if (
+                isinstance(exc, BibiAPIError)
+                and not _is_recoverable(exc)
+                and exc.status_code not in (200, 404, 405, 501)
+            ):
+                raise
+            logger.warning(
+                "BibiGPT content fetch failed, trying content.info: source=%s reason=%s",
+                _source_url_for_log(str(payload.get("url") or "")),
+                str(exc)[:200],
+            )
+        fallback = {
+            "url": payload["url"],
+            "contentId": payload.get("contentId", ""),
+            "audioConfig": payload["audioConfig"],
+            "skipSubtitleTask": payload["target"] == "metadata",
+            "isRefresh": payload["forceFresh"],
+        }
+        url = _trpc_query_url(self._routes.api_base_url, "content.info", fallback)
+        raw = await self._browser_fetch_json(url, None, method="GET")
+        return _extract_trpc_data(raw), False
+
+    async def _prepare_content(self, video_url: str) -> _PreparedContent:
         """Wait for the server's subtitle task, without reading subtitle text."""
         source = _source_url_for_log(video_url)
         content_id = ""
+        summary_via_pipeline = True
         stage = "fetch"
         last_error = ""
         last_status = ""
@@ -243,19 +285,19 @@ class BibiClient:
             async with asyncio.timeout(wait):
                 while True:
                     if stage == "fetch":
-                        fetched = await self._content_pipeline_call("fetch", payload)
-                        detail = fetched.get("detail")
-                        candidate = detail.get("dbId") if isinstance(detail, dict) else None
+                        detail, summary_via_pipeline = await self._fetch_content_detail(payload)
+                        candidate = detail.get("dbId")
                         if not isinstance(candidate, str) or not candidate.strip():
                             raise BibiAPIError(
-                                200, "contentPipeline.fetch returned no server content ID."
+                                200, "BibiGPT content preparation returned no server content ID."
                             )
                         content_id = candidate.strip()
                         logger.info(
-                            "BibiGPT content accepted: source=%s content_id=%s retry=%d",
+                            "BibiGPT content accepted: source=%s content_id=%s retry=%d via=%s",
                             source,
                             content_id,
                             retries,
+                            "contentPipeline.fetch" if summary_via_pipeline else "content.info",
                         )
                         stage = "observe"
                     try:
@@ -288,7 +330,7 @@ class BibiClient:
                         )
                         last_status = status
                     if status == "ready":
-                        return content_id
+                        return _PreparedContent(content_id, summary_via_pipeline)
                     if status == "failed":
                         error_class = str(subtitle.get("errorClass") or "")
                         reason = str(subtitle.get("errorMessage") or "")
@@ -316,13 +358,33 @@ class BibiClient:
 
     async def _summarize_content_pipeline(self, video_url: str, prompt: str) -> SummaryResult:
         """Match the desktop's server protocol, not its local task queue."""
-        content_id = await self._prepare_content(video_url)
-        logger.info("BibiGPT content summarizing: content_id=%s", content_id)
+        prepared = await self._prepare_content(video_url)
+        content_id = prepared.content_id
+        operation = (
+            "contentPipeline.summarize"
+            if prepared.summary_via_pipeline
+            else "video.summaryBySetting"
+        )
+        logger.info(
+            "BibiGPT content summarizing: content_id=%s via=%s",
+            content_id,
+            operation,
+        )
         last_error: BibiAPIError | None = None
         for attempt, delay in enumerate((0.0, *_RECOVERY_DELAYS)):
             if delay:
                 await asyncio.sleep(delay)
             try:
+                if not prepared.summary_via_pipeline:
+                    # The desktop chooses summaryBySetting for content.info
+                    # results. Call the transport once; its risk-control error
+                    # must not recursively rebuild this prepared content.
+                    result = await self._summarize_browser(
+                        video_url, prompt, refresh=attempt == 0
+                    )
+                    result = replace(result, content_id=content_id)
+                    logger.info("BibiGPT content summary complete: content_id=%s", content_id)
+                    return result
                 data = await self._content_pipeline_call(
                     "summarize",
                     {

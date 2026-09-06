@@ -145,7 +145,9 @@ async def test_observation_temporary_error_preserves_accepted_content(
     )
     monkeypatch.setattr(client, "_content_pipeline_call", request)
 
-    assert await client._prepare_content(_VIDEO_URL) == _CONTENT_ID
+    prepared = await client._prepare_content(_VIDEO_URL)
+    assert prepared.content_id == _CONTENT_ID
+    assert prepared.summary_via_pipeline is True
 
     assert [call.args[0] for call in request.await_args_list] == [
         "fetch", "observe", "observe", "observe"
@@ -366,12 +368,17 @@ async def test_pipeline_does_not_accept_client_side_task_id_as_server_ack(
 ) -> None:
     client = _client(tmp_path)
     request = AsyncMock(return_value={"taskId": "task_local_only", **response})
+    legacy = AsyncMock(
+        return_value={"result": {"data": {"json": {"taskId": "task_local_only"}}}}
+    )
     monkeypatch.setattr(client, "_content_pipeline_call", request)
+    monkeypatch.setattr(client, "_browser_fetch_json", legacy)
 
     with pytest.raises(BibiAPIError, match="server content ID"):
         await client.summarize(_VIDEO_URL)
 
     request.assert_awaited_once()
+    legacy.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -499,3 +506,282 @@ async def test_nonrecoverable_prepared_summary_error_propagates_immediately(
 
     assert error.value is upstream_error
     assert [call.args[0] for call in request.await_args_list] == ["fetch", "observe", "summarize"]
+
+
+@pytest.mark.parametrize(
+    "pipeline_outcome",
+    [
+        BibiAPIError(500, "平台风控，稍后再试"),
+        BibiAPIError(524, "edge timeout"),
+        BibiTimeoutError(0, "request timed out"),
+        {},
+        {"detail": {}},
+        {"detail": {"dbId": " "}},
+        {"detail": {"dbId": 123}},
+    ],
+)
+@pytest.mark.parametrize("target,force_fresh", [("subtitle", False), ("metadata", True)])
+async def test_fetch_falls_back_once_to_the_webpage_content_info_protocol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pipeline_outcome: Exception | dict[str, Any],
+    target: str,
+    force_fresh: bool,
+) -> None:
+    client = _client(tmp_path)
+    pipeline = AsyncMock(
+        **(
+            {"side_effect": pipeline_outcome}
+            if isinstance(pipeline_outcome, Exception)
+            else {"return_value": pipeline_outcome}
+        )
+    )
+    detail = {"dbId": _CONTENT_ID, "subtitlesArray": []}
+    legacy = AsyncMock(return_value={"result": {"data": {"json": detail}}})
+    monkeypatch.setattr(client, "_content_pipeline_call", pipeline)
+    monkeypatch.setattr(client, "_browser_fetch_json", legacy)
+    payload = {
+        "url": _VIDEO_URL,
+        "target": target,
+        "forceFresh": force_fresh,
+        "audioConfig": {"audioLanguage": "zh", "transcribeProvider": "auto"},
+        "includeDetail": True,
+        **({"contentId": _CONTENT_ID} if force_fresh else {}),
+    }
+
+    actual, via_pipeline = await client._fetch_content_detail(payload)
+
+    assert actual == detail
+    assert via_pipeline is False
+    pipeline.assert_awaited_once_with("fetch", payload)
+    legacy.assert_awaited_once()
+    args, kwargs = legacy.await_args
+    url = urlsplit(args[0])
+    assert url.netloc == "aitodo.co"
+    assert url.path == "/api/trpc/content.info"
+    assert args[1] is None
+    assert kwargs == {"method": "GET"}
+    assert json.loads(parse_qs(url.query)["input"][0]) == {
+        "json": {
+            "url": _VIDEO_URL,
+            "contentId": _CONTENT_ID if force_fresh else "",
+            "audioConfig": payload["audioConfig"],
+            "skipSubtitleTask": target == "metadata",
+            "isRefresh": force_fresh,
+        }
+    }
+    assert "batch" not in parse_qs(url.query)
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 402, 403, 429])
+async def test_fetch_does_not_retry_account_quota_or_invalid_request_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status_code: int
+) -> None:
+    client = _client(tmp_path)
+    error_type = AuthenticationError if status_code in (401, 403) else BibiAPIError
+    upstream_error = error_type(status_code, "account quota or input requirement")
+    pipeline = AsyncMock(side_effect=upstream_error)
+    legacy = AsyncMock(side_effect=AssertionError("nonrecoverable fetch must stop"))
+    monkeypatch.setattr(client, "_content_pipeline_call", pipeline)
+    monkeypatch.setattr(client, "_browser_fetch_json", legacy)
+
+    with pytest.raises(error_type) as error:
+        await client._prepare_content(_VIDEO_URL)
+
+    assert error.value is upstream_error
+    pipeline.assert_awaited_once()
+    legacy.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "malformed_response",
+    [None, [], "not a tRPC response", {"result": {"data": {"json": None}}}],
+)
+async def test_fetch_invalid_trpc_projection_uses_legacy_compatibility_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, malformed_response: Any
+) -> None:
+    client = _client(tmp_path)
+    wire = AsyncMock(side_effect=[
+        malformed_response,
+        {"result": {"data": {"json": {"dbId": _CONTENT_ID}}}},
+        [{"result": {"data": {"json": _status("ready")}}}],
+    ])
+    monkeypatch.setattr(client, "_browser_fetch_json", wire)
+
+    prepared = await client._prepare_content(_VIDEO_URL)
+
+    assert prepared.content_id == _CONTENT_ID
+    assert prepared.summary_via_pipeline is False
+    assert [urlsplit(call.args[0]).path.rsplit("/", 1)[-1] for call in wire.await_args_list] == [
+        "contentPipeline.fetch", "content.info", "contentPipeline.observe",
+    ]
+
+
+async def test_legacy_fetch_waits_for_pipeline_ready_then_uses_legacy_summary_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path)
+    calls: list[str] = []
+    statuses = iter(["pending", "running", "ready"])
+    config: dict[str, Any] = {}
+
+    async def request(
+        url: str, body: dict[str, Any] | None, *, method: str = "POST"
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        operation = urlsplit(url).path.rsplit("/", 1)[-1]
+        calls.append(operation)
+        if operation == "contentPipeline.fetch":
+            raise BibiAPIError(500, "平台风控，稍后再试")
+        if operation == "content.info":
+            assert method == "GET"
+            return {"result": {"data": {"json": {"dbId": _CONTENT_ID}}}}
+        if operation == "contentPipeline.observe":
+            assert method == "GET"
+            assert json.loads(parse_qs(urlsplit(url).query)["input"][0]) == {
+                "json": {"contentId": _CONTENT_ID}
+            }
+            return [{"result": {"data": {"json": _status(next(statuses))}}}]
+        assert operation == "video.summaryBySetting"
+        assert method == "POST"
+        assert calls[-4:-1] == ["contentPipeline.observe"] * 3
+        assert body is not None
+        config.update(body["0"]["json"]["promptConfig"])
+        return [{"result": {"data": {"json": {
+            "summary": "- legacy completed", "contentId": "a-different-summary-id"
+        }}}}]
+
+    forbidden = AsyncMock(side_effect=AssertionError("must not enter recursive recovery"))
+    monkeypatch.setattr(client, "_browser_fetch_json", request)
+    monkeypatch.setattr(client, "_summarize_with_recovery", forbidden)
+    monkeypatch.setattr(client, "_recover_via_lookup", forbidden)
+
+    result = await client.summarize(_VIDEO_URL, prompt="Preserve each technical example")
+
+    assert result.content == "- legacy completed"
+    assert result.content_id == _CONTENT_ID
+    assert calls == [
+        "contentPipeline.fetch", "content.info", "contentPipeline.observe",
+        "contentPipeline.observe", "contentPipeline.observe", "video.summaryBySetting",
+    ]
+    assert config["model"] == "configured-model"
+    assert config["customPrompt"].startswith("Preserve each technical example")
+    assert config["isRefresh"] is True
+    forbidden.assert_not_awaited()
+
+
+@pytest.mark.parametrize("eventual_success", [True, False])
+async def test_legacy_summary_recovery_never_resubmits_subtitle_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, eventual_success: bool
+) -> None:
+    client = _client(tmp_path)
+    request = AsyncMock(side_effect=[BibiAPIError(500, "平台风控 fetch"), _status("ready")])
+    legacy_fetch = AsyncMock(
+        return_value={"result": {"data": {"json": {"dbId": _CONTENT_ID}}}}
+    )
+    errors = [BibiAPIError(500, f"平台风控 summary {attempt}") for attempt in range(1, 5)]
+    legacy_summary = AsyncMock(
+        side_effect=[*errors[:3], _result()] if eventual_success else errors
+    )
+    recursive = AsyncMock(side_effect=AssertionError("must not recursively restart pipeline"))
+    monkeypatch.setattr(client, "_content_pipeline_call", request)
+    monkeypatch.setattr(client, "_browser_fetch_json", legacy_fetch)
+    monkeypatch.setattr(client, "_summarize_browser", legacy_summary)
+    monkeypatch.setattr(client, "_summarize_with_recovery", recursive)
+    monkeypatch.setattr(client, "_recover_via_lookup", recursive)
+    monkeypatch.setattr("src.bibi_client._RECOVERY_DELAYS", (0, 0, 0))
+
+    if eventual_success:
+        result = await client.summarize(_VIDEO_URL, prompt="Original prompt")
+        assert result.content_id == _CONTENT_ID
+    else:
+        with pytest.raises(BibiContentPendingError) as error:
+            await client.summarize(_VIDEO_URL, prompt="Original prompt")
+        assert error.value.content_id == _CONTENT_ID
+        assert error.value.stage == "summarize"
+        assert error.value.last_error == str(errors[-1])
+        assert error.value.__cause__ is errors[-1]
+
+    assert [call.args[0] for call in request.await_args_list] == ["fetch", "observe"]
+    legacy_fetch.assert_awaited_once()
+    assert len(legacy_summary.await_args_list) == 4
+    assert [call.kwargs["refresh"] for call in legacy_summary.await_args_list] == [
+        True, False, False, False
+    ]
+    assert all(
+        call.args[0] == _VIDEO_URL and call.args[1].startswith("Original prompt")
+        for call in legacy_summary.await_args_list
+    )
+    recursive.assert_not_awaited()
+
+
+async def test_both_content_fetch_routes_failing_preserves_final_upstream_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path)
+    final_error = BibiAPIError(503, "legacy extractor unavailable")
+    pipeline = AsyncMock(side_effect=BibiAPIError(500, "平台风控"))
+    legacy = AsyncMock(side_effect=final_error)
+    monkeypatch.setattr(client, "_content_pipeline_call", pipeline)
+    monkeypatch.setattr(client, "_browser_fetch_json", legacy)
+
+    with pytest.raises(BibiAPIError) as error:
+        await client.summarize(_VIDEO_URL)
+
+    assert error.value is final_error
+    pipeline.assert_awaited_once()
+    legacy.assert_awaited_once()
+
+
+async def test_hanging_legacy_fetch_uses_the_same_total_wait_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path, bibigpt_web_queue_wait_seconds=0.4)
+    legacy_cancelled = asyncio.Event()
+
+    async def pipeline(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        await asyncio.sleep(0.3)
+        raise BibiAPIError(500, "平台风控 before legacy fallback")
+
+    async def legacy(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            legacy_cancelled.set()
+        raise AssertionError("cancelled legacy fetch cannot finish")
+
+    monkeypatch.setattr(client, "_content_pipeline_call", pipeline)
+    monkeypatch.setattr(client, "_browser_fetch_json", legacy)
+
+    async with asyncio.timeout(0.6):
+        with pytest.raises(BibiContentPendingError) as error:
+            await client._prepare_content(_VIDEO_URL)
+
+    assert legacy_cancelled.is_set()
+    assert error.value.content_id == ""
+    assert error.value.stage == "fetch"
+
+
+async def test_external_cancellation_stops_legacy_fetch_without_further_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path)
+    legacy_started = asyncio.Event()
+    pipeline = AsyncMock(side_effect=BibiAPIError(500, "平台风控"))
+
+    async def legacy(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        legacy_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("cancelled legacy fetch cannot finish")
+
+    legacy_request = AsyncMock(side_effect=legacy)
+    monkeypatch.setattr(client, "_content_pipeline_call", pipeline)
+    monkeypatch.setattr(client, "_browser_fetch_json", legacy_request)
+    task = asyncio.create_task(client.summarize(_VIDEO_URL))
+    await legacy_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    pipeline.assert_awaited_once()
+    legacy_request.assert_awaited_once()
