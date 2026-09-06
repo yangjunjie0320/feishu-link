@@ -71,7 +71,9 @@ class OGMetaParser:
             site_name=meta.get("og:site_name") or domain,
             platform=platform,
             canonical_url=canonical,
-            media_type=MediaType.VIDEO if "video" in meta.get("og:type", "") else MediaType.ARTICLE,
+            media_type=MediaType.VIDEO if "video" in meta.get("og:type", "") else (
+                MediaType.UNKNOWN if platform == "instagram" else MediaType.ARTICLE
+            ),
             cover_candidates=covers,
             has_visual=True if covers else None,
             content_verified=(
@@ -111,6 +113,10 @@ class OGMetaParser:
                 return result
             raise ParserError(url, exc.reason) from exc
         structured.source_url = url
+        if platform == "instagram" and structured.media_type != MediaType.UNKNOWN:
+            # OG describes the whole post or its poster. Preserve an explicit
+            # native media/selected carousel type instead of replacing it.
+            result.media_type = MediaType.UNKNOWN
         merge_metadata(structured, result)
         return structured
 

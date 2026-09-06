@@ -230,7 +230,9 @@ def _base(url: str, final_url: str, platform: str, kind: str) -> LinkMetadata:
         platform=platform,
         site_name=_LABELS[platform],
         content_verified=True,
-        media_type=MediaType.ARTICLE
+        media_type=MediaType.UNKNOWN
+        if platform == "instagram"
+        else MediaType.ARTICLE
         if kind in {"photo", "note", "slides", "p", "post"}
         else MediaType.VIDEO,
         has_visual=True if platform != "x" else None,
@@ -258,6 +260,34 @@ def _instagram_images(node: dict[str, Any], image_index: int | None) -> list[str
     return _image_urls(
         [node.get("display_url"), node.get("thumbnail_src"), node.get("image_versions2")]
     )
+
+
+def _instagram_media_type(node: dict[str, Any], image_index: int | None) -> MediaType:
+    children = node.get("carousel_media") or [
+        _at(child, "node") for child in _at(node, "edge_sidecar_to_children", "edges") or []
+    ]
+    if isinstance(children, list) and children:
+        index = image_index - 1 if image_index else 0
+        if index < len(children) and isinstance(children[index], dict):
+            selected = _instagram_media_type(children[index], None)
+            if selected != MediaType.UNKNOWN:
+                return selected
+        return MediaType.ARTICLE
+    if (
+        node.get("is_video") is True
+        or node.get("media_type") == 2
+        or node.get("__typename") == "GraphVideo"
+    ):
+        return MediaType.VIDEO
+    if (
+        node.get("is_video") is False
+        or node.get("media_type") in (1, 8)
+        or node.get("__typename") in ("GraphImage", "GraphSidecar")
+    ):
+        return MediaType.ARTICLE
+    # Public pages may expose only a caption and thumbnail for a Reel.
+    # A missing video flag does not prove this is a photo.
+    return MediaType.UNKNOWN
 
 
 def _structured_fields(
@@ -315,9 +345,7 @@ def _structured_fields(
             or _text(_at(node, "user", "username"))
             or None,
             "cover_candidates": covers,
-            "media_type": MediaType.VIDEO
-            if node.get("is_video") or node.get("media_type") == 2
-            else MediaType.ARTICLE,
+            "media_type": _instagram_media_type(node, image_index),
             "like_count": _number(
                 node.get("like_count")
                 if "like_count" in node
@@ -392,7 +420,10 @@ def _jsonld_fields(node: dict[str, Any], platform: str, content_id: str) -> dict
         "description": _usable(node.get("description") or node.get("articleBody")),
         "channel": _text(author if isinstance(author, str) else author.get("name")) or None,
         "cover_candidates": _image_urls([node.get("thumbnailUrl"), node.get("image")]),
-        "media_type": MediaType.VIDEO if node.get("@type") == "VideoObject" else MediaType.ARTICLE,
+        "media_type": {
+            "VideoObject": MediaType.VIDEO,
+            "ImageObject": MediaType.ARTICLE,
+        }.get(node["@type"], MediaType.UNKNOWN),
     }
 
 
@@ -401,6 +432,8 @@ def _apply(meta: LinkMetadata, fields: dict[str, Any]) -> None:
         if key == "cover_candidates":
             meta.cover_candidates = list(dict.fromkeys([*meta.cover_candidates, *value]))[:12]
             meta.cover_url = next(iter(meta.cover_candidates), "")
+        elif key == "media_type" and value == MediaType.UNKNOWN:
+            continue
         elif value is not None and value != "":
             if key in {"title", "description"} and len(str(value)) < len(getattr(meta, key)):
                 continue
@@ -498,6 +531,7 @@ def parse_page_metadata(
     meta = _base(url, final, platform, kind)
     matched_structure = False
     photo_cover_candidates: list[str] | None = None
+    instagram_media_type = MediaType.UNKNOWN
     for tag in soup.select('meta[property="og:url"], link[rel="canonical"]'):
         value = str(tag.get("content") or tag.get("href") or "")
         if value and page_identity(urljoin(final, value))[:2] != (platform, content_id):
@@ -505,6 +539,12 @@ def parse_page_metadata(
     for payload in [*_script_payloads(soup), *payloads]:
         for key, node in _walk(payload):
             fields = _structured_fields(node, key, platform, content_id, _image_index(url))
+            if (
+                fields is not None
+                and platform == "instagram"
+                and fields["media_type"] != MediaType.UNKNOWN
+            ):
+                instagram_media_type = fields["media_type"]
             if fields is not None and platform in {"tiktok", "douyin"}:
                 images = node.get("images") or _at(node, "imagePost", "images")
                 if isinstance(images, list) and images:
@@ -551,6 +591,10 @@ def parse_page_metadata(
         meta.cover_candidates = photo_cover_candidates
         meta.cover_url = next(iter(photo_cover_candidates), "")
         meta.media_type = MediaType.ARTICLE
+    if instagram_media_type != MediaType.UNKNOWN:
+        # Native media and the selected carousel child identify the actual item
+        # more precisely than post-level JSON-LD, which can describe its poster.
+        meta.media_type = instagram_media_type
     if is_placeholder(meta.title, platform, url):
         meta.title = ""
     if is_placeholder(meta.description, platform, url):
