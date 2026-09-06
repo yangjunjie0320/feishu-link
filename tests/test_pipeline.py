@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.archive_store import BibiLinkUpdate, RemarkAppend
-from src.bibi_client import AuthenticationError, BibiAPIError, TranscriptUnavailableError
+from src.bibi_client import (
+    AuthenticationError,
+    BibiAPIError,
+    BibiContentPendingError,
+    TranscriptUnavailableError,
+)
 from src.bibi_models import (
     ChapterSummaryFetchResult,
     ChapterSummarySection,
@@ -159,7 +164,7 @@ def test_summary_failure_message_for_bilibili_risk_control() -> None:
         BibiAPIError(500, '[{"error":{"json":{"message":"平台风控，稍后再试"}}}]')
     )
     assert "风控" in message
-    assert "排队" in message
+    assert "排队" not in message
 
 
 def test_summary_failure_message_for_rate_limit() -> None:
@@ -773,6 +778,63 @@ async def test_summary_cache_and_cooldown_disabled_by_zero() -> None:
     assert pipeline._bibi_client.summarize.await_count == 4
     assert pipeline._recent_summaries == {}
     assert pipeline._summary_failures == {}
+
+
+async def test_pending_content_does_not_cool_down_or_report_task_failed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pipeline = _summary_pipeline_with(Settings())
+    pipeline._bibi_client.summarize = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            BibiContentPendingError("content-pending", "observe", "network unavailable"),
+            _summary_result(),
+        ]
+    )
+    url = "https://youtu.be/abc123"
+
+    with caplog.at_level(logging.INFO, logger="src.pipeline"):
+        await pipeline._try_send_bibigpt_summary(url, _summary_event())
+
+    message = pipeline._text_sender.send.await_args.args[0]
+    assert "后台任务可能仍在继续" in message
+    assert "https://aitodo.co/content/content-pending" in message
+    assert "失败" not in message
+    assert "summary still pending" in caplog.text
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+    assert pipeline._summary_failures == {}
+    assert pipeline._inflight_summaries == {}
+
+    await pipeline._try_send_bibigpt_summary(url, _summary_event())
+    assert pipeline._bibi_client.summarize.await_count == 2
+    assert pipeline._sender.send.await_count == 1
+
+
+async def test_cancelling_shared_summary_waiter_preserves_owner_result() -> None:
+    pipeline = _summary_pipeline_with(Settings())
+    started = asyncio.Event()
+    release = asyncio.Event()
+    expected = _summary_result()
+
+    async def generate(*args: object, **kwargs: object) -> SummaryResult:
+        started.set()
+        await release.wait()
+        return expected
+
+    pipeline._bibi_client.summarize = AsyncMock(side_effect=generate)  # type: ignore[method-assign]
+    url = "https://youtu.be/abc123"
+    owner = asyncio.create_task(pipeline._shared_default_summary(url, "owner"))
+    await started.wait()
+    waiter = asyncio.create_task(pipeline._shared_default_summary(url, "waiter"))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    release.set()
+
+    assert await owner is expected
+    assert pipeline._bibi_client.summarize.await_count == 1
+    assert pipeline._inflight_summaries == {}
+    assert pipeline._recent_summaries[url][1] is expected
 
 
 async def test_summary_custom_prompt_bypasses_recent_cache() -> None:

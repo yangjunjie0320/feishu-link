@@ -16,7 +16,10 @@ from .bibi_client import (
     AuthenticationError,
     BibiAPIError,
     BibiClient,
+    BibiContentPendingError,
+    BibiContentTaskError,
     TranscriptUnavailableError,
+    is_risk_control,
     share_page_url,
 )
 from .bibi_models import SummaryResult
@@ -520,7 +523,15 @@ class Pipeline:
                     source_url=url,
                 )
             except Exception as e:
-                if isinstance(e, SummaryCooldownError):
+                if isinstance(e, BibiContentPendingError):
+                    logger.info(
+                        "summary still pending: message_id=%s content_id=%s stage=%s last_error=%s",
+                        event.message_id,
+                        e.content_id or "unconfirmed",
+                        e.stage,
+                        e.last_error[:200] or "none",
+                    )
+                elif isinstance(e, SummaryCooldownError):
                     logger.info(
                         "summary cooling down: message_id=%s remaining=%ds",
                         event.message_id,
@@ -534,8 +545,13 @@ class Pipeline:
                         getattr(e, "status_code", "n/a"),
                         str(e)[:300],
                     )
+                failure_message = _summary_failure_message(e)
+                if isinstance(e, BibiContentPendingError) and e.content_id:
+                    failure_message += "\nBibiGPT 页面: " + share_page_url(
+                        self._settings.bibigpt_base_url, url, e.content_id
+                    )
                 await self._text_sender.send(
-                    _summary_failure_message(e),
+                    failure_message,
                     event.chat_id,
                     event.message_id,
                 )
@@ -619,7 +635,7 @@ class Pipeline:
                 message_id,
                 owner_message_id,
             )
-            return await future
+            return await asyncio.shield(future)
 
         future: asyncio.Future[SummaryResult] = asyncio.get_running_loop().create_future()
         self._inflight_summaries[url] = (message_id, future)
@@ -631,7 +647,7 @@ class Pipeline:
             if isinstance(e, Exception):
                 future.set_exception(e)
                 cooldown = self._settings.bibigpt_failure_cooldown_seconds
-                if cooldown > 0:
+                if cooldown > 0 and not isinstance(e, BibiContentPendingError):
                     _remember(
                         self._summary_failures,
                         url,
@@ -921,6 +937,25 @@ def _friendly_download_reason(reason: str) -> str:
 
 
 def _summary_failure_message(exc: Exception) -> str:
+    if isinstance(exc, BibiContentPendingError):
+        if not exc.content_id:
+            return "BibiGPT 暂未确认任务是否提交成功，请稍后再点一次“总结视频”。"
+        return (
+            "BibiGPT 暂未返回处理结果，后台任务可能仍在继续。"
+            "可在 BibiGPT 页面查看进度，稍后再点一次“总结视频”。"
+        )
+
+    if isinstance(exc, BibiContentTaskError):
+        if exc.error_class == "auth_required":
+            return (
+                "BibiGPT 获取字幕需要视频来源平台的登录或授权。"
+                "请在 BibiGPT 页面完成该视频的源平台授权后重试。"
+            )
+        return (
+            "BibiGPT 字幕处理任务未完成，服务端已报告失败。"
+            "可在 BibiGPT 页面检查该视频并重试。"
+        )
+
     if isinstance(exc, SummaryCooldownError):
         wait = exc.remaining_seconds
         wait_text = f"{wait} 秒" if wait < 120 else f"{round(wait / 60)} 分钟"
@@ -953,17 +988,17 @@ def _summary_failure_message(exc: Exception) -> str:
             )
         if status == 429:
             return "BibiGPT 总结失败: 触发接口限流, 请稍后重试。"
-        if "平台风控" in body:
+        if is_risk_control(exc):
             return (
-                "BibiGPT 总结失败: BibiGPT 抓取 B 站字幕被风控拦截, "
-                "已自动排队等待转写仍失败, 请过几分钟再点一次“总结视频”。"
+                "BibiGPT 总结失败: 上游返回 B 站风控错误, "
+                "请稍后再点一次“总结视频”。"
             )
         if "service returned an HTML error page" in str(exc):
             return (
                 f"BibiGPT 总结失败: 服务返回了 HTML 错误页 (HTTP {status}), "
                 "可能是登录态异常或服务端临时异常, 请稍后重试。"
             )
-        if status in (500, 502, 503, 504) or status == 0 or "Connection error" in body:
+        if status in (500, 502, 503, 504, 524) or status == 0 or "Connection error" in body:
             suffix = f" (HTTP {status})" if status else ""
             return (
                 f"BibiGPT 总结失败: BibiGPT 服务端暂时不稳定{suffix}, 通常是临时故障, 请稍后重试。"

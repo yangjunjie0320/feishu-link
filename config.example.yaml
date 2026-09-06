@@ -112,10 +112,10 @@ bibigpt_cookie_writeback: true
 # until the cooldown passes. 0 disables either.
 bibigpt_summary_cache_ttl_seconds: 1800
 bibigpt_failure_cooldown_seconds: 300
-# Browser mode only: when BibiGPT answers 500 "平台风控" (bilibili blocked its
-# fetch), submit the link through the web UI so BibiGPT's own queue transcribes
-# the audio, then poll every poll_seconds for up to wait_seconds. regenerate
-# re-runs the summary with our prompt once the queue has delivered.
+# Browser mode: Bilibili uses the desktop's server content pipeline directly.
+# Confirm the server content ID, observe subtitle readiness, then summarize once
+# with our prompt/model. wait_seconds bounds preparation; it is not a verdict
+# that the backend task failed. regenerate is a legacy compatibility setting.
 bibigpt_web_queue_enabled: true
 bibigpt_web_queue_poll_seconds: 45
 bibigpt_web_queue_wait_seconds: 600

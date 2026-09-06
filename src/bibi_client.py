@@ -23,6 +23,7 @@ from .browser_session import BrowserUnavailableError, persistent_context
 from .config import Settings
 from .cookie_refresh import write_netscape
 from .cookie_utils import get_cookie_header, playwright_cookies_from_file
+from .platforms import detect_platform, normalize_url
 
 logger = logging.getLogger(__name__)
 
@@ -31,27 +32,14 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 )
 _CONTENT_ID_RECOVERY_DELAYS: tuple[float, ...] = (3.0, 8.0)
-# Failures BibiGPT keeps working on after answering: bilibili risk control
-# (500 "平台风控") while its backend still transcribes in the background, and
-# Cloudflare cutting the connection at ~100 s (524) mid-generation. In both
-# cases an isRefresh=false request ~30 s later returns the finished record;
-# repeating the same request only trips the same block again.
-_RECOVERABLE_STATUSES = frozenset({500, 502, 504, 524})
+# Prefer an existing result after transient failures; isRefresh=false may still
+# generate on a cache miss. It is not a background-task status query.
+_RECOVERABLE_STATUSES = frozenset({408, 500, 502, 503, 504, 524})
 _RECOVERY_DELAYS: tuple[float, ...] = (30.0, 60.0, 90.0)
-# bilibili risk control is the one failure the lookups above cannot fix: only
-# BibiGPT's server-side queue (what the web UI submits to) falls back to audio
-# transcription. So we submit through the web UI like a person would.
+# The desktop toast acknowledges a LOCAL queue, before its worker submits to
+# contentPipeline.fetch. Use the server's content ID and observe protocol.
 _RISK_CONTROL_MARKER = "平台风控"
-_WEB_QUEUE_INPUT_SELECTOR = 'textarea[placeholder*="音视频链接"]'
-_WEB_QUEUE_ACCEPT_TIMEOUT_MS = 8000
-# Accepted once the box is cleared (also how the UI de-duplicates a link that
-# is already queued) or the "added to queue" toast shows up.
-_WEB_QUEUE_ACCEPTED_JS = """(selector) => {
-    const box = document.querySelector(selector);
-    const cleared = !!box && box.value.trim() === '';
-    const text = document.body ? document.body.innerText : '';
-    return cleared || text.includes('已添加到处理队列');
-}"""
+_CONTENT_WATCHDOG_RETRIES = 2
 _OUTPUT_INSTRUCTIONS = """\
 
 输出要求:
@@ -82,6 +70,33 @@ class TranscriptUnavailableError(BibiAPIError):
 
 class BibiTimeoutError(BibiAPIError):
     """Raised when the local browser or HTTP request to BibiGPT times out."""
+
+
+class BibiContentPendingError(BibiTimeoutError):
+    """Local waiting ended without proving that the server task failed."""
+
+    def __init__(self, content_id: str, stage: str, last_error: str = "") -> None:
+        self.content_id = content_id
+        self.stage = stage
+        self.last_error = last_error
+        super().__init__(
+            0,
+            f"BibiGPT content wait timed out: stage={stage} "
+            f"content_id={content_id or 'unconfirmed'} last_error={last_error or 'none'}",
+        )
+
+
+class BibiContentTaskError(BibiAPIError):
+    """The server explicitly marked subtitle preparation as failed."""
+
+    def __init__(self, content_id: str, error_class: str, reason: str) -> None:
+        self.content_id = content_id
+        self.error_class = error_class
+        super().__init__(
+            500,
+            f"BibiGPT subtitle task failed: content_id={content_id} "
+            f"error_class={error_class or 'unknown'} reason={reason or 'not provided'}",
+        )
 
 
 @dataclass(frozen=True)
@@ -146,7 +161,10 @@ class BibiClient:
         # isRefresh=true makes BibiGPT generate with our prompt/model instead of
         # handing back whatever record it has (possibly made with other settings
         # on the web). Recovery lookups after a failure drop the flag on purpose.
-        result = await self._summarize_with_recovery(video_url, effective_prompt, refresh=True)
+        if self._content_pipeline_enabled() and detect_platform(video_url) == "bilibili":
+            result = await self._summarize_content_pipeline(video_url, effective_prompt)
+        else:
+            result = await self._summarize_with_recovery(video_url, effective_prompt, refresh=True)
         if self._settings.bibigpt_access_mode == "browser" and not result.content_id:
             result = await self._recover_content_id(result, effective_prompt)
         return result
@@ -173,117 +191,169 @@ class BibiClient:
         except (AuthenticationError, TranscriptUnavailableError):
             raise
         except BibiAPIError as exc:
+            if self._web_queue_applies(exc):
+                return await self._summarize_content_pipeline(video_url, prompt)
             if not _is_recoverable(exc):
                 raise
-            if self._web_queue_applies(exc):
-                return await self._recover_via_web_queue(video_url, prompt, exc)
             return await self._recover_via_lookup(video_url, prompt, exc)
         except ValueError as exc:
             # Record exists but carries no summary yet: BibiGPT is still on it.
             return await self._recover_via_lookup(video_url, prompt, exc)
 
-    def _web_queue_applies(self, exc: BibiAPIError) -> bool:
+    def _content_pipeline_enabled(self) -> bool:
         return (
             self._settings.bibigpt_web_queue_enabled
             and self._settings.bibigpt_access_mode == "browser"
-            and _RISK_CONTROL_MARKER in (exc.body or "")
         )
 
-    async def _enqueue_via_web_ui(self, video_url: str) -> bool:
-        """Type the link into the desktop page's input box and press Enter,
-        exactly as a person would, so BibiGPT's server-side queue takes it."""
-        try:
-            async with self._browser_page() as page:
-                box = page.locator(_WEB_QUEUE_INPUT_SELECTOR)
-                if await box.count() == 0:
-                    logger.warning(
-                        "BibiGPT web queue: input box not found on %s",
-                        self._routes.browser_page_url,
-                    )
-                    return False
-                await box.first.fill(video_url)
-                await page.keyboard.press("Enter")
-                await page.wait_for_function(
-                    _WEB_QUEUE_ACCEPTED_JS,
-                    arg=_WEB_QUEUE_INPUT_SELECTOR,
-                    timeout=_WEB_QUEUE_ACCEPT_TIMEOUT_MS,
-                )
-                return True
-        except BibiAPIError as exc:  # _browser_page wraps Playwright failures
-            logger.warning("BibiGPT web queue submit failed: %s", exc)
-            return False
-        except Exception as exc:
-            logger.warning(
-                "BibiGPT web queue submit not confirmed: %s: %s",
-                exc.__class__.__name__,
-                str(exc)[:200],
-            )
-            return False
+    def _web_queue_applies(self, exc: BibiAPIError) -> bool:
+        return self._content_pipeline_enabled() and is_risk_control(exc)
 
-    async def _recover_via_web_queue(
-        self,
-        video_url: str,
-        prompt: str,
-        original: BibiAPIError,
-    ) -> SummaryResult:
+    async def _content_pipeline_call(
+        self, operation: str, payload: dict[str, Any], *, query: bool = False
+    ) -> dict[str, Any]:
+        endpoint = f"contentPipeline.{operation}"
+        if query:
+            url = _trpc_query_url(self._routes.api_base_url, endpoint, payload)
+            raw = await self._browser_fetch_json(url, None, method="GET")
+        else:
+            url = f"{self._routes.api_base_url}/api/trpc/{endpoint}?batch=1"
+            raw = await self._browser_fetch_json(url, {"0": {"json": payload}})
+        return _extract_trpc_data(raw)
+
+    async def _prepare_content(self, video_url: str) -> str:
+        """Wait for the server's subtitle task, without reading subtitle text."""
         source = _source_url_for_log(video_url)
-        logger.warning(
-            "BibiGPT blocked by bilibili risk control, submitting through web queue: %s",
-            source,
-        )
-        if not await self._enqueue_via_web_ui(video_url):
-            return await self._recover_via_lookup(video_url, prompt, original)
-        logger.info("BibiGPT web queue enqueued: %s", source)
-
-        poll = max(self._settings.bibigpt_web_queue_poll_seconds, 0)
-        wait = max(self._settings.bibigpt_web_queue_wait_seconds, 0)
+        content_id = ""
+        stage = "fetch"
+        last_error = ""
+        last_status = ""
+        retries = 0
         started = time.monotonic()
-        deadline = started + wait
-        attempt = 0
-        result: SummaryResult | None = None
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            await asyncio.sleep(min(poll, remaining))
-            attempt += 1
-            try:
-                lookup = await self._summarize_once(video_url, prompt, refresh=False)
-            except (AuthenticationError, TranscriptUnavailableError):
-                raise
-            except (BibiAPIError, ValueError) as exc:
-                logger.info("BibiGPT web queue poll %d not ready: %s", attempt, str(exc)[:160])
-                continue
-            if lookup.content.strip():
-                result = lookup
-                break
-            logger.info("BibiGPT web queue poll %d returned no summary yet", attempt)
-        if result is None:
-            logger.warning(
-                "BibiGPT web queue exhausted after %ds (%d polls): %s", wait, attempt, source
-            )
-            raise original
-        logger.info(
-            "BibiGPT web queue succeeded after %.0fs (%d polls, content_id=%s)",
-            time.monotonic() - started,
-            attempt,
-            result.content_id or "missing",
-        )
-        if not self._settings.bibigpt_web_queue_regenerate:
-            return result
+        wait = max(self._settings.bibigpt_web_queue_wait_seconds, 0)
+        interval = max(self._settings.bibigpt_web_queue_poll_seconds, 0.01)
+        payload: dict[str, Any] = {
+            "url": normalize_url(video_url),
+            "target": "subtitle",
+            "forceFresh": False,
+            "audioConfig": {"audioLanguage": "auto", "transcribeProvider": "auto"},
+            "includeDetail": True,
+        }
         try:
-            regenerated = await self._summarize_once(video_url, prompt, refresh=True)
-        except (AuthenticationError, TranscriptUnavailableError):
-            raise
-        except (BibiAPIError, ValueError) as exc:
-            logger.warning(
-                "BibiGPT regenerate after web queue failed, keeping queue result: %s", exc
+            async with asyncio.timeout(wait):
+                while True:
+                    if stage == "fetch":
+                        fetched = await self._content_pipeline_call("fetch", payload)
+                        detail = fetched.get("detail")
+                        candidate = detail.get("dbId") if isinstance(detail, dict) else None
+                        if not isinstance(candidate, str) or not candidate.strip():
+                            raise BibiAPIError(
+                                200, "contentPipeline.fetch returned no server content ID."
+                            )
+                        content_id = candidate.strip()
+                        logger.info(
+                            "BibiGPT content accepted: source=%s content_id=%s retry=%d",
+                            source,
+                            content_id,
+                            retries,
+                        )
+                        stage = "observe"
+                    try:
+                        observed = await self._content_pipeline_call(
+                            "observe", {"contentId": content_id}, query=True
+                        )
+                    except BibiAPIError as exc:
+                        if not _is_recoverable(exc):
+                            raise
+                        last_error = str(exc)
+                        logger.warning(
+                            "BibiGPT content observation failed: content_id=%s reason=%s",
+                            content_id,
+                            last_error[:200],
+                        )
+                        await asyncio.sleep(interval)
+                        continue
+                    subtitle = observed.get("subtitle")
+                    status = subtitle.get("status") if isinstance(subtitle, dict) else None
+                    if not isinstance(status, str) or not status:
+                        raise BibiAPIError(
+                            200, "contentPipeline.observe returned no subtitle task status."
+                        )
+                    if status != last_status:
+                        logger.info(
+                            "BibiGPT content status: content_id=%s status=%s elapsed=%.0fs",
+                            content_id,
+                            status,
+                            time.monotonic() - started,
+                        )
+                        last_status = status
+                    if status == "ready":
+                        return content_id
+                    if status == "failed":
+                        error_class = str(subtitle.get("errorClass") or "")
+                        reason = str(subtitle.get("errorMessage") or "")
+                        if (
+                            error_class == "watchdog_timeout"
+                            and retries < _CONTENT_WATCHDOG_RETRIES
+                        ):
+                            retries += 1
+                            payload.update(contentId=content_id, forceFresh=True)
+                            stage = "fetch"
+                            last_error = reason or error_class
+                            logger.warning(
+                                "BibiGPT subtitle watchdog retry: content_id=%s retry=%d",
+                                content_id,
+                                retries,
+                            )
+                            await asyncio.sleep(interval)
+                            continue
+                        raise BibiContentTaskError(content_id, error_class, reason)
+                    await asyncio.sleep(interval)
+        except BibiTimeoutError as exc:
+            raise BibiContentPendingError(content_id, stage, str(exc)) from exc
+        except TimeoutError as exc:
+            raise BibiContentPendingError(content_id, stage, last_error) from exc
+
+    async def _summarize_content_pipeline(self, video_url: str, prompt: str) -> SummaryResult:
+        """Match the desktop's server protocol, not its local task queue."""
+        content_id = await self._prepare_content(video_url)
+        logger.info("BibiGPT content summarizing: content_id=%s", content_id)
+        last_error: BibiAPIError | None = None
+        for attempt, delay in enumerate((0.0, *_RECOVERY_DELAYS)):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                data = await self._content_pipeline_call(
+                    "summarize",
+                    {
+                        "url": normalize_url(video_url),
+                        "promptConfig": _web_prompt_config(
+                            prompt, model=self._settings.bibigpt_model, refresh=attempt == 0
+                        ),
+                    },
+                )
+            except BibiAPIError as exc:
+                if not _is_recoverable(exc):
+                    raise
+                last_error = exc
+                logger.warning(
+                    "BibiGPT prepared summary request failed: content_id=%s attempt=%d reason=%s",
+                    content_id,
+                    attempt + 1,
+                    str(exc)[:200],
+                )
+                continue
+            summary = data.get("summaryText")
+            if not isinstance(summary, str) or not summary.strip():
+                raise BibiAPIError(200, "contentPipeline.summarize returned no summaryText.")
+            result = _validate_summary_result(
+                SummaryResult.from_web_response(
+                    {"summary": summary.strip(), "contentId": content_id}, video_url=video_url
+                )
             )
+            logger.info("BibiGPT content summary complete: content_id=%s", content_id)
             return result
-        if regenerated.content.strip():
-            logger.info("BibiGPT regenerated with own prompt after web queue")
-            return regenerated
-        return result
+        raise BibiContentPendingError(content_id, "summarize", str(last_error)) from last_error
 
     async def _recover_via_lookup(
         self,
@@ -291,43 +361,46 @@ class BibiClient:
         prompt: str,
         original: Exception,
     ) -> SummaryResult:
+        source = _source_url_for_log(video_url)
         logger.warning(
-            "BibiGPT request failed, polling stored result for %s: %s",
-            _source_url_for_log(video_url),
-            original,
+            "BibiGPT request failed, checking existing result for %s: %s", source, original
         )
+        last_error = original
         for delay in _RECOVERY_DELAYS:
             await asyncio.sleep(delay)
             try:
-                lookup = await self._summarize_once(video_url, prompt, refresh=False)
+                result = await self._summarize_once(video_url, prompt, refresh=False)
+                if result.content.strip():
+                    return result
             except (AuthenticationError, TranscriptUnavailableError):
                 raise
-            except (BibiAPIError, ValueError) as exc:
-                logger.warning("BibiGPT recovery lookup failed: %s", exc)
-                continue
-            if lookup.content.strip():
-                logger.info(
-                    "BibiGPT recovery lookup succeeded (content_id=%s, cached=%s)",
-                    lookup.content_id or "missing",
-                    lookup.from_cache,
-                )
-                return lookup
-            logger.warning("BibiGPT recovery lookup returned no summary yet")
+            except BibiAPIError as exc:
+                if self._web_queue_applies(exc):
+                    return await self._summarize_content_pipeline(video_url, prompt)
+                if not _is_recoverable(exc):
+                    raise
+                last_error = exc
+                logger.warning("BibiGPT recovery lookup failed: source=%s reason=%s", source, exc)
+            except ValueError as exc:
+                last_error = exc
+                logger.info("BibiGPT recovery lookup returned no summary: source=%s", source)
         logger.warning(
-            "BibiGPT recovery exhausted retries for %s",
-            _source_url_for_log(video_url),
+            "BibiGPT recovery exhausted: source=%s initial=%s last_error=%s",
+            source,
+            original,
+            last_error,
         )
-        raise original
+        raise last_error
+
 
     async def summarize_cached(
         self,
         video_url: str,
         prompt: str | None = None,
     ) -> SummaryResult | None:
-        """Fetch the already-generated summary for a video: isRefresh=false
-        returns BibiGPT's stored record without regenerating (no quota, no
-        1-2 minute wait). Returns None when the lookup fails or yields no
-        usable summary so callers can fall back to a full summarize()."""
+        """Prefer an existing summary using isRefresh=false. The endpoint can
+        still generate on a cache miss. Return None on failure so callers can
+        fall back to the content pipeline or full summarize()."""
         if self._cookie_error and self._settings.bibigpt_access_mode != "browser":
             return None
         base_prompt = (prompt or self._settings.bibigpt_default_prompt).strip()
@@ -347,8 +420,8 @@ class BibiClient:
         result: SummaryResult,
         prompt: str,
     ) -> SummaryResult:
-        """补取 contentId：isRefresh=true 首次生成的响应常缺 contentId（记录异步落库），
-        用相同 promptConfig、isRefresh=false 重查已落库记录，不触发重新生成。"""
+        """补取 contentId：首次生成常缺 contentId（记录异步落库），
+        用相同 promptConfig、isRefresh=false 优先读取已落库记录。"""
         for delay in _CONTENT_ID_RECOVERY_DELAYS:
             await asyncio.sleep(delay)
             try:
@@ -600,8 +673,17 @@ class BibiClient:
         *,
         method: str = "POST",
     ) -> Any:
-        async with self._browser_page() as page:
-            return await self._browser_request_json(page, url, body, method=method)
+        timeout = self._settings.bibigpt_browser_timeout
+        try:
+            # Include the profile lock and navigation in the request budget.
+            # On expiry the context still gets to close before TimeoutError
+            # leaves this scope; external cancellation keeps propagating.
+            async with asyncio.timeout(timeout), self._browser_page() as page:
+                return await self._browser_request_json(page, url, body, method=method)
+        except TimeoutError as exc:
+            raise BibiTimeoutError(
+                0, f"BibiGPT browser request timed out after {timeout:g} seconds."
+            ) from exc
 
     @asynccontextmanager
     async def _browser_page(self) -> AsyncIterator[Any]:
@@ -629,15 +711,56 @@ class BibiClient:
                 viewport={"width": 1280, "height": 900},
             ) as context:
                 await self._seed_browser_cookies(context)
-                page = context.pages[0] if context.pages else await context.new_page()
-                await page.goto(
-                    self._routes.browser_page_url,
-                    wait_until="domcontentloaded",
-                    timeout=timeout_ms,
+                browser = context.browser
+                if browser is None:
+                    raise BibiAPIError(0, "BibiGPT profile has no browser for an isolated request.")
+                # The site's global TaskQueueProvider restores localStorage
+                # jobs on every route. Keep the persistent profile untouched
+                # and load the app in a fresh context carrying only cookies.
+                request_context = await browser.new_context(
+                    user_agent=_USER_AGENT,
+                    viewport={"width": 1280, "height": 900},
                 )
-                yield page
-                if self._settings.bibigpt_cookie_writeback:
-                    await self._writeback_cookies(context)
+                cookies_initialized = False
+                try:
+                    await request_context.add_cookies(await context.cookies())
+                    cookies_initialized = True
+                    page = await request_context.new_page()
+                    await page.goto(
+                        self._routes.browser_page_url,
+                        wait_until="domcontentloaded",
+                        timeout=timeout_ms,
+                    )
+                    yield page
+                finally:
+                    # A request can fail after Supabase has refreshed tokens.
+                    # Preserve those cookies even on errors/cancellation, with
+                    # bounded cleanup that cannot hide the request's outcome.
+                    try:
+                        async with asyncio.timeout(15):
+                            if cookies_initialized:
+                                try:
+                                    await _replace_browser_cookies(
+                                        context, await request_context.cookies()
+                                    )
+                                except Exception as exc:
+                                    logger.warning(
+                                        "Failed to sync BibiGPT browser cookies: %s", exc
+                                    )
+                                if self._settings.bibigpt_cookie_writeback:
+                                    try:
+                                        await self._writeback_cookies(request_context)
+                                    except Exception as exc:
+                                        logger.warning(
+                                            "Failed to write back BibiGPT cookies: %s", exc
+                                        )
+                    except TimeoutError:
+                        logger.warning("BibiGPT browser cookie cleanup timed out after 15 seconds")
+                    finally:
+                        try:
+                            await asyncio.wait_for(request_context.close(), timeout=15)
+                        except Exception as exc:
+                            logger.warning("Failed to close BibiGPT request context: %s", exc)
         except BrowserUnavailableError as exc:
             raise BibiAPIError(0, str(exc)) from exc
         except PlaywrightTimeoutError as exc:
@@ -657,30 +780,61 @@ class BibiClient:
         *,
         method: str = "POST",
     ) -> Any:
-        result = await page.evaluate(
-            """async ({url, method, body}) => {
-                const init = {
-                    method,
-                    credentials: "include",
-                    headers: {
-                        "accept": "application/json",
-                        "content-type": "application/json"
-                    }
-                };
-                if (body !== null) {
-                    init.body = JSON.stringify(body);
-                }
-                const response = await fetch(url, init);
-                return {
-                    status: response.status,
-                    ok: response.ok,
-                    text: await response.text()
-                };
-            }""",
-            {"url": url, "method": method, "body": body},
-        )
+        timeout = self._settings.bibigpt_browser_timeout
+        try:
+            # Playwright does not impose its action timeout on page.evaluate.
+            # The browser aborts fetch/body consumption; Python also bounds a
+            # stalled evaluate or disconnected browser driver.
+            async with asyncio.timeout(timeout):
+                result = await page.evaluate(
+                    """async ({url, method, body, timeoutMs}) => {
+                        const controller = new AbortController();
+                        const timer = setTimeout(() => controller.abort(), timeoutMs);
+                        try {
+                            const init = {
+                                method,
+                                credentials: "include",
+                                signal: controller.signal,
+                                headers: {
+                                    "accept": "application/json",
+                                    "content-type": "application/json"
+                                }
+                            };
+                            if (body !== null) {
+                                init.body = JSON.stringify(body);
+                            }
+                            const response = await fetch(url, init);
+                            return {
+                                status: response.status,
+                                ok: response.ok,
+                                text: await response.text()
+                            };
+                        } catch (error) {
+                            if (controller.signal.aborted) {
+                                return {timedOut: true};
+                            }
+                            throw error;
+                        } finally {
+                            clearTimeout(timer);
+                        }
+                    }""",
+                    {
+                        "url": url,
+                        "method": method,
+                        "body": body,
+                        "timeoutMs": max(1, int(timeout * 1000)),
+                    },
+                )
+        except TimeoutError as exc:
+            raise BibiTimeoutError(
+                0, f"BibiGPT browser request timed out after {timeout:g} seconds."
+            ) from exc
         if not isinstance(result, dict):
             raise BibiAPIError(0, "BibiGPT browser request returned an unexpected result.")
+        if result.get("timedOut") is True:
+            raise BibiTimeoutError(
+                0, f"BibiGPT browser request timed out after {timeout:g} seconds."
+            )
 
         status = int(result.get("status") or 0)
         text = str(result.get("text") or "")
@@ -710,7 +864,24 @@ class BibiClient:
         if not cookies:
             return
 
-        await context.add_cookies(cookies)
+        auth_families = {
+            family for cookie in cookies if (family := _auth_cookie_family(cookie["name"]))
+        }
+        if auth_families:
+            # A fresh file can have fewer token chunks than the saved profile.
+            # Replace only imported auth families; preserve unrelated cookies.
+            existing = await context.cookies()
+            retained = [
+                cookie
+                for cookie in existing
+                if not (
+                    _auth_cookie_family(cookie["name"]) in auth_families
+                    and _domain_matches_writeback(cookie["domain"], self._routes.cookie_domain)
+                )
+            ]
+            await _replace_browser_cookies(context, [*retained, *cookies], previous=existing)
+        else:
+            await context.add_cookies(cookies)
         logger.debug("Seeded %d BibiGPT cookies into browser context", len(cookies))
 
     async def _writeback_cookies(self, context: Any) -> None:
@@ -736,8 +907,52 @@ class BibiClient:
         logger.debug("Wrote back %d BibiGPT cookies to %s", len(cookies), self._cookie_file)
 
 
+def _auth_cookie_family(name: str) -> str:
+    match = re.fullmatch(r"(sb-.+-auth-token)(?:\.\d+)?", name)
+    return match.group(1) if match else ""
+
+
+async def _replace_browser_cookies(
+    context: Any,
+    cookies: list[dict[str, Any]],
+    *,
+    previous: list[dict[str, Any]] | None = None,
+) -> None:
+    """Sync a complete cookie snapshot, including deletions, without web storage."""
+    if previous is None:
+        previous = await context.cookies()
+    desired = {
+        (cookie["name"], cookie["domain"], cookie["path"], cookie.get("partitionKey"))
+        for cookie in cookies
+    }
+    removed = {
+        (cookie["name"], cookie["domain"], cookie["path"])
+        for cookie in previous
+        if (cookie["name"], cookie["domain"], cookie["path"], cookie.get("partitionKey"))
+        not in desired
+    }
+    # Never remove old cookies before the new snapshot has been accepted.
+    await context.add_cookies(cookies)
+    for name, domain, path in sorted(removed):
+        await context.clear_cookies(name=name, domain=domain, path=path)
+    # clear_cookies cannot filter by partition key, so restore any surviving
+    # partitions of a removed name/domain/path after the exact removals.
+    retained_partitions = [
+        cookie
+        for cookie in cookies
+        if (cookie["name"], cookie["domain"], cookie["path"]) in removed
+    ]
+    if retained_partitions:
+        await context.add_cookies(retained_partitions)
+
+
 def _is_recoverable(exc: BibiAPIError) -> bool:
     return isinstance(exc, BibiTimeoutError) or exc.status_code in _RECOVERABLE_STATUSES
+
+
+def is_risk_control(exc: BibiAPIError) -> bool:
+    """BibiGPT's fetch of the bilibili page was blocked by bilibili risk control."""
+    return _RISK_CONTROL_MARKER in exc.body
 
 
 def _domain_matches_writeback(cookie_domain: str, want: str) -> bool:
@@ -924,7 +1139,7 @@ def _extract_trpc_payload(data: Any) -> Any:
         raise ValueError("BibiGPT web response has unexpected shape")
 
     if "error" in item:
-        raise BibiAPIError(200, json.dumps(item["error"], ensure_ascii=False))
+        raise _trpc_api_error(item["error"])
 
     result = item.get("result", item)
     if not isinstance(result, dict):
@@ -934,6 +1149,45 @@ def _extract_trpc_payload(data: Any) -> Any:
     if isinstance(payload, dict) and "json" in payload:
         payload = payload["json"]
     return payload
+
+
+def _trpc_api_error(error: Any) -> BibiAPIError:
+    """Recover business status from errors carried by a successful HTTP reply."""
+    body = json.dumps(error, ensure_ascii=False)
+    code, status, _message = _trpc_error_metadata(body)
+    if status is None or not 400 <= status <= 599:
+        status = {
+            "BAD_REQUEST": 400,
+            "UNAUTHORIZED": 401,
+            "PAYMENT_REQUIRED": 402,
+            "FORBIDDEN": 403,
+            "NOT_FOUND": 404,
+            "TIMEOUT": 408,
+            "TOO_MANY_REQUESTS": 429,
+            "INTERNAL_SERVER_ERROR": 500,
+            "BAD_GATEWAY": 502,
+            "SERVICE_UNAVAILABLE": 503,
+            "GATEWAY_TIMEOUT": 504,
+        }.get(code.upper(), 200)
+        if status == 200:
+            container = error.get("json", error) if isinstance(error, dict) else None
+            numeric_code = container.get("code") if isinstance(container, dict) else None
+            # Older tRPC replies can omit data.httpStatus/data.code entirely.
+            # Numeric -32603 represents the server-error family; without the
+            # detailed metadata only its generic HTTP 500 can be recovered.
+            if type(numeric_code) is int:
+                status = {
+                    -32600: 400,
+                    -32603: 500,
+                    -32001: 401,
+                    -32002: 402,
+                    -32003: 403,
+                    -32004: 404,
+                    -32008: 408,
+                    -32029: 429,
+                }.get(numeric_code, 200)
+    error_type = AuthenticationError if status in (401, 403) else BibiAPIError
+    return error_type(status, body)
 
 
 def _extract_user_data(data: Any) -> dict[str, Any]:

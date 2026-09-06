@@ -1,7 +1,6 @@
 import json
 import time
 from typing import Any
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -491,16 +490,19 @@ async def test_summarize_custom_prompt_recovery_drops_refresh(tmp_path, monkeypa
     assert [_is_refresh(c) for c in calls] == [True, False]
 
 
-async def test_summarize_raises_original_when_recovery_exhausted(tmp_path, monkeypatch) -> None:
+async def test_summarize_preserves_last_error_when_recovery_exhausted(
+    tmp_path, monkeypatch
+) -> None:
     blocked = BibiAPIError(500, "blocked")
+    last_error = BibiAPIError(524, "cf")
     calls = _scripted_browser_fetch(
-        monkeypatch, [blocked, BibiAPIError(502, "gw"), blocked, BibiAPIError(524, "cf")]
+        monkeypatch, [blocked, BibiAPIError(502, "gw"), blocked, last_error]
     )
 
     with pytest.raises(BibiAPIError) as excinfo:
         await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
 
-    assert excinfo.value is blocked
+    assert excinfo.value is last_error
     assert len(calls) == 4
 
 
@@ -547,122 +549,6 @@ async def test_summarize_treats_empty_first_response_as_pending(tmp_path, monkey
     result = await BibiClient(_browser_settings(tmp_path)).summarize("https://youtu.be/abc")
 
     assert result.content == "- late"
-    assert len(calls) == 2
-
-
-_BLOCKED_BODY = '[{"error":{"json":{"message":"平台风控，稍后再试","code":-32603}}}]'
-
-
-def _queue_settings(tmp_path, **overrides) -> Settings:
-    kwargs: dict[str, Any] = dict(
-        bibigpt_base_url="https://aitodo.co/zh",
-        bibigpt_access_mode="browser",
-        cookie_file="",
-        bibigpt_browser_profile_dir=str(tmp_path / "profile"),
-        bibigpt_web_queue_poll_seconds=0,
-        bibigpt_web_queue_wait_seconds=60,
-    )
-    kwargs.update(overrides)
-    return Settings(**kwargs)
-
-
-def _fake_enqueue(monkeypatch, accepted: bool) -> AsyncMock:
-    enqueue = AsyncMock(return_value=accepted)
-    monkeypatch.setattr(BibiClient, "_enqueue_via_web_ui", enqueue)
-    return enqueue
-
-
-async def test_risk_control_submits_through_web_queue_and_polls(tmp_path, monkeypatch) -> None:
-    blocked = BibiAPIError(500, _BLOCKED_BODY)
-    calls = _scripted_browser_fetch(
-        monkeypatch, [blocked, BibiAPIError(500, _BLOCKED_BODY), "- queued"]
-    )
-    enqueue = _fake_enqueue(monkeypatch, True)
-
-    result = await BibiClient(_queue_settings(tmp_path)).summarize("https://b23.tv/abc")
-
-    assert result.content == "- queued"
-    enqueue.assert_awaited_once_with("https://b23.tv/abc")
-    assert [_is_refresh(c) for c in calls] == [True, False, False]
-
-
-async def test_web_queue_regenerates_with_own_prompt(tmp_path, monkeypatch) -> None:
-    calls = _scripted_browser_fetch(
-        monkeypatch, [BibiAPIError(500, _BLOCKED_BODY), "- queued", "- ours"]
-    )
-    _fake_enqueue(monkeypatch, True)
-    settings = _queue_settings(tmp_path, bibigpt_web_queue_regenerate=True)
-
-    result = await BibiClient(settings).summarize("https://b23.tv/abc")
-
-    assert result.content == "- ours"
-    assert [_is_refresh(c) for c in calls] == [True, False, True]
-
-
-async def test_web_queue_keeps_queue_result_when_regeneration_blocked(
-    tmp_path, monkeypatch
-) -> None:
-    calls = _scripted_browser_fetch(
-        monkeypatch,
-        [BibiAPIError(500, _BLOCKED_BODY), "- queued", BibiAPIError(500, _BLOCKED_BODY)],
-    )
-    _fake_enqueue(monkeypatch, True)
-    settings = _queue_settings(tmp_path, bibigpt_web_queue_regenerate=True)
-
-    result = await BibiClient(settings).summarize("https://b23.tv/abc")
-
-    assert result.content == "- queued"
-    assert len(calls) == 3
-
-
-async def test_web_queue_falls_back_to_lookup_when_submit_fails(tmp_path, monkeypatch) -> None:
-    calls = _scripted_browser_fetch(monkeypatch, [BibiAPIError(500, _BLOCKED_BODY), "- late"])
-    enqueue = _fake_enqueue(monkeypatch, False)
-
-    result = await BibiClient(_queue_settings(tmp_path)).summarize("https://b23.tv/abc")
-
-    assert result.content == "- late"
-    enqueue.assert_awaited_once()
-    assert [_is_refresh(c) for c in calls] == [True, False]
-
-
-async def test_web_queue_exhausted_raises_original_error(tmp_path, monkeypatch) -> None:
-    blocked = BibiAPIError(500, _BLOCKED_BODY)
-    calls = _scripted_browser_fetch(monkeypatch, [blocked, "- never"])
-    enqueue = _fake_enqueue(monkeypatch, True)
-    settings = _queue_settings(tmp_path, bibigpt_web_queue_wait_seconds=0)
-
-    with pytest.raises(BibiAPIError) as excinfo:
-        await BibiClient(settings).summarize("https://b23.tv/abc")
-
-    assert excinfo.value is blocked
-    enqueue.assert_awaited_once()
-    assert len(calls) == 1
-
-
-@pytest.mark.parametrize(
-    "error", [BibiAPIError(500, "Connection error."), BibiAPIError(524, "cloudflare")]
-)
-async def test_non_risk_control_errors_skip_web_queue(tmp_path, monkeypatch, error) -> None:
-    calls = _scripted_browser_fetch(monkeypatch, [error, "- late"])
-    enqueue = _fake_enqueue(monkeypatch, True)
-
-    result = await BibiClient(_queue_settings(tmp_path)).summarize("https://b23.tv/abc")
-
-    assert result.content == "- late"
-    enqueue.assert_not_awaited()
-    assert len(calls) == 2
-
-
-async def test_web_queue_disabled_uses_lookup_recovery(tmp_path, monkeypatch) -> None:
-    calls = _scripted_browser_fetch(monkeypatch, [BibiAPIError(500, _BLOCKED_BODY), "- late"])
-    enqueue = _fake_enqueue(monkeypatch, True)
-    settings = _queue_settings(tmp_path, bibigpt_web_queue_enabled=False)
-
-    result = await BibiClient(settings).summarize("https://b23.tv/abc")
-
-    assert result.content == "- late"
-    enqueue.assert_not_awaited()
     assert len(calls) == 2
 
 

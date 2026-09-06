@@ -163,12 +163,15 @@ See `config.example.yaml` for the full reference. Common settings:
 | `max_video_file_mb` | `30` | Max uploaded video size; Feishu `im/v1/files` rejects files over 30 MB |
 | `allowed_video_platforms` | Config example | Platforms allowed for video append |
 | `cookie_file` | `cookies/cookies.txt` | Unified Netscape cookie file path |
-| `bibigpt_access_mode` | `web` | `web` uses the normal BibiGPT web app quota via tRPC; `browser` sends the same request from persisted Chromium |
-| `bibigpt_base_url` | `https://bibigpt.co` | Base URL for BibiGPT. Use `https://aitodo.co/zh` for the international/overseas route. |
+| `bibigpt_access_mode` | `web` | `web` uses tRPC over HTTP; `browser` reuses Chromium login cookies in isolated request pages and uses the desktop content pipeline for Bilibili |
+| `bibigpt_base_url` | `https://aitodo.co/zh` | Base URL for BibiGPT |
 | `bibigpt_timeout` | `120.0` | Timeout in seconds for BibiGPT summary and chapter-summary requests |
 | `bibigpt_browser_profile_dir` | `browser-data/bibigpt` | Chromium profile path for BibiGPT browser mode |
 | `bibigpt_browser_headless` | `true` | Run Chromium headless in browser mode |
-| `bibigpt_browser_timeout` | `120.0` | Timeout in seconds for browser startup, navigation, and BibiGPT requests |
+| `bibigpt_browser_timeout` | `120.0` | Total request budget including profile-lock waiting, startup, navigation, and fetch; browser cleanup may add a bounded delay |
+| `bibigpt_web_queue_enabled` | `true` | Use the desktop server content pipeline for Bilibili in browser mode, also as recovery for risk-control errors |
+| `bibigpt_web_queue_poll_seconds` | `45` | Interval between server subtitle-status checks |
+| `bibigpt_web_queue_wait_seconds` | `600` | Content-preparation wait budget; expiry reports pending rather than claiming the server task failed |
 | `bibigpt_default_prompt` | Empty | Optional default custom prompt. Leave empty to use BibiGPT's built-in prompt |
 | `deepseek_api_key` | Empty | Enables title translation, BibiGPT summary rewriting, and faithful Chinese formatting of BibiGPT chapter summaries; chapter formatting falls back to the BibiGPT original when unavailable |
 | `deepseek_base_url` | DeepSeek API | Optional compatible API endpoint |
@@ -264,6 +267,8 @@ Supported video cards also include action buttons:
 - `下载视频` triggers the same manual-download path and sends the result as a reply to the card message.
 
 BibiGPT summary output is treated as draft material. When `deepseek_api_key` is configured, the bot sends that output through DeepSeek with fixed Chinese Markdown output requirements before rendering the Feishu card. After the summary card succeeds, the bot requests BibiGPT's `timeline` chapter summary using the returned content ID and appends a collapsed `字幕总结` card. DeepSeek may translate and proofread the chapter introduction, titles, and summaries, but timestamps remain code-owned and raw subtitles are never sent or used as a fallback. If the BibiGPT account cannot generate chapter summaries, the original summary remains available and the bot reports that the chapter summary is unavailable.
+
+In browser mode, Bilibili requests first prepare content through BibiGPT's desktop server protocol, confirm a server content ID, and observe subtitle readiness before requesting a summary. Request pages share login cookies without restoring the browser profile's old local task queue. Temporary summary errors receive bounded cache-permitting recovery; waiting expiry retains the content link and does not trigger the failure cooldown. See the [investigation and verification limits](docs/bibigpt-reliability.md). The legacy `bibigpt_web_queue_regenerate` setting remains accepted but no longer triggers an extra generation.
 
 ## Development
 
