@@ -5,17 +5,23 @@ from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import lark_oapi as lark
+import pytest
+import respx
 
 from src.archive_store import (
     ArchiveEntry,
+    ArchiveError,
     BibiLinkUpdate,
     BitableArchive,
     ChatDirectory,
     RemarkAppend,
+    _bitable_request,
     _decode_row,
 )
 from src.config import Settings
+from src.platforms import normalize_url
 
 
 def _api_response(data: dict, success: bool = True):
@@ -56,6 +62,76 @@ def _archive(client) -> BitableArchive:
     return BitableArchive(_settings(), client, ChatDirectory(client))
 
 
+@respx.mock
+async def test_bitable_cold_token_and_request_use_async_http(monkeypatch) -> None:
+    def reject_sync_http(*args, **kwargs):
+        raise AssertionError("archive must not block the event loop for token acquisition")
+
+    monkeypatch.setattr("requests.request", reject_sync_http)
+    respx.post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal").mock(
+        return_value=httpx.Response(200, json={
+            "code": 0, "tenant_access_token": "test_archive_token", "expire": 3600,
+        })
+    )
+    route = respx.post("https://open.feishu.cn/open-apis/bitable/test").mock(
+        return_value=httpx.Response(200, json={"code": 0, "data": {"items": []}})
+    )
+    client = lark.Client.builder().app_id("archive_app").app_secret("archive_secret").build()
+
+    result = await _bitable_request(client, lark.HttpMethod.POST, "/open-apis/bitable/test")
+
+    assert result == {"items": []}
+    assert route.calls.last.request.headers["Authorization"] == "Bearer test_archive_token"
+    assert client._config.enable_set_token is False
+
+
+async def test_bitable_rejects_raw_business_error_despite_sdk_success() -> None:
+    response = _api_response({})
+    response.raw.content = json.dumps({
+        "code": 1254066, "msg": "UserFieldConvFail", "data": {},
+    }).encode()
+
+    with pytest.raises(ArchiveError, match="code=1254066 msg=UserFieldConvFail"):
+        await _bitable_request(
+            _client(response), lark.HttpMethod.POST, "/open-apis/bitable/test"
+        )
+
+
+async def test_create_business_error_never_deletes_existing_archive(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.archive_store.tenacity.wait_exponential", lambda **kwargs: lambda retry_state: 0
+    )
+    error = _api_response({})
+    error.raw.content = json.dumps({"code": 1254066, "msg": "UserFieldConvFail"}).encode()
+    client = _client(
+        _api_response({"name": "测试群"}),
+        _api_response(_stale_search_page("rec_original", "https://youtu.be/abc")),
+        error,
+        error,
+        error,
+    )
+
+    with pytest.raises(ArchiveError, match="1254066"):
+        await _archive(client)._process_one(_entry())
+
+    assert client.arequest.await_count == 5
+    assert all(
+        call.args[0].http_method != lark.HttpMethod.DELETE
+        for call in client.arequest.call_args_list
+    )
+
+
+@pytest.mark.parametrize("body", [b"not JSON", b"[]", b"{}"])
+async def test_bitable_rejects_invalid_success_body(body: bytes) -> None:
+    response = _api_response({})
+    response.raw.content = body
+
+    with pytest.raises(ArchiveError):
+        await _bitable_request(
+            _client(response), lark.HttpMethod.POST, "/open-apis/bitable/test"
+        )
+
+
 def test_encode_fields_shapes() -> None:
     archive = _archive(_client())
     entry = _entry(chat_name="链接群")
@@ -85,7 +161,15 @@ def test_encode_fields_fallbacks() -> None:
     assert fields["发送的群"] == "oc_chat"
 
 
-async def test_process_one_creates_record_with_resolved_chat_name() -> None:
+def test_encode_fields_omits_unknown_sender() -> None:
+    fields = _archive(_client())._encode_fields(_entry(sender_open_id=""))
+
+    assert "发送人" not in fields
+    assert fields["链接"]["link"] == "https://youtu.be/abc"
+
+
+@pytest.mark.parametrize("partial", [False, True])
+async def test_process_one_creates_record_with_resolved_chat_name(partial: bool) -> None:
     client = _client(
         _api_response({"name": "链接群"}),
         _api_response({"items": [], "has_more": False}),
@@ -93,12 +177,13 @@ async def test_process_one_creates_record_with_resolved_chat_name() -> None:
     )
     archive = _archive(client)
 
-    await archive._process_one(_entry())
+    await archive._process_one(_entry(partial=partial))
 
     create_request = client.arequest.call_args_list[2].args[0]
     assert create_request.uri == "/open-apis/bitable/v1/apps/app_x/tables/tbl_x/records"
     assert create_request.body["fields"]["发送人"] == [{"id": "ou_sender"}]
     assert create_request.body["fields"]["发送的群"] == "链接群"
+    assert "partial" not in create_request.body["fields"]
 
 
 async def test_process_one_deletes_stale_duplicate_after_creating_new_row() -> None:
@@ -278,6 +363,37 @@ def _stale_search_page(record_id: str, url: str, extra_fields: dict | None = Non
     return {"items": [{"record_id": record_id, "fields": fields}], "has_more": False}
 
 
+@pytest.mark.parametrize(
+    ("url", "tracking"),
+    [
+        (
+            "https://www.tiktok.com/@creator/video/7678926593120587038",
+            "is_from_webapp=1&sender_device=pc",
+        ),
+        (
+            "https://www.instagram.com/reel/DcTtB6sT3p_/",
+            "utm_source=ig_web_copy_link&igsi=NTc4MTIwNjQ2YQ==",
+        ),
+    ],
+)
+async def test_find_records_matches_web_share_url_without_modifying_field(
+    url: str, tracking: str
+) -> None:
+    shared = f"{url}?{tracking}"
+    link_field = {"link": shared, "text": shared, "type": "url"}
+    client = _client(_api_response({
+        "items": [{"record_id": "rec_target", "fields": {"链接": link_field}}],
+        "has_more": False,
+    }))
+
+    matches = await _archive(client)._find_records_by_normalized_url(normalize_url(url))
+
+    assert matches == [("rec_target", {"链接": link_field})]
+    assert matches[0][1]["链接"]["link"] == shared
+    assert client.arequest.await_count == 1
+    assert client.arequest.call_args.args[0].uri.endswith("/records/search")
+
+
 async def test_process_one_carries_remark_and_bibigpt_link_from_stale_row() -> None:
     client = _client(
         _api_response({"name": "链接群"}),
@@ -306,6 +422,74 @@ async def test_process_one_carries_remark_and_bibigpt_link_from_stale_row() -> N
     }
     delete_request = client.arequest.call_args_list[3].args[0]
     assert delete_request.uri.endswith("/records/rec_old")
+
+
+async def test_partial_archive_only_fills_empty_cells_without_replacing_existing_row() -> None:
+    previous = {
+        "标题": [{"type": "text", "text": "已确认的完整标题"}],
+        "平台": "youtube",
+        "频道": [{"type": "text", "text": ""}],
+        "时长": "",
+        "发送人": [{"id": "ou_original", "name": "原分享人"}],
+        "发送的群": "原群",
+        "记录时间": 1784644000000,
+        "备注": [{"text": "必须保留的备注"}],
+        "BibiGPT 链接": {"link": "https://aitodo.co/content/original"},
+    }
+    client = _client(
+        _api_response({"name": "新群"}),
+        _api_response(_stale_search_page("rec_original", "https://youtu.be/abc", previous)),
+        _api_response({"record": {"record_id": "rec_original"}}),
+    )
+    archive = _archive(client)
+
+    await archive._process_one(_entry(title="较少信息的新标题", partial=True))
+
+    calls = client.arequest.call_args_list
+    assert len(calls) == 3
+    search = calls[1].args[0]
+    assert {"标题", "频道", "时长", "发送人", "记录时间"} <= set(search.body["field_names"])
+    update = calls[2].args[0]
+    assert update.http_method == lark.HttpMethod.PUT
+    assert update.uri.endswith("/records/rec_original")
+    assert update.body == {"fields": {"频道": "Some Channel", "时长": "1:30"}}
+
+
+async def test_partial_archive_with_nothing_to_fill_does_not_write() -> None:
+    archive = _archive(_client())
+    previous = archive._encode_fields(_entry(chat_name="原群"))
+    previous["标题"] = ""
+    previous["频道"] = ""
+    client = _client(
+        _api_response({"name": "新群"}),
+        _api_response(_stale_search_page("rec_original", "https://youtu.be/abc", previous)),
+    )
+    archive = _archive(client)
+
+    await archive._process_one(_entry(title="", channel="", partial=True))
+
+    assert client.arequest.await_count == 2
+
+
+async def test_partial_archive_update_failure_does_not_replace_or_delete_old_data() -> None:
+    client = _client(
+        _api_response({"name": "链接群"}),
+        _api_response(_stale_search_page(
+            "rec_original", "https://youtu.be/abc", {"标题": "原有标题", "备注": "原有备注"}
+        )),
+    )
+    archive = _archive(client)
+    archive._update_record = AsyncMock(side_effect=RuntimeError("update unavailable"))
+    archive._create_record = AsyncMock()
+    archive._delete_record = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="update unavailable"):
+        await archive._process_one(_entry(partial=True))
+
+    archive._create_record.assert_not_awaited()
+    archive._delete_record.assert_not_awaited()
+    assert "标题" not in archive._update_record.call_args.args[1]
+    assert "备注" not in archive._update_record.call_args.args[1]
 
 
 def _remark(**overrides) -> RemarkAppend:

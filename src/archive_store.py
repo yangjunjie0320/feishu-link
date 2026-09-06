@@ -11,6 +11,7 @@ import tenacity
 
 from .card import fmt_duration
 from .config import Settings
+from .feishu_async import call_feishu_async
 from .platforms import normalize_url
 from .time_utils import format_beijing, now_utc
 
@@ -62,6 +63,7 @@ class ArchiveEntry:
     recorded_at_utc: datetime = field(default_factory=now_utc)
     # Resolved by the consumer coroutine, never by the send hot path.
     chat_name: str = ""
+    partial: bool = False
 
 
 @dataclass
@@ -125,10 +127,18 @@ async def _bitable_request(
         builder = builder.body(body)
     if queries:
         builder = builder.queries(queries)
-    resp = await client.arequest(builder.build())
+    resp = await call_feishu_async(client, None, "arequest", builder.build(), timeout=10.0)
+    try:
+        payload = json.loads(resp.raw.content.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ArchiveError(f"{method.name} {uri} returned invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("code") != 0:
+        code = payload.get("code") if isinstance(payload, dict) else None
+        message = payload.get("msg", "") if isinstance(payload, dict) else ""
+        raise ArchiveError(f"{method.name} {uri} failed: code={code} msg={message}")
     if not resp.success():
         raise ArchiveError(f"{method.name} {uri} failed: code={resp.code} msg={resp.msg}")
-    return json.loads(resp.raw.content.decode("utf-8")).get("data") or {}
+    return payload.get("data") or {}
 
 
 class ChatDirectory:
@@ -251,8 +261,32 @@ class BitableArchive:
     async def _process_one(self, entry: ArchiveEntry) -> None:
         entry.chat_name = await self._directory.chat_name(entry.chat_id, entry.chat_type)
         normalized = normalize_url(entry.url)
-        stale = await self._find_records_by_normalized_url(normalized)
+        stale = await self._find_records_by_normalized_url(
+            normalized, include_content=entry.partial
+        )
         fields = self._encode_fields(entry)
+        if entry.partial and stale:
+            # A partial re-share must not downgrade the existing row or move it
+            # to today's report. Only write genuinely empty cells in place.
+            if not entry.title.strip():
+                fields.pop(_DISPLAY["title"], None)
+            updated = 0
+            for record_id, existing in stale:
+                missing = {
+                    name: value
+                    for name, value in fields.items()
+                    if not _has_field_value(existing.get(name)) and _has_field_value(value)
+                }
+                if missing:
+                    await self._update_record(record_id, missing)
+                    updated += 1
+            logger.info(
+                "archived partial: url=%s platform=%s updated_records=%d",
+                entry.url,
+                entry.platform,
+                updated,
+            )
+            return
         # A fresh entry never carries remark/BibiGPT-link values of its own,
         # so re-sharing a link must inherit them from the row it replaces.
         fields.update(_carried_over_fields(stale))
@@ -361,7 +395,7 @@ class BitableArchive:
         await _attempt()
 
     async def _find_records_by_normalized_url(
-        self, normalized: str
+        self, normalized: str, *, include_content: bool = False
     ) -> list[tuple[str, dict[str, object]]]:
         """Full-table scan for rows whose "链接" normalizes to the same key,
         returning (record_id, fields) so callers can carry values over.
@@ -377,7 +411,11 @@ class BitableArchive:
             f"/tables/{self._settings.bitable_table_id}/records/search"
         )
         body = {
-            "field_names": [_DISPLAY["url"], _DISPLAY["remark"], _DISPLAY["bibigpt_url"]],
+            "field_names": (
+                [display for _, display, _ in _FIELDS]
+                if include_content
+                else [_DISPLAY["url"], _DISPLAY["remark"], _DISPLAY["bibigpt_url"]]
+            ),
             "automatic_fields": False,
         }
         matches: list[tuple[str, dict[str, object]]] = []
@@ -418,19 +456,21 @@ class BitableArchive:
         url = entry.url
         title = entry.title or url
         duration = fmt_duration(entry.duration_seconds) if entry.duration_seconds else ""
-        return {
+        fields: dict[str, object] = {
             _DISPLAY["title"]: title,
             _DISPLAY["url"]: {"link": url, "text": url},
             _DISPLAY["platform"]: entry.platform,
             _DISPLAY["channel"]: entry.channel,
             _DISPLAY["duration"]: duration,
-            # Bitable User fields take a list of {"id": open_id}; the display
-            # name/avatar is resolved server-side, so no name lookup is needed here.
-            _DISPLAY["sender"]: [{"id": entry.sender_open_id}],
             _DISPLAY["chat"]: entry.chat_name or entry.chat_id,
             # Bitable DateTime fields take a UTC epoch-millisecond int on write.
             _DISPLAY["recorded_at"]: int(entry.recorded_at_utc.timestamp() * 1000),
         }
+        # Bitable resolves real open_ids server-side. System-originated entries
+        # have no sender; an empty id would reject the entire record write.
+        if entry.sender_open_id:
+            fields[_DISPLAY["sender"]] = [{"id": entry.sender_open_id}]
+        return fields
 
     async def fetch_day(self, day: date) -> list[ArchivedRow]:
         """ "记录时间" is a bitable DateTime field (epoch ms). Its range-filter
@@ -576,6 +616,18 @@ def _bootstrap_field_spec(display: str, ftype: int) -> dict[str, object]:
     elif ftype == _USER:
         spec["property"] = {"multiple": True}
     return spec
+
+
+def _has_field_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(_has_field_value(item) for item in value)
+    if isinstance(value, dict):
+        return any(_has_field_value(item) for key, item in value.items() if key != "type")
+    return True
 
 
 def _carried_over_fields(
