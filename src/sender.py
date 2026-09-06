@@ -28,6 +28,13 @@ from .config import Mode, Settings
 
 logger = logging.getLogger(__name__)
 
+# Feishu reaction identifiers; text/card output keeps its existing formatting.
+_WORK_REACTION_TYPES = {"bibigpt": "Typing", "comments": "THINKING"}
+
+
+def _work_reaction_type(label: str) -> str:
+    return _WORK_REACTION_TYPES.get(label, "Typing")
+
 
 class SendError(Exception):
     pass
@@ -43,7 +50,7 @@ class _TypingHold:
 class TypingReactionSender:
     def __init__(self, client: lark.Client) -> None:
         self._client = client
-        self._holds: dict[str, _TypingHold] = {}
+        self._holds: dict[tuple[str, str], _TypingHold] = {}
 
     @asynccontextmanager
     async def hold(
@@ -52,13 +59,14 @@ class TypingReactionSender:
         *,
         label: str,
     ) -> AsyncIterator[None]:
-        # Feishu returns one reaction for the same bot/message/emoji, regardless
-        # of our operation label. Reuse it until every operation has finished.
-        while (state := self._holds.get(message_id)) is not None and state.cleanup_task:
+        # Different work reactions finish independently. Operations using the
+        # same emoji still share Feishu's one bot/message/emoji reaction.
+        key = (message_id, _work_reaction_type(label))
+        while (state := self._holds.get(key)) is not None and state.cleanup_task:
             await asyncio.shield(state.cleanup_task)
         if state is None:
             state = _TypingHold(asyncio.create_task(self.start(message_id, label=label)))
-            self._holds[message_id] = state
+            self._holds[key] = state
         state.users += 1
         try:
             await asyncio.shield(state.start_task)
@@ -67,18 +75,20 @@ class TypingReactionSender:
             state.users -= 1
             if state.users == 0:
                 state.cleanup_task = asyncio.create_task(
-                    self._clear_hold(message_id, state, label=label)
+                    self._clear_hold(key, state, label=label)
                 )
                 await asyncio.shield(state.cleanup_task)
 
-    async def _clear_hold(self, message_id: str, state: _TypingHold, *, label: str) -> None:
+    async def _clear_hold(
+        self, key: tuple[str, str], state: _TypingHold, *, label: str
+    ) -> None:
         try:
             # Even a cancelled initializer may already have sent its SDK call.
             # Wait for its reaction id so that it cannot leave an orphan behind.
             reaction_id = await state.start_task
-            await self.stop(message_id, reaction_id, label=label)
+            await self.stop(key[0], reaction_id, label=label)
         finally:
-            self._holds.pop(message_id, None)
+            self._holds.pop(key, None)
 
     async def start(self, message_id: str, *, label: str = "work") -> str | None:
         request = (
@@ -86,7 +96,7 @@ class TypingReactionSender:
             .message_id(message_id)
             .request_body(
                 CreateMessageReactionRequestBody.builder()
-                .reaction_type(Emoji.builder().emoji_type("Typing").build())
+                .reaction_type(Emoji.builder().emoji_type(_work_reaction_type(label)).build())
                 .build()
             )
             .build()

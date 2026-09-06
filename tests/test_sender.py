@@ -27,18 +27,24 @@ class _FakeMessageReaction:
     def __init__(self) -> None:
         self.create_requests = []
         self.delete_requests = []
-        self._active_reactions: dict[str, str] = {}
+        self._active_reactions: dict[tuple[str, str], str] = {}
 
     def create(self, request):
         self.create_requests.append(request)
         reaction_id = self._active_reactions.setdefault(
-            request.paths["message_id"], f"reaction_{len(self.create_requests)}"
+            (request.paths["message_id"], request.body.reaction_type.emoji_type),
+            f"reaction_{len(self.create_requests)}",
         )
         return _FakeResponse(data=SimpleNamespace(reaction_id=reaction_id))
 
     def delete(self, request):
         self.delete_requests.append(request)
-        self._active_reactions.pop(request.paths["message_id"], None)
+        for key, reaction_id in tuple(self._active_reactions.items()):
+            if (
+                key[0] == request.paths["message_id"]
+                and reaction_id == request.paths["reaction_id"]
+            ):
+                del self._active_reactions[key]
         return _FakeResponse()
 
 
@@ -119,13 +125,41 @@ async def test_typing_hold_shares_one_reaction_across_operation_labels() -> None
     client = _FakeClient()
     sender = TypingReactionSender(client)
 
-    async with sender.hold("om_message", label="bibigpt"):
-        async with sender.hold("om_message", label="comments"):
+    async with sender.hold("om_message", label="card"):
+        async with sender.hold("om_message", label="download"):
             assert len(client.message_reaction.create_requests) == 1
+            request = client.message_reaction.create_requests[0]
+            assert request.body.reaction_type.emoji_type == "Typing"
         assert client.message_reaction.delete_requests == []
 
     assert len(client.message_reaction.delete_requests) == 1
     assert client.message_reaction.delete_requests[0].paths["reaction_id"] == "reaction_1"
+
+
+async def test_summary_and_comments_have_separate_reactions_on_the_same_message() -> None:
+    client = _FakeClient()
+    sender = TypingReactionSender(client)
+
+    async with sender.hold("om_message", label="bibigpt"):
+        async with sender.hold("om_message", label="comments"):
+            emoji_types = [
+                req.body.reaction_type.emoji_type
+                for req in client.message_reaction.create_requests
+            ]
+            assert emoji_types == ["Typing", "THINKING"]
+            assert client.message_reaction._active_reactions == {
+                ("om_message", "Typing"): "reaction_1",
+                ("om_message", "THINKING"): "reaction_2",
+            }
+        assert client.message_reaction._active_reactions == {
+            ("om_message", "Typing"): "reaction_1"
+        }
+        assert client.message_reaction.delete_requests[0].paths["reaction_id"] == "reaction_2"
+
+    assert [req.paths["reaction_id"] for req in client.message_reaction.delete_requests] == [
+        "reaction_2", "reaction_1"
+    ]
+    assert client.message_reaction._active_reactions == {}
 
 
 async def test_typing_holds_for_different_messages_have_independent_lifetimes() -> None:
@@ -133,7 +167,7 @@ async def test_typing_holds_for_different_messages_have_independent_lifetimes() 
     sender = TypingReactionSender(client)
 
     async with sender.hold("om_summary", label="bibigpt"):
-        async with sender.hold("om_comments", label="comments"):
+        async with sender.hold("om_comments", label="bibigpt"):
             assert len(client.message_reaction.create_requests) == 2
         assert [req.paths["message_id"] for req in client.message_reaction.delete_requests] == [
             "om_comments"
@@ -144,26 +178,35 @@ async def test_typing_holds_for_different_messages_have_independent_lifetimes() 
     ]
 
 
-async def test_cancelling_one_operation_preserves_another_operations_reaction() -> None:
+@pytest.mark.parametrize(
+    ("outer_label", "inner_label", "shared"),
+    [("bibigpt", "comments", False), ("comments", "bibigpt", False), ("card", "download", True)],
+)
+async def test_cancelling_one_operation_preserves_another_operations_reaction(
+    outer_label: str, inner_label: str, shared: bool,
+) -> None:
     client = _FakeClient()
     sender = TypingReactionSender(client)
     entered = asyncio.Event()
 
-    async def comments() -> None:
-        async with sender.hold("om_message", label="comments"):
+    async def inner_operation() -> None:
+        async with sender.hold("om_message", label=inner_label):
             entered.set()
             await asyncio.Event().wait()
 
-    async with sender.hold("om_message", label="bibigpt"):
-        task = asyncio.create_task(comments())
+    async with sender.hold("om_message", label=outer_label):
+        task = asyncio.create_task(inner_operation())
         await asyncio.wait_for(entered.wait(), timeout=1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert client.message_reaction.delete_requests == []
+        assert len(client.message_reaction.delete_requests) == (0 if shared else 1)
+        assert list(client.message_reaction._active_reactions.values()) == ["reaction_1"]
 
-    assert len(client.message_reaction.create_requests) == 1
-    assert len(client.message_reaction.delete_requests) == 1
+    expected_count = 1 if shared else 2
+    assert len(client.message_reaction.create_requests) == expected_count
+    assert len(client.message_reaction.delete_requests) == expected_count
+    assert client.message_reaction._active_reactions == {}
 
 
 @pytest.mark.parametrize("another_waiter", [False, True])
@@ -189,9 +232,9 @@ async def test_cancelling_during_reaction_creation_does_not_abandon_the_reaction
             entered.set()
             await finish.wait()
 
-    first = asyncio.create_task(operation("bibigpt"))
+    first = asyncio.create_task(operation("card"))
     await asyncio.wait_for(creating.wait(), timeout=1)
-    waiter = asyncio.create_task(operation("comments")) if another_waiter else None
+    waiter = asyncio.create_task(operation("download")) if another_waiter else None
     await asyncio.sleep(0)
     first.cancel()
     await asyncio.sleep(0)
@@ -222,25 +265,25 @@ async def test_new_typing_hold_waits_for_previous_cleanup_even_if_owner_is_cance
     calls: list[tuple[str, str]] = []
 
     async def start(message_id: str, *, label: str) -> str:
-        calls.append(("start", message_id))
-        return "reaction_" + message_id
+        calls.append(("start", label))
+        return "reaction_" + label
 
     async def stop(message_id: str, reaction_id: str | None, *, label: str) -> bool:
-        if message_id == "om_message" and not removing.is_set():
+        if label == "card" and not removing.is_set():
             removing.set()
             await removed.wait()
-        calls.append(("stop", message_id))
+        calls.append(("stop", label))
         return True
 
     sender.start = AsyncMock(side_effect=start)  # type: ignore[method-assign]
     sender.stop = AsyncMock(side_effect=stop)  # type: ignore[method-assign]
 
     async def first_operation() -> None:
-        async with sender.hold("om_message", label="bibigpt"):
+        async with sender.hold("om_message", label="card"):
             pass
 
     async def next_operation() -> None:
-        async with sender.hold("om_message", label="comments"):
+        async with sender.hold("om_message", label="download"):
             new_entered.set()
             await finish.wait()
 
@@ -250,16 +293,16 @@ async def test_new_typing_hold_waits_for_previous_cleanup_even_if_owner_is_cance
     with pytest.raises(asyncio.CancelledError):
         await first
     second = asyncio.create_task(next_operation())
-    async with sender.hold("om_other", label="download"):
+    async with sender.hold("om_message", label="comments"):
         assert not new_entered.is_set()
-        assert calls == [("start", "om_message"), ("start", "om_other")]
+        assert calls == [("start", "card"), ("start", "comments")]
     removed.set()
     await asyncio.wait_for(new_entered.wait(), timeout=1)
-    assert calls[-2:] == [("stop", "om_message"), ("start", "om_message")]
+    assert calls[-2:] == [("stop", "card"), ("start", "download")]
     finish.set()
     await second
 
-    assert calls[-1] == ("stop", "om_message")
+    assert calls[-1] == ("stop", "download")
 
 
 @respx.mock

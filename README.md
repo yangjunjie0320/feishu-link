@@ -263,6 +263,7 @@ Manual downloads bypass BibiGPT summaries and the automatic short-video duration
 Supported video cards also include action buttons:
 
 - `总结视频` triggers the same BibiGPT summary-and-chapter-summary path as mentioning the bot with a YouTube or Bilibili URL.
+- Summary work uses Feishu's `Typing` reaction; comment analysis uses `THINKING`. When both run on one message, each reaction remains until its corresponding work finishes.
 - `分析评论` fetches up to 200 comments, ranks comments by likes and replies, translates the top 3, and sends a fixed-template comment analysis card with total-comment and sample counts.
 - `下载视频` triggers the same manual-download path and sends the result as a reply to the card message.
 
