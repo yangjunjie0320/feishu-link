@@ -7,6 +7,7 @@ import re
 import time
 from collections import OrderedDict
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import lark_oapi as lark
@@ -32,11 +33,12 @@ from .card import (
 from .comment_analyzer import CommentAnalysisError, CommentAnalyzer
 from .config import Settings
 from .dispatch import Dispatcher
+from .feishu_async import call_feishu_async
 from .image_uploader import upload_cover
 from .listener import CardActionEvent, ListenerEvent, MessageEvent
 from .media_downloader import VideoSkipReason, download_video
-from .parsers.base import LinkMetadata, ParserError
-from .platforms import is_short_video_platform
+from .parsers.base import CardParseResult, CardStatus, LinkMetadata, MediaType, ParserError
+from .platforms import detect_platform, is_short_video_platform
 from .sender import CardSender, TextSender, TypingReactionSender, VideoSender
 from .translator import TitleTranslator
 from .url_extract import (
@@ -50,6 +52,26 @@ logger = logging.getLogger(__name__)
 
 _SEEN_CAPACITY = 500
 _CHAPTER_SUMMARY_SEND_INTERVAL_SECONDS = 0.25
+
+
+def _card_failure_description(reason: str) -> str:
+    messages = {
+        "timeout": "内容获取超时，请稍后重新发送链接",
+        "rate_limited": "平台暂时限制访问，请稍后重试",
+        "rate_limit": "平台暂时限制访问，请稍后重试",
+        "auth": "内容需要登录，暂时无法读取",
+        "auth_required": "内容需要登录，暂时无法读取",
+        "login_required": "内容需要登录，暂时无法读取",
+        "challenge": "平台要求验证，暂时无法读取",
+        "verification_required": "平台要求验证，暂时无法读取",
+        "deleted": "内容已删除或不可用",
+        "unavailable": "暂时无法读取内容，可通过原链接查看",
+        "unsupported": "暂不支持这种内容链接",
+        "geo_restricted": "内容存在地区限制，暂时无法读取",
+        "geo": "内容存在地区限制，暂时无法读取",
+        "region": "内容存在地区限制，暂时无法读取",
+    }
+    return messages.get(reason, "暂时无法读取内容，可通过原链接查看")
 
 
 def _remember(cache: OrderedDict[str, Any], key: str, value: Any) -> None:
@@ -193,7 +215,8 @@ class Pipeline:
         )
         async with self._typing_sender.hold(event.message_id, label="download"):
             try:
-                meta = await self._dispatcher.parse(event.source_url)
+                result = await self._dispatcher.parse_card(event.source_url)
+                meta = result.metadata
             except ParserError as e:
                 logger.error(
                     "card action parse failed: url=%s message_id=%s reason=%s",
@@ -283,7 +306,9 @@ class Pipeline:
             .build()
         )
         try:
-            resp = await self._lark_client.arequest(request)
+            resp = await call_feishu_async(
+                self._lark_client, None, "arequest", request, timeout=10.0
+            )
             if not resp.success():
                 logger.warning(
                     "failed to fetch replied message (missing im:message read scope?): "
@@ -318,32 +343,19 @@ class Pipeline:
             logger.debug("skip unsupported platform url=%s", url)
             return
         logger.debug("parsing url=%s", url)
+        started = time.monotonic()
         async with self._typing_sender.hold(event.message_id, label="card"):
-            try:
-                meta = await self._dispatcher.parse(url)
-            except ParserError as e:
-                logger.error(
-                    "parse failed: url=%s message_id=%s reason=%s",
-                    url,
-                    event.message_id,
-                    e.reason,
-                )
-                if manual_download:
-                    await self._text_sender.send(
-                        _download_failure_message(url, f"链接解析失败: {e.reason}"),
-                        event.chat_id,
-                        event.message_id,
-                    )
-                return
-
-            await self._translator.translate_metadata(meta)
-
-            img_key: str | None = None
-            if meta.cover_url:
-                img_key = await upload_cover(meta.cover_url, self._lark_client, self._http)
-
+            result, img_key = await self._prepare_card(url, started)
+            meta = result.metadata
             card_json = build_card(meta, img_key)
             card_sent = await self._sender.send(card_json, event.chat_id, event.message_id)
+            logger.info(
+                "card outcome: url=%s platform=%s quality=%s has_content=%s cover=%s "
+                "sent=%s elapsed=%.2fs sources=%s reason=%s message_id=%s",
+                url, meta.platform, result.status, result.has_content,
+                "uploaded" if img_key else "absent", card_sent, time.monotonic() - started,
+                ",".join(result.sources), result.reason or "none", event.message_id,
+            )
             if not card_sent:
                 logger.error(
                     "skip video append because card send failed: url=%s message_id=%s",
@@ -358,11 +370,11 @@ class Pipeline:
                 event.message_id,
             )
 
-            if self._archive is not None:
+            if self._archive is not None and result.has_content:
                 archive_url = meta.canonical_url or meta.source_url
                 self._archive.enqueue(
                     ArchiveEntry(
-                        title=meta.translated_title or meta.title,
+                        title=meta.translated_title or meta.title or meta.description[:100],
                         url=archive_url,
                         platform=meta.platform,
                         channel=meta.channel or "",
@@ -370,17 +382,16 @@ class Pipeline:
                         sender_open_id=event.sender_id,
                         chat_id=event.chat_id,
                         chat_type=event.chat_type,
+                        partial=result.status != CardStatus.COMPLETE,
                     )
                 )
                 _remember(self._msg_archive_url, event.message_id, archive_url)
                 _remember(self._source_archive_url, meta.source_url, archive_url)
 
-        domain = ""
-        url_lower = url.lower()
-        if "youtube.com" in url_lower or "youtu.be" in url_lower:
-            domain = "youtube"
-        elif "bilibili.com" in url_lower or "b23.tv" in url_lower:
-            domain = "bilibili"
+        domain = detect_platform(url)
+
+        if domain == "douyin" or not result.has_content:
+            return
 
         if manual_download:
             await self._try_send_video(
@@ -394,6 +405,85 @@ class Pipeline:
             await self._try_send_bibigpt_summary(url, event)
         else:
             await self._try_send_video(meta, event, img_key)
+
+    async def _prepare_card(self, url: str, started: float) -> tuple[CardParseResult, str | None]:
+        result = CardParseResult(LinkMetadata(source_url=url, platform=detect_platform(url)))
+        deadline = started + self._settings.card_prepare_timeout
+        try:
+            async with asyncio.timeout(min(
+                self._settings.card_parse_timeout + 3, max(0.01, deadline - time.monotonic())
+            )):
+                result = await self._dispatcher.parse_card(url)
+        except TimeoutError:
+            result.reason = "timeout"
+            logger.warning("card preparation timed out: url=%s stage=parse", url)
+        except Exception as exc:
+            result.reason = "parse_error"
+            logger.warning("card preparation failed: url=%s error=%s", url, type(exc).__name__)
+
+        meta = result.metadata
+        if not result.has_content:
+            meta.title = "内容暂未获取"
+            meta.description = ""
+            meta.translated_title = ""
+            meta.translated_description = ""
+            meta.cover_url = ""
+            meta.cover_candidates = []
+            meta.parse_warnings = [_card_failure_description(result.reason)]
+            return result, None
+
+        async def translate() -> None:
+            try:
+                await self._translator.translate_metadata(meta)
+            except Exception as exc:
+                logger.warning("card translation failed: platform=%s error=%s", meta.platform,
+                               type(exc).__name__)
+
+        async def cover() -> str | None:
+            if not meta.cover_url and not meta.cover_candidates:
+                return None
+            parsed = urlsplit(meta.canonical_url or url)
+            headers = {"Referer": f"{parsed.scheme}://{parsed.netloc}/"}
+            return await upload_cover(
+                meta.cover_url, self._lark_client, self._http,
+                candidates=meta.cover_candidates, headers=headers,
+                timeout=min(self._settings.card_enrichment_timeout,
+                            max(0.01, deadline - time.monotonic())),
+            )
+
+        translation_task = asyncio.create_task(translate())
+        cover_task = asyncio.create_task(cover())
+        try:
+            async with asyncio.timeout(min(
+                self._settings.card_enrichment_timeout, max(0.01, deadline - time.monotonic())
+            )):
+                await asyncio.gather(translation_task, cover_task, return_exceptions=True)
+        except TimeoutError:
+            logger.warning("card enrichment timed out: platform=%s", meta.platform)
+        finally:
+            for task in (translation_task, cover_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(translation_task, cover_task, return_exceptions=True)
+        img_key = None
+        if not cover_task.cancelled() and not cover_task.exception():
+            img_key = cover_task.result()
+        if (meta.has_visual is True or meta.cover_url or meta.cover_candidates) and not img_key:
+            result.status = CardStatus.PARTIAL
+            result.reason = "cover_unavailable"
+            self._dispatcher.invalidate_card(url)
+            if "封面暂未获取" not in meta.parse_warnings:
+                meta.parse_warnings.insert(0, "封面暂未获取，已保留可读取的内容")
+            if not meta.title and not meta.description:
+                result.has_content = False
+                result.status = CardStatus.UNAVAILABLE
+                meta.title = "内容暂未获取"
+                meta.parse_warnings = ["原内容图片暂未获取，可通过原链接查看"]
+        elif result.status == CardStatus.PARTIAL and not meta.parse_warnings:
+            meta.parse_warnings.append("内容暂未完整获取，已保留可读取的部分")
+        logger.info("card prepared: platform=%s quality=%s elapsed=%.2fs",
+                    meta.platform, result.status, time.monotonic() - started)
+        return result, img_key
 
     async def _try_send_video(
         self,
@@ -435,6 +525,18 @@ class Pipeline:
         enforce_duration_limit: bool,
     ) -> None:
         try:
+            if meta.platform == "douyin":
+                raise VideoSkipReason("platform not allowed: douyin")
+            if (
+                self._settings.video_append_enabled
+                and meta.platform in self._settings.allowed_video_platforms
+                and meta.platform != "douyin"
+                and meta.media_type in (MediaType.VIDEO, MediaType.UNKNOWN)
+                and (not meta.download_candidates or meta.duration_seconds is None)
+                and not (enforce_duration_limit and meta.duration_seconds is not None
+                         and meta.duration_seconds > self._settings.max_video_duration_seconds)
+            ):
+                meta = await self._dispatcher.prepare_video(meta)
             video = await download_video(
                 meta,
                 self._settings,
@@ -897,7 +999,9 @@ class Pipeline:
             .build()
         )
         try:
-            resp = await self._lark_client.arequest(request)
+            resp = await call_feishu_async(
+                self._lark_client, None, "arequest", request, timeout=5.0
+            )
             if not resp.success():
                 logger.warning("failed to fetch bot info: code=%s msg=%s", resp.code, resp.msg)
                 return ""

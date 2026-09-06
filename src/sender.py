@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+from uuid import uuid4
 
 import httpx
 import lark_oapi as lark
@@ -25,6 +27,7 @@ from lark_oapi.api.im.v1 import (
 )
 
 from .config import Mode, Settings
+from .feishu_async import call_feishu_async
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,10 @@ def _work_reaction_type(label: str) -> str:
 
 
 class SendError(Exception):
+    pass
+
+
+class _PermanentCardSendError(SendError):
     pass
 
 
@@ -103,16 +110,15 @@ class TypingReactionSender:
         )
 
         try:
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(
-                None, lambda: self._client.im.v1.message_reaction.create(request)
+            response = await call_feishu_async(
+                self._client, "message_reaction", "acreate", request, timeout=5.0
             )
         except Exception as e:
             logger.warning(
                 "typing reaction add failed: label=%s message_id=%s error=%s",
                 label,
                 message_id,
-                e,
+                str(e) or type(e).__name__,
             )
             return None
 
@@ -161,9 +167,8 @@ class TypingReactionSender:
         )
 
         try:
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(
-                None, lambda: self._client.im.v1.message_reaction.delete(request)
+            response = await call_feishu_async(
+                self._client, "message_reaction", "adelete", request, timeout=5.0
             )
         except Exception as e:
             logger.warning(
@@ -171,7 +176,7 @@ class TypingReactionSender:
                 label,
                 message_id,
                 reaction_id,
-                e,
+                str(e) or type(e).__name__,
             )
             return False
 
@@ -202,75 +207,95 @@ class CardSender:
         self._client = client
 
     async def send(self, card_json: str, chat_id: str, message_id: str) -> bool:
-        @tenacity.retry(
-            stop=tenacity.stop_after_attempt(self._settings.send_retry_attempts),
-            wait=tenacity.wait_exponential(multiplier=1, min=1, max=9),
-            reraise=True,
-        )
+        send_uuid = str(uuid4())
+
         async def _attempt() -> None:
             if self._settings.mode == Mode.A:
-                await self._reply(card_json, message_id)
+                await self._reply(card_json, message_id, send_uuid=send_uuid)
             else:
-                await self._send_to_archive(card_json)
+                await self._send_to_archive(card_json, send_uuid=send_uuid)
 
         try:
-            await _attempt()
+            await self._send_with_retries(_attempt)
         except Exception as e:
             logger.critical(
                 "card send exhausted all retries: message_id=%s error=%s",
                 message_id,
-                e,
+                str(e) or type(e).__name__,
             )
             return False
         return True
 
-    async def _reply(self, card_json: str, message_id: str) -> None:
+    async def _send_with_retries(self, attempt: Callable[[], Awaitable[None]]) -> None:
+        async with asyncio.timeout(self._settings.card_send_timeout):
+            for index in range(max(1, self._settings.send_retry_attempts)):
+                try:
+                    async with asyncio.timeout(self._settings.card_send_attempt_timeout):
+                        await attempt()
+                    return
+                except _PermanentCardSendError:
+                    raise
+                except Exception:
+                    if index + 1 >= self._settings.send_retry_attempts:
+                        raise
+                    await asyncio.sleep(min(2**index, 9))
+
+    async def _reply(
+        self, card_json: str, message_id: str, *, send_uuid: str | None = None
+    ) -> None:
         request = (
             ReplyMessageRequest.builder()
             .message_id(message_id)
             .request_body(
-                ReplyMessageRequestBody.builder().msg_type("interactive").content(card_json).build()
+                ReplyMessageRequestBody.builder()
+                .msg_type("interactive")
+                .content(card_json)
+                .uuid(send_uuid or str(uuid4()))
+                .build()
             )
             .build()
         )
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None, lambda: self._client.im.v1.message.reply(request)
+        response = await call_feishu_async(
+            self._client,
+            "message",
+            "areply",
+            request,
+            timeout=self._settings.card_send_attempt_timeout,
         )
-        if not response.success():
-            raise SendError(f"reply failed: code={response.code} msg={response.msg}")
+        self._check_response(response, "reply")
         logger.info("card sent as thread reply: message_id=%s", message_id)
 
-    async def _send_to_archive(self, card_json: str) -> None:
+    async def _send_to_archive(self, card_json: str, *, send_uuid: str | None = None) -> None:
         if not self._settings.archive_chat_id:
-            raise SendError("archive_chat_id not configured for mode B")
-        await self._create_to_chat(card_json, self._settings.archive_chat_id)
+            raise _PermanentCardSendError("archive_chat_id not configured for mode B")
+        await self._create_to_chat(
+            card_json, self._settings.archive_chat_id, send_uuid=send_uuid
+        )
 
     async def send_to_chat(self, card_json: str, chat_id: str) -> bool:
         """Send an interactive card to an arbitrary chat, with the same retry
         policy as send(). Used by flows that target a specific chat regardless
         of mode (e.g. the daily report)."""
 
-        @tenacity.retry(
-            stop=tenacity.stop_after_attempt(self._settings.send_retry_attempts),
-            wait=tenacity.wait_exponential(multiplier=1, min=1, max=9),
-            reraise=True,
-        )
+        send_uuid = str(uuid4())
+
         async def _attempt() -> None:
-            await self._create_to_chat(card_json, chat_id)
+            await self._create_to_chat(card_json, chat_id, send_uuid=send_uuid)
 
         try:
-            await _attempt()
+            await self._send_with_retries(_attempt)
         except Exception as e:
             logger.critical(
                 "card send to chat exhausted all retries: chat_id=%s error=%s",
                 chat_id,
-                e,
+                str(e) or type(e).__name__,
             )
             return False
         return True
 
-    async def _create_to_chat(self, card_json: str, chat_id: str) -> None:
+    async def _create_to_chat(
+        self, card_json: str, chat_id: str, *, send_uuid: str | None = None
+    ) -> None:
         request = (
             CreateMessageRequest.builder()
             .receive_id_type("chat_id")
@@ -279,17 +304,32 @@ class CardSender:
                 .receive_id(chat_id)
                 .msg_type("interactive")
                 .content(card_json)
+                .uuid(send_uuid or str(uuid4()))
                 .build()
             )
             .build()
         )
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None, lambda: self._client.im.v1.message.create(request)
+        response = await call_feishu_async(
+            self._client,
+            "message",
+            "acreate",
+            request,
+            timeout=self._settings.card_send_attempt_timeout,
         )
-        if not response.success():
-            raise SendError(f"create failed: code={response.code} msg={response.msg}")
+        self._check_response(response, "create")
         logger.info("card sent to chat: chat_id=%s", chat_id)
+
+    @staticmethod
+    def _check_response(response: Any, operation: str) -> None:
+        if response.success():
+            return
+        status = getattr(getattr(response, "raw", None), "status_code", 0) or 0
+        code = response.code
+        permanent = code in {230001, 230002, 230006, 230011, 231003} or (
+            400 <= status < 500 and status not in (408, 429)
+        )
+        error_type = _PermanentCardSendError if permanent else SendError
+        raise error_type(f"{operation} failed: code={code} msg={response.msg}")
 
 
 class VideoSender:

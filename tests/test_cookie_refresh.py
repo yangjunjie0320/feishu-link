@@ -389,7 +389,45 @@ async def test_force_refresh_noop_when_disabled_or_unlisted(monkeypatch, tmp_pat
 
 @pytest.mark.asyncio
 async def test_browser_login_rejects_unknown_platform() -> None:
-    assert await browser_login("douyin", Settings()) is False
+    assert await browser_login("unknown", Settings()) is False
+
+
+def test_douyin_refresh_profile_is_independent() -> None:
+    profile = cookie_refresh._PROFILES["douyin"]
+    assert profile.cookie_domain == "douyin.com"
+    assert profile.site_url == "https://www.douyin.com/"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_refresh_waits_for_fresh_cookies(monkeypatch, tmp_path) -> None:
+    import asyncio
+
+    cookie_refresh._last_refresh.clear()
+    cookie_refresh._last_force.clear()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def refresh(platform, settings, target):
+        calls.append(platform)
+        entered.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(cookie_refresh, "refresh_cookies", refresh)
+    settings = Settings(cookie_refresh_platforms=["youtube"],
+                        platform_cookie_files={"youtube": str(tmp_path / "youtube.txt")})
+    first = asyncio.create_task(ensure_fresh_cookies("youtube", settings))
+    await entered.wait()
+    second = asyncio.create_task(force_refresh("youtube", settings))
+    await asyncio.sleep(0)
+    assert not second.done()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    release.set()
+    assert await second is True
+    assert calls == ["youtube"]
 
 
 def test_tiktok_refresh_profile_registered() -> None:

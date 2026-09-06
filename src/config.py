@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -95,6 +95,23 @@ class Settings(BaseSettings):
 
     request_timeout: float = 10.0
     send_retry_attempts: int = 3
+    card_prepare_timeout: float = Field(default=60.0, gt=0)
+    card_parse_timeout: float = Field(default=45.0, gt=0)
+    card_enrichment_timeout: float = Field(default=10.0, gt=0)
+    card_parse_concurrency: int = Field(default=4, ge=1)
+    card_platform_concurrency: int = Field(default=2, ge=1)
+    card_cache_ttl_seconds: float = Field(default=600.0, ge=0)
+    card_cache_capacity: int = Field(default=256, ge=1)
+    card_browser_timeout: float = Field(default=30.0, gt=0)
+    card_browser_profile_dir: str = "browser-data/cards"
+    card_browser_channel: str = "chrome"
+    card_browser_headless: bool = True
+    card_browser_concurrency: int = Field(default=2, ge=1)
+    card_browser_platform_concurrency: int = Field(default=1, ge=1)
+    card_send_timeout: float = Field(default=30.0, gt=0)
+    card_send_attempt_timeout: float = Field(default=10.0, gt=0)
+    media_metadata_timeout: float = Field(default=60.0, gt=0)
+    media_metadata_concurrency: int = Field(default=2, ge=1)
     video_append_enabled: bool = True
     max_video_duration_seconds: int = 180
     max_video_file_mb: int = 30
@@ -247,6 +264,11 @@ class Settings(BaseSettings):
         candidate = Path("cookies") / f"{normalized}.txt"
         if candidate.exists():
             return str(candidate)
+
+        # Douyin has an independent session; never treat the generic legacy
+        # cookie file as its login state.
+        if normalized == "douyin":
+            return ""
 
         if self.cookie_file and Path(self.cookie_file).exists():
             return self.cookie_file

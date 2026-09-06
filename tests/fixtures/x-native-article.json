@@ -1,0 +1,33 @@
+{
+  "data": {
+    "tweetResult": {
+      "result": {
+        "rest_id": "123",
+        "legacy": {
+          "full_text": "https://t.co/example",
+          "entities": {
+            "urls": [{"expanded_url": "https://x.com/i/article/456"}]
+          }
+        },
+        "article": {
+          "article_results": {
+            "result": {
+              "rest_id": "456",
+              "title": "A field guide to reliable systems",
+              "preview_text": "An independent review of practical engineering observations.",
+              "cover_media": {
+                "media_info": {
+                  "__typename": "ApiImage",
+                  "original_img_url": "https://pbs.twimg.com/media/example-article.jpg",
+                  "original_img_width": 1600,
+                  "original_img_height": 900
+                }
+              }
+            }
+          }
+        },
+        "card": {"rest_id": "https://t.co/example"}
+      }
+    }
+  }
+}

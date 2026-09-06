@@ -1,7 +1,11 @@
+import json
+from pathlib import Path
+
 import httpx
 import respx
 
 from src.config import Settings
+from src.parsers.base import MediaType
 from src.parsers.x_graphql import XGraphQLParser
 
 
@@ -90,3 +94,24 @@ async def test_x_graphql_accepts_text_without_media() -> None:
     assert meta.cover_url == ""
     assert meta.channel == "@NFTCPS"
     assert meta.like_count == 1
+
+
+@respx.mock
+async def test_native_article_uses_preview_fields_without_requesting_article_body() -> None:
+    payload = json.loads(Path("tests/fixtures/x-native-article.json").read_text())
+    route = respx.get(
+        "https://x.com/i/api/graphql/2Acdg-VztGlHX7MjX67Ysw/TweetResultByRestId"
+    ).mock(return_value=httpx.Response(200, json=payload))
+    settings = Settings(cookie_file="tests/fixtures/x-cookie.txt")
+    async with httpx.AsyncClient() as client:
+        meta = await XGraphQLParser(client, settings).parse("https://x.com/author/status/123")
+    features = json.loads(route.calls.last.request.url.params["features"])
+    toggles = json.loads(route.calls.last.request.url.params["fieldToggles"])
+    assert features["responsive_web_twitter_article_tweet_consumption_enabled"] is True
+    assert toggles == {"withArticleRichContentState": False, "withArticlePlainText": False}
+    assert meta.title == "A field guide to reliable systems"
+    assert meta.description == "An independent review of practical engineering observations."
+    assert meta.cover_url == "https://pbs.twimg.com/media/example-article.jpg"
+    assert meta.has_visual is True
+    assert meta.media_type == MediaType.ARTICLE
+    assert meta.canonical_url == "https://x.com/author/status/123"

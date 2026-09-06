@@ -5,8 +5,9 @@ from urllib.parse import urlencode, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from ..http_errors import describe_request_error
+from ..card_metadata import content_key
 from .base import LinkMetadata, MediaType, ParserError
+from .card_http import get_response, json_object
 
 
 class XOEmbedParser:
@@ -19,15 +20,10 @@ class XOEmbedParser:
             "omit_script": "1",
             "url": oembed_url,
         })
-        try:
-            resp = await self._client.get(endpoint, follow_redirects=True)
-        except httpx.RequestError as e:
-            raise ParserError(url, f"x oEmbed request error: {describe_request_error(e)}") from e
-
-        if resp.status_code >= 400:
-            raise ParserError(url, f"x oEmbed HTTP {resp.status_code}")
-
-        data = resp.json()
+        resp = await get_response(self._client, endpoint, source_url=url, label="x oEmbed")
+        data = json_object(resp, url, "x oEmbed")
+        if data.get("url") and content_key(str(data["url"])) != content_key(url):
+            raise ParserError(url, "target_mismatch: X oEmbed returned another post")
         html = str(data.get("html") or "")
         text = _extract_tweet_text(html)
         author_name = str(data.get("author_name") or "").strip()
@@ -44,8 +40,10 @@ class XOEmbedParser:
             site_name="X",
             platform="x",
             canonical_url=str(data.get("url") or url),
-            media_type=MediaType.ARTICLE,
+            media_type=MediaType.UNKNOWN,
             channel=channel,
+            # oEmbed's text alone cannot prove the original post has no media.
+            content_verified=bool(text),
         )
 
 

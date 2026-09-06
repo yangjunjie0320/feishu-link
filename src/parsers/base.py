@@ -21,6 +21,13 @@ class MediaType(StrEnum):
     UNKNOWN = "unknown"
 
 
+class CardStatus(StrEnum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+    UNSUPPORTED = "unsupported"
+
+
 @dataclass
 class DownloadCandidate:
     url: str
@@ -51,6 +58,19 @@ class LinkMetadata:
     requires_auth: bool = False
     parse_warnings: list[str] = field(default_factory=list)
     fetched_at_utc: datetime = field(default_factory=now_utc)
+    cover_candidates: list[str] = field(default_factory=list)
+    # False means a source confirmed a text-only post; None means unknown.
+    has_visual: bool | None = None
+    content_verified: bool = False
+
+
+@dataclass
+class CardParseResult:
+    metadata: LinkMetadata
+    status: CardStatus = CardStatus.UNAVAILABLE
+    reason: str = ""
+    sources: list[str] = field(default_factory=list)
+    has_content: bool = False
 
 
 @runtime_checkable

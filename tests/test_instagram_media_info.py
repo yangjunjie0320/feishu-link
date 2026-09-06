@@ -1,9 +1,12 @@
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 
+from src.card_metadata import card_result
 from src.config import Settings
+from src.parsers.base import CardStatus
 from src.parsers.instagram_media_info import (
     InstagramMediaInfoParser,
     _shortcode_to_media_id,
@@ -56,6 +59,31 @@ async def test_instagram_media_info_uses_requested_carousel_image() -> None:
     assert meta.channel == "Rebecca"
     assert meta.like_count == 392
     assert meta.comment_count == 5
+
+
+@pytest.mark.parametrize("carousel", [None, [{"image_versions2": {
+    "candidates": [{"url": "https://cdn.example.com/first.jpg"}],
+}}], [{"image_versions2": {
+    "candidates": [{"url": "https://cdn.example.com/first.jpg"}],
+}}, {}]])
+async def test_instagram_media_info_does_not_substitute_first_image_for_requested_slide(
+    carousel: list | None,
+) -> None:
+    item = {
+        "caption": {"text": "Actual caption"}, "user": {"username": "writer"},
+        "image_versions2": {"candidates": [{"url": "https://cdn.example.com/default.jpg"}]},
+        "carousel_media": carousel,
+    }
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"items": [item]}))
+    async with httpx.AsyncClient(transport=transport) as client:
+        meta = await InstagramMediaInfoParser(client, Settings()).parse(
+            "https://www.instagram.com/p/DYfWbunGlNg/?img_index=2"
+        )
+    assert meta.description == "Actual caption"
+    assert meta.channel == "writer"
+    assert meta.cover_url == ""
+    assert meta.cover_candidates == []
+    assert card_result(meta).status == CardStatus.PARTIAL
 
 
 @respx.mock

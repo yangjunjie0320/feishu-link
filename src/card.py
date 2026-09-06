@@ -6,8 +6,10 @@ import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from html import escape
+from urllib.parse import quote
 
 from .bibi_models import ChapterSummarySection
+from .card_metadata import is_placeholder
 from .parsers.base import LinkMetadata, MediaType
 
 _SOURCE_COLORS = {
@@ -37,10 +39,18 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[:max_chars].rstrip() + "..." if len(text) > max_chars else text
 
 
-def _format_source_tag(label: str) -> str:
+def _content_link(label: str, url: str) -> str:
+    safe_label = escape(label)
+    for character in "\\[]*_`":
+        safe_label = safe_label.replace(character, "\\" + character)
+    target = quote(url, safe=":/?&=%+#@")
+    return f"[{safe_label}]({target})"
+
+
+def _format_source_tag(label: str, url: str = "") -> str:
     color = _SOURCE_COLORS.get(label.strip().lower(), "grey")
-    safe_label = escape(label.strip())
-    return f"<font color='{color}'>[{safe_label}]</font>"
+    content = _content_link(label.strip(), url) if url else f"[{escape(label.strip())}]"
+    return f"<font color='{color}'>{content}</font>"
 
 
 def _fmt_count(value: int) -> str:
@@ -460,7 +470,7 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
     elements: list[dict[str, object]] = []
 
     meta_parts: list[str] = []
-    source_label = meta.site_name or meta.platform
+    source_label = meta.site_name or meta.platform or "原文"
     if source_label:
         meta_parts.append(source_label)
     if meta.channel:
@@ -473,12 +483,14 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
         body = description_block
     else:
         raw_title = meta.translated_title or meta.title
+        if meta.platform == "douyin" and not raw_title:
+            raw_title = _clean_description_text(meta.translated_description or meta.description)
         title = _truncate(raw_title, 60) if raw_title else (meta.site_name or "Link")
-        body = f"**{title}**"
+        body = f"**{_content_link(title, _action_url(meta))}**"
         if meta.translated_title and meta.title:
             body += f"\n<font color='grey'>原标题: {escape(_truncate(meta.title, 80))}</font>"
     if meta_parts:
-        tag = _format_source_tag(meta_parts[0])
+        tag = _format_source_tag(meta_parts[0], meta.source_url or _action_url(meta))
         body += f"\n{tag}"
         if len(meta_parts) > 1:
             body += f" · {' · '.join(meta_parts[1:])}"
@@ -581,12 +593,30 @@ def _supports_comment_analysis_action(meta: LinkMetadata) -> bool:
 
 def _description_should_be_primary(meta: LinkMetadata, description_block: str) -> bool:
     return bool(
-        description_block and meta.media_type == MediaType.ARTICLE and meta.platform != "web"
+        description_block
+        and meta.platform != "douyin"
+        and not _has_distinct_x_article_title(meta)
+        and (
+            (meta.media_type == MediaType.ARTICLE and meta.platform != "web")
+            or meta.platform in {"instagram", "tiktok", "x"}
+        )
+    )
+
+
+def _has_distinct_x_article_title(meta: LinkMetadata) -> bool:
+    return bool(
+        meta.platform == "x"
+        and meta.media_type == MediaType.ARTICLE
+        and meta.description.strip()
+        and not is_placeholder(meta.title, meta.platform, meta.source_url)
+        and _clean_description_text(meta.title) != _clean_description_text(meta.description)
     )
 
 
 def _format_description_block(meta: LinkMetadata) -> str:
-    if meta.media_type == MediaType.VIDEO:
+    if meta.media_type == MediaType.VIDEO and meta.platform not in {
+        "instagram", "tiktok", "x", "douyin"
+    }:
         return ""
 
     description = _clean_description_text(meta.description)
@@ -596,7 +626,7 @@ def _format_description_block(meta: LinkMetadata) -> str:
             f"{escape(_truncate(translated, 120))} "
             f"<font color='grey'>原文: {escape(_truncate(description, 160))}</font>"
         )
-    if description and meta.media_type == MediaType.ARTICLE:
+    if description:
         return f"<font color='grey'>{escape(_truncate(description, 160))}</font>"
     return ""
 

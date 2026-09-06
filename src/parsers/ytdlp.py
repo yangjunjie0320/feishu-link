@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import signal
+import sys
+from datetime import datetime
 from typing import Any
 
 from ..config import Settings
 from ..cookie_refresh import ensure_fresh_cookies
 from ..cookie_utils import temporary_cookie_file
 from ..platforms import detect_platform
-from ..ytdlp_options import apply_ytdlp_runtime
 from .base import DownloadCandidate, LinkMetadata, MediaType, ParserError
 
 logger = logging.getLogger(__name__)
@@ -17,47 +21,76 @@ logger = logging.getLogger(__name__)
 class YtDlpMetadataParser:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        self._slots = asyncio.Semaphore(settings.media_metadata_concurrency)
 
     async def parse(self, url: str) -> LinkMetadata:
         platform = detect_platform(url)
-        await ensure_fresh_cookies(platform, self._settings)
+        try:
+            async with asyncio.timeout(self._settings.media_metadata_timeout), self._slots:
+                await ensure_fresh_cookies(platform, self._settings)
+                cookie_file = self._settings.cookie_file_for_platform(platform)
+                with temporary_cookie_file(cookie_file) as temporary:
+                    data = await _run_metadata_worker(url, platform, temporary or "")
+        except TimeoutError as exc:
+            raise ParserError(url, "media metadata time budget exhausted") from exc
+        try:
+            data["media_type"] = MediaType(data.get("media_type", "unknown"))
+            data["download_candidates"] = [
+                DownloadCandidate(**item) for item in data.get("download_candidates", [])
+            ]
+            if "fetched_at_utc" in data:
+                data["fetched_at_utc"] = datetime.fromisoformat(data["fetched_at_utc"])
+            return LinkMetadata(**data)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ParserError(url, "media worker returned invalid metadata") from exc
 
-        def _extract() -> dict[str, Any]:
-            try:
-                import yt_dlp
-            except ModuleNotFoundError as e:
-                raise ParserError(url, "yt-dlp is not installed") from e
 
-            options: dict[str, Any] = {
-                "quiet": False,
-                "no_warnings": False,
-                "skip_download": True,
-                "noplaylist": True,
-                "noprogress": True,
-                "ignore_no_formats_error": True,
-                "socket_timeout": 15,
-                "source_address": "0.0.0.0",
-            }
-            apply_ytdlp_runtime(options, platform)
+async def _stop_worker(process: asyncio.subprocess.Process) -> None:
+    # A finished Python worker can leave a child holding its output pipes.
+    # Its private process group still needs cleanup in that case.
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=1)
+    except TimeoutError:
+        pass
+    finally:
+        # Deno may outlive the Python worker; reap the entire private group.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            logger.warning("media worker group cleanup denied: pid=%s", process.pid)
+    if process.returncode is None:
+        await asyncio.wait_for(process.wait(), timeout=1)
 
-            cookie_file = self._settings.cookie_file_for_platform(platform)
-            with temporary_cookie_file(cookie_file) as temp_cookie_file:
-                if temp_cookie_file:
-                    options["cookiefile"] = temp_cookie_file
 
-                try:
-                    with yt_dlp.YoutubeDL(options) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                except Exception as e:
-                    raise ParserError(url, f"yt-dlp metadata failed: {e}") from e
-
-            if not isinstance(info, dict):
-                raise ParserError(url, "yt-dlp returned invalid metadata")
-            return info
-
-        loop = asyncio.get_running_loop()
-        info = await loop.run_in_executor(None, _extract)
-        return _metadata_from_info(url, platform, info)
+async def _run_metadata_worker(url: str, platform: str, cookie_file: str) -> dict[str, Any]:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "src.parsers.ytdlp_worker",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        payload = json.dumps({"url": url, "platform": platform, "cookie_file": cookie_file})
+        output, errors = await process.communicate(payload.encode())
+    except BaseException:
+        await asyncio.shield(_stop_worker(process))
+        raise
+    if process.returncode:
+        raise ParserError(url, "yt-dlp metadata failed: " + errors.decode(errors="replace")[-600:])
+    try:
+        data = json.loads(output)
+    except ValueError as exc:
+        raise ParserError(url, "media worker returned non-JSON output") from exc
+    if not isinstance(data, dict):
+        raise ParserError(url, "media worker returned invalid output")
+    return data
 
 
 def _metadata_from_info(url: str, platform: str, info: dict[str, Any]) -> LinkMetadata:

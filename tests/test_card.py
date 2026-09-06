@@ -1,6 +1,8 @@
 import json
 import unicodedata
 
+import pytest
+
 from src.bibi_models import ChapterSummarySection
 from src.card import (
     _fmt_count,
@@ -289,8 +291,8 @@ def test_card_structure() -> None:
     assert image_column["weight"] == 1
     assert text_column["weight"] == 3
     body_text = text_column["elements"][0]["text"]["content"]
-    assert "**Example Article**" in body_text
-    assert "<font color='grey'>[Example]</font>" in body_text
+    assert "**[Example Article](https://example.com)**" in body_text
+    assert "<font color='grey'>[Example](https://example.com)</font>" in body_text
     actions = [e for e in elements if e.get("tag") == "action"]
     assert actions == []
 
@@ -502,7 +504,7 @@ def test_card_with_youtube_metadata() -> None:
     body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
     assert "5:05" in body_text
     assert "Great Channel" in body_text
-    assert "<font color='red'>[YouTube]</font>" in body_text
+    assert "<font color='red'>[YouTube](https://youtu.be/abc123)</font>" in body_text
     assert "播放 1.2万" in body_text
     assert "点赞 678" in body_text
     assert "评论 90" in body_text
@@ -579,6 +581,48 @@ def test_video_card_omits_description_even_if_translated() -> None:
     assert "赞助文案" not in body_text
 
 
+@pytest.mark.parametrize("platform", ["instagram", "tiktok", "x"])
+def test_social_video_card_displays_real_caption_instead_of_generic_title(platform: str) -> None:
+    meta = LinkMetadata(
+        source_url=f"https://{platform}.com/video/123",
+        title="Generic Video",
+        description="Three vintage monitors on a tiny desk.",
+        translated_description="小桌面上摆着三台复古显示器。",
+        site_name=platform,
+        platform=platform,
+        media_type=MediaType.VIDEO,
+    )
+    card = json.loads(build_card(meta))
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
+
+    assert body_text.startswith("小桌面上摆着三台复古显示器。")
+    assert "原文: Three vintage monitors" in body_text
+    assert "Generic Video" not in body_text
+    actions = next(e["actions"] for e in card["elements"] if e.get("tag") == "action")
+    assert [action["value"]["action"] for action in actions] == ["analyze_comments"]
+
+
+@pytest.mark.parametrize("media_type", [MediaType.ARTICLE, MediaType.VIDEO])
+def test_douyin_card_links_title_and_preserves_caption_without_action_buttons(
+    media_type: MediaType,
+) -> None:
+    meta = LinkMetadata(
+        source_url="https://v.douyin.com/short/",
+        canonical_url="https://www.douyin.com/video/123",
+        title="雨后的小城",
+        description="街边的积水映着路灯，远处有人慢慢走来。",
+        site_name="抖音",
+        platform="douyin",
+        media_type=media_type,
+    )
+    card = json.loads(build_card(meta))
+    body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
+
+    assert body_text.startswith("**[雨后的小城](https://www.douyin.com/video/123)**")
+    assert "街边的积水映着路灯，远处有人慢慢走来。" in body_text
+    assert all(element.get("tag") != "action" for element in card["elements"])
+
+
 def test_card_with_parse_warning() -> None:
     meta = LinkMetadata(
         source_url="https://www.instagram.com/reel/abc/",
@@ -600,7 +644,7 @@ def test_card_with_translated_title_keeps_original() -> None:
     )
     card = json.loads(build_card(meta))
     body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
-    assert "**兄弟, 我们快要造出超级反派了**" in body_text
+    assert "**[兄弟, 我们快要造出超级反派了](https://www.tiktok.com/@u/video/123)**" in body_text
     assert "原标题: Bro we boutta get some super villains" in body_text
 
 
@@ -691,6 +735,25 @@ def test_other_social_article_card_uses_description_as_primary() -> None:
     assert "TikTok Post" not in body_text
 
 
+@pytest.mark.parametrize("title", ["A native article", "Post by writer", "Article preview"])
+def test_x_article_keeps_distinct_real_title_link_and_preview(title: str) -> None:
+    url = "https://x.com/writer/status/1234567890"
+    meta = LinkMetadata(
+        source_url=url, canonical_url=url, title=title, description="Article preview",
+        site_name="X", platform="x", media_type=MediaType.ARTICLE,
+    )
+    card = json.loads(build_card(meta))
+    body = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
+    if title == "A native article":
+        assert body.startswith(f"**[A native article]({url})**")
+    else:
+        assert body.startswith("<font color='grey'>Article preview</font>")
+        assert "Post by writer" not in body
+    assert body.count("Article preview") == 1
+    actions = next(e["actions"] for e in card["elements"] if e.get("tag") == "action")
+    assert [action["value"]["action"] for action in actions] == ["analyze_comments"]
+
+
 def test_web_article_card_keeps_title_primary() -> None:
     meta = LinkMetadata(
         source_url="https://example.com/post",
@@ -702,7 +765,7 @@ def test_web_article_card_keeps_title_primary() -> None:
     )
     card = json.loads(build_card(meta))
     body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
-    assert body_text.startswith("**Article Title**")
+    assert body_text.startswith("**[Article Title](https://example.com/post)**")
     assert "一段短文章摘要。" in body_text
 
 
@@ -719,3 +782,29 @@ def test_instagram_article_card_uses_description_as_primary() -> None:
     body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
     assert body_text.startswith("<font color='grey'>这是 Instagram 图文帖正文。</font>")
     assert "Post by someuser" not in body_text
+
+
+@pytest.mark.parametrize("platform", ["youtube", "bilibili", "instagram", "tiktok", "x", "douyin"])
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_every_platform_card_keeps_original_link_without_an_open_button(
+    platform: str, unavailable: bool,
+) -> None:
+    original = f"https://{platform}.example/shared?from=chat"
+    canonical = f"https://{platform}.example/content"
+    meta = LinkMetadata(
+        source_url=original, canonical_url=canonical, platform=platform,
+        title="内容暂未获取" if unavailable else "Real title",
+        description="" if unavailable else "Actual post caption",
+        parse_warnings=["内容获取暂不完整"],
+    )
+    card = json.loads(build_card(meta))
+    body = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
+
+    assert f"[{platform}]({original})" in body
+    if unavailable:
+        assert f"**[内容暂未获取]({canonical})**" in body
+    assert all(
+        action["value"]["action"] in {"summarize_video", "analyze_comments"}
+        for element in card["elements"] if element.get("tag") == "action"
+        for action in element["actions"]
+    )

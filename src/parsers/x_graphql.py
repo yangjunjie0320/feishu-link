@@ -8,8 +8,8 @@ import httpx
 
 from ..config import Settings
 from ..cookie_utils import cookie_value, get_cookie_header
-from ..http_errors import describe_request_error
 from .base import LinkMetadata, MediaType, ParserError
+from .card_http import get_response, json_object
 
 _BEARER_TOKEN = (
     "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs"
@@ -20,7 +20,9 @@ _FEATURES = {
     "creator_subscriptions_tweet_preview_api_enabled": True,
     "view_counts_everywhere_api_enabled": True,
     "responsive_web_graphql_timeline_navigation_enabled": True,
+    "responsive_web_twitter_article_tweet_consumption_enabled": True,
 }
+_FIELD_TOGGLES = {"withArticleRichContentState": False, "withArticlePlainText": False}
 
 
 def x_graphql_endpoint(
@@ -68,9 +70,8 @@ class XGraphQLParser:
         if not tweet_id:
             raise ParserError(url, "x tweet id not found")
 
-        domain = urlparse(url).netloc
         cookie_file = self._settings.cookie_file_for_platform("x")
-        cookie_header = get_cookie_header(cookie_file, domain)
+        cookie_header = get_cookie_header(cookie_file, "x.com")
         csrf_token = cookie_value(cookie_header, "ct0")
         if not cookie_header or not csrf_token:
             raise ParserError(url, "x cookie is not configured")
@@ -81,48 +82,64 @@ class XGraphQLParser:
             "includePromotedContent": False,
             "withVoice": False,
         }
-        endpoint = x_graphql_endpoint(_QUERY_ID, "TweetResultByRestId", variables, _FEATURES)
-        try:
-            resp = await self._client.get(
-                endpoint,
-                headers=x_api_headers(url, cookie_header, csrf_token),
-                follow_redirects=True,
-            )
-        except httpx.RequestError as e:
-            raise ParserError(url, f"x GraphQL request error: {describe_request_error(e)}") from e
-
-        if resp.status_code >= 400:
-            raise ParserError(url, f"x GraphQL HTTP {resp.status_code}")
-
-        try:
-            data: dict[str, Any] = resp.json()
-        except ValueError as e:
-            raise ParserError(url, "x GraphQL returned non-json response") from e
+        endpoint = x_graphql_endpoint(
+            _QUERY_ID, "TweetResultByRestId", variables, _FEATURES, _FIELD_TOGGLES,
+        )
+        resp = await get_response(
+            self._client, endpoint, source_url=url, label="x GraphQL",
+            headers=x_api_headers(url, cookie_header, csrf_token),
+        )
+        data = json_object(resp, url, "x GraphQL")
 
         result = _tweet_result(data)
         if not result:
             raise ParserError(url, "x GraphQL returned no tweet")
+        if result.get("rest_id") is not None and str(result["rest_id"]) != tweet_id:
+            raise ParserError(url, "target_mismatch: X GraphQL returned another post")
 
         legacy = result.get("legacy") if isinstance(result.get("legacy"), dict) else {}
         cover_url = _cover_url_from_legacy(legacy)
-        full_text = str(legacy.get("full_text") or "")
-        if not full_text and not cover_url:
+        note = result.get("note_tweet")
+        note_results = note.get("note_tweet_results") if isinstance(note, dict) else None
+        note_result = note_results.get("result") if isinstance(note_results, dict) else None
+        full_text = str(
+            (note_result.get("text") if isinstance(note_result, dict) else None)
+            or legacy.get("full_text") or ""
+        )
+        article = _article_result(result)
+        article_title = _text(article.get("title"))
+        preview = _text(article.get("preview_text"))
+        article_cover = _article_cover(article)
+        covers = list(dict.fromkeys(
+            ([article_cover] if article_cover else []) + _cover_candidates(legacy)
+        ))[:3]
+        if article_cover:
+            cover_url = article_cover
+        if not full_text and not cover_url and not article_title and not preview:
             raise ParserError(url, "x GraphQL returned no usable tweet content")
+        has_visual: bool | None = bool(_media_items(legacy))
+        if article:
+            has_visual = True if article_cover or article.get("cover_media") else (
+                False if "cover_media" in article else None
+            )
 
         return LinkMetadata(
             source_url=url,
-            title="X Post",
-            description=full_text,
+            title=article_title or "X Post",
+            description=preview or full_text,
             cover_url=cover_url,
             site_name="X",
             platform="x",
             canonical_url=url,
-            media_type=MediaType.ARTICLE,
+            media_type=MediaType.VIDEO if _has_video(legacy) and not article else MediaType.ARTICLE,
             channel=_handle_from_url(url),
             view_count=_view_count(result),
             like_count=_as_int(legacy.get("favorite_count")),
             comment_count=_as_int(legacy.get("reply_count")),
             repost_count=_as_int(legacy.get("retweet_count") or legacy.get("quote_count")),
+            cover_candidates=covers,
+            has_visual=has_visual,
+            content_verified=True,
         )
 
 
@@ -137,8 +154,49 @@ def tweet_id_from_url(url: str) -> str:
 
 
 def _tweet_result(data: dict[str, Any]) -> dict[str, Any]:
-    result = data.get("data", {}).get("tweetResult", {}).get("result", {})
+    nested = data.get("data")
+    tweet_result = nested.get("tweetResult") if isinstance(nested, dict) else None
+    result = tweet_result.get("result") if isinstance(tweet_result, dict) else None
+    if isinstance(result, dict) and isinstance(result.get("tweet"), dict):
+        result = result["tweet"]
     return result if isinstance(result, dict) else {}
+
+
+def _article_result(result: dict[str, Any]) -> dict[str, Any]:
+    article = result.get("article")
+    results = article.get("article_results") if isinstance(article, dict) else None
+    item = results.get("result") if isinstance(results, dict) else None
+    return item if isinstance(item, dict) else {}
+
+
+def _article_cover(article: dict[str, Any]) -> str:
+    cover = article.get("cover_media")
+    info = cover.get("media_info") if isinstance(cover, dict) else None
+    return _text(info.get("original_img_url")) if isinstance(info, dict) else ""
+
+
+def _text(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _media_items(legacy: dict[str, Any]) -> list[dict[str, Any]]:
+    for key in ("extended_entities", "entities"):
+        container = legacy.get(key)
+        items = container.get("media") if isinstance(container, dict) else None
+        if isinstance(items, list) and items:
+            return [item for item in items if isinstance(item, dict)]
+    return []
+
+
+def _has_video(legacy: dict[str, Any]) -> bool:
+    return any(item.get("type") in {"video", "animated_gif"} for item in _media_items(legacy))
+
+
+def _cover_candidates(legacy: dict[str, Any]) -> list[str]:
+    return list(dict.fromkeys(
+        str(url) for item in _media_items(legacy)
+        if (url := item.get("media_url_https") or item.get("media_url"))
+    ))[:3]
 
 
 def _cover_url_from_legacy(legacy: dict[str, Any]) -> str:

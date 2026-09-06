@@ -165,6 +165,7 @@ async def persistent_context(
     extra_args: list[str] | None = None,
     omit_args: tuple[str, ...] = (),
     proxy_server: str | None = None,
+    close_timeout_seconds: float = _CLOSE_TIMEOUT_SECONDS,
 ) -> AsyncIterator[Any]:
     """Launch a persistent Chromium profile and yield its browser context.
 
@@ -221,11 +222,11 @@ async def persistent_context(
             # real error; swallowing it lets async_playwright().__aexit__ still
             # tear the driver down.
             try:
-                await asyncio.wait_for(context.close(), timeout=_CLOSE_TIMEOUT_SECONDS)
+                await asyncio.wait_for(context.close(), timeout=close_timeout_seconds)
             except TimeoutError:
                 logger.warning(
                     "Browser context close timed out after %.0fs for %s",
-                    _CLOSE_TIMEOUT_SECONDS,
+                    close_timeout_seconds,
                     path,
                 )
             except Exception as exc:

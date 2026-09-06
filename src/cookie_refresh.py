@@ -57,6 +57,11 @@ _PROFILES: dict[str, RefreshProfile] = {
         cookie_domain="tiktok.com",
         required_names=frozenset({"sessionid"}),
     ),
+    "douyin": RefreshProfile(
+        site_url="https://www.douyin.com/",
+        cookie_domain="douyin.com",
+        required_names=frozenset({"sessionid"}),
+    ),
 }
 
 # Per-process throttle so a burst of stale-cookie requests does not launch the
@@ -66,6 +71,31 @@ _last_refresh: dict[str, float] = {}
 # Separate throttle for the reactive (failure-driven) refresh path so a burst of
 # failed requests does not stampede the (seconds-costly) Chrome extraction.
 _last_force: dict[str, float] = {}
+_refresh_tasks: dict[str, asyncio.Task[bool]] = {}
+
+
+async def _shared_refresh(platform: str, settings: Settings, target: str) -> bool:
+    task = _refresh_tasks.get(platform)
+    if task is None:
+        async def run() -> bool:
+            try:
+                async with asyncio.timeout(min(settings.cookie_refresh_browser_timeout, 10.0)):
+                    return await refresh_cookies(platform, settings, target=target)
+            except TimeoutError:
+                logger.warning("Cookie refresh timed out: platform=%s", platform)
+                return False
+
+        task = asyncio.create_task(run())
+        _refresh_tasks[platform] = task
+
+        def completed(done: asyncio.Task[bool]) -> None:
+            if _refresh_tasks.get(platform) is done:
+                _refresh_tasks.pop(platform, None)
+            if not done.cancelled():
+                done.exception()
+
+        task.add_done_callback(completed)
+    return await asyncio.shield(task)
 
 # How long --browser-login waits for the human to finish logging in.
 _LOGIN_WAIT_SECONDS = 300
@@ -329,6 +359,9 @@ async def ensure_fresh_cookies(platform: str, settings: Settings) -> None:
     target = _resolve_target(platform, settings)
     if not target:
         return
+    if platform in _refresh_tasks:
+        await _shared_refresh(platform, settings, target)
+        return
     if not cookie_is_stale(
         target,
         platform,
@@ -343,7 +376,7 @@ async def ensure_fresh_cookies(platform: str, settings: Settings) -> None:
         return
     _last_refresh[platform] = now
 
-    await refresh_cookies(platform, settings, target=target)
+    await _shared_refresh(platform, settings, target)
 
 
 async def force_refresh(platform: str, settings: Settings) -> bool:
@@ -363,6 +396,8 @@ async def force_refresh(platform: str, settings: Settings) -> bool:
     target = _resolve_target(platform, settings)
     if not target:
         return False
+    if platform in _refresh_tasks:
+        return await _shared_refresh(platform, settings, target)
 
     now = time.monotonic()
     last = _last_force.get(platform)
@@ -370,7 +405,7 @@ async def force_refresh(platform: str, settings: Settings) -> bool:
         return False
     _last_force[platform] = now
 
-    return await refresh_cookies(platform, settings, target=target)
+    return await _shared_refresh(platform, settings, target)
 
 
 def _is_closed_error(exc: Exception) -> bool:

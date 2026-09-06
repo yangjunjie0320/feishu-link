@@ -21,7 +21,7 @@ from src.bibi_models import (
 from src.comment_analyzer import CommentAnalysisError
 from src.config import Settings
 from src.listener import CardActionEvent, MessageEvent
-from src.parsers.base import LinkMetadata
+from src.parsers.base import CardParseResult, CardStatus, LinkMetadata
 from src.pipeline import (
     Pipeline,
     SummaryCooldownError,
@@ -403,7 +403,9 @@ def _prepare_card_pipeline(archive) -> Pipeline:
         channel="Some Channel",
         duration_seconds=90,
     )
-    pipeline._dispatcher.parse = AsyncMock(return_value=meta)  # type: ignore[method-assign]
+    pipeline._dispatcher.parse_card = AsyncMock(  # type: ignore[method-assign]
+        return_value=CardParseResult(meta, CardStatus.COMPLETE, has_content=True)
+    )
     pipeline._translator.translate_metadata = AsyncMock()  # type: ignore[method-assign]
     pipeline._sender.send = AsyncMock(return_value=True)  # type: ignore[method-assign]
     pipeline._try_send_video = AsyncMock()  # type: ignore[method-assign]

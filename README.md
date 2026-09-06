@@ -7,13 +7,13 @@ The project is designed for personal or team link collection workflows: send a s
 ## Features
 
 - Feishu WebSocket listener through a custom app.
-- Compact interactive cards with cover image, platform label, title, author or channel, duration, and source button.
-- Multi-platform parsing for YouTube, Instagram, TikTok, Bilibili, X/Twitter, and normal web pages.
+- Compact interactive cards with cover image, platform label, linked title, author or channel, duration, and real post text.
+- Content cards for YouTube, Instagram, TikTok, Bilibili, X/Twitter, and Douyin. Generic web parsing is available internally; the bot accepts the configured supported platforms.
 - Video metrics when available: views, likes, comments, and reposts.
 - Optional short-video append. Videos up to 180 seconds are downloaded, converted to Feishu-friendly MP4, uploaded, and sent after the card.
 - **BibiGPT Integration**: Mention the bot (`@bot`) with a YouTube or Bilibili link to receive an AI-generated summary followed by BibiGPT's timeline chapter summary in collapsed Feishu cards.
 - Manual download command: mention the bot and send `下载 <link>` to force video download instead of summarization, without the automatic short-video duration cap.
-- Card action buttons: supported video cards include `总结视频`, `分析评论`, and `下载视频` actions.
+- Card action buttons: supported cards retain `总结视频` and `分析评论`. Open/download buttons are hidden; the manual download command and older card callbacks still work.
 - Optional title translation through DeepSeek. Non-Chinese titles are translated and shown together with the original title.
 - Unified Netscape cookie file for platforms that require login state (like Instagram, X, and BibiGPT).
 - Explicit logging for parse, download, upload, and send failures. Card delivery is prioritized over video delivery.
@@ -27,9 +27,9 @@ The project is designed for personal or team link collection workflows: send a s
 | TikTok | Caption/title, author, duration | Yes | Views, likes, comments, reposts when available | Yes, when enabled and downloadable |
 | Bilibili | Title, UP, duration | Yes | Views, likes, comments, reposts when available | Yes, when <= 180 seconds and downloadable |
 | X / Twitter | Text summary, author, duration | Yes | Likes, comments, reposts when available | Yes, for accessible media posts |
-| Web pages | Open Graph title, description, site | Yes | No | No |
+| Douyin | Public video/photo caption, author; share links resolve to the original post | Cover or first photo | When already present | No; cards and archive only |
 
-Douyin is intentionally not parsed by default. If Feishu itself expands a Douyin message, this service still ignores Douyin URLs unless you explicitly add support later.
+Card preparation has a 60-second budget, including parsing, cover upload and translation. It sends one final card. Missing fields are explicitly marked; a platform slogan, login page or domain name is not successful content. Actual text may still be archived when its cover is unavailable. See [card reliability and operations](docs/card-reliability.md) for sources, limits, cookies, validation and rollback.
 
 ## Quick Start
 

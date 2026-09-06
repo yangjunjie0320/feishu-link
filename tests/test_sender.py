@@ -3,12 +3,14 @@ import json
 from json import JSONDecodeError
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import httpx
+import lark_oapi as lark
 import pytest
 import respx
 
-from src.config import Settings
+from src.config import Mode, Settings
 from src.sender import CardSender, TypingReactionSender, VideoSender, build_media_content
 
 
@@ -46,6 +48,12 @@ class _FakeMessageReaction:
             ):
                 del self._active_reactions[key]
         return _FakeResponse()
+
+    async def acreate(self, request):
+        return self.create(request)
+
+    async def adelete(self, request):
+        return self.delete(request)
 
 
 class _FakeClient:
@@ -346,11 +354,14 @@ class _FakeMessageService:
         self.create_requests = []
         self._fail_times = fail_times
 
-    def create(self, request):
+    async def acreate(self, request):
         self.create_requests.append(request)
         if len(self.create_requests) <= self._fail_times:
             return _FakeResponse(success=False)
         return _FakeResponse()
+
+    async def areply(self, request):
+        return await self.acreate(request)
 
 
 def _card_sender_with(service: _FakeMessageService, **settings_kwargs):
@@ -375,3 +386,110 @@ async def test_send_to_chat_returns_false_after_retries_exhausted() -> None:
 
     assert await sender.send_to_chat('{"card": 1}', "oc_target") is False
     assert len(service.create_requests) == 2
+
+
+@pytest.mark.parametrize("mode", [Mode.A, Mode.B])
+async def test_card_retry_reuses_uuid_but_next_logical_send_gets_another(mode: Mode) -> None:
+    service = _FakeMessageService(fail_times=1)
+    sender = _card_sender_with(service, mode=mode, archive_chat_id="oc_archive")
+
+    assert await sender.send('{"card": 1}', "oc_chat", "om_message") is True
+    assert await sender.send('{"card": 1}', "oc_chat", "om_message") is True
+
+    uuids = [request.request_body.uuid for request in service.create_requests]
+    assert UUID(uuids[0]).version == 4
+    assert uuids[0] == uuids[1]
+    assert uuids[2] != uuids[0]
+    if mode == Mode.A:
+        assert all(req.paths["message_id"] == "om_message" for req in service.create_requests)
+    else:
+        assert all(req.request_body.receive_id == "oc_archive" for req in service.create_requests)
+
+
+async def test_card_recalled_target_does_not_retry() -> None:
+    response = _FakeResponse(success=False)
+    response.code = 230011
+    response.msg = "The message was withdrawn."
+    service = SimpleNamespace(areply=AsyncMock(return_value=response))
+    sender = _card_sender_with(service)
+
+    assert await sender.send('{"card": 1}', "oc_chat", "om_message") is False
+    service.areply.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("total_timeout", "attempt_timeout"), [(0.05, 1.0), (1.0, 0.05)]
+)
+async def test_card_send_budget_cancels_the_actual_async_request(
+    total_timeout: float, attempt_timeout: float,
+) -> None:
+    cancelled = asyncio.Event()
+
+    async def stalled(request):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    service = SimpleNamespace(acreate=AsyncMock(side_effect=stalled))
+    sender = _card_sender_with(
+        service,
+        card_send_timeout=total_timeout,
+        card_send_attempt_timeout=attempt_timeout,
+        send_retry_attempts=1,
+    )
+
+    assert await asyncio.wait_for(sender.send_to_chat("{}", "oc_chat"), timeout=0.5) is False
+    assert cancelled.is_set()
+
+
+async def test_card_send_external_cancellation_propagates() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def stalled(request):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    sender = _card_sender_with(SimpleNamespace(acreate=AsyncMock(side_effect=stalled)))
+    task = asyncio.create_task(sender.send_to_chat("{}", "oc_chat"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()
+
+
+@respx.mock
+@pytest.mark.parametrize("legacy_config", [False, True])
+async def test_card_cold_token_uses_only_async_http_and_leaves_shared_config_unchanged(
+    monkeypatch, legacy_config: bool,
+) -> None:
+    def reject_sync_http(*args, **kwargs):
+        raise AssertionError("synchronous HTTP must not run")
+
+    monkeypatch.setattr("requests.request", reject_sync_http)
+    token_route = respx.post(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+    ).mock(return_value=httpx.Response(200, json={
+        "code": 0, "tenant_access_token": "test_async_token", "expire": 3600,
+    }))
+    message_route = respx.post(
+        "https://open.feishu.cn/open-apis/im/v1/messages/om_message/reply"
+    ).mock(return_value=httpx.Response(200, json={"code": 0, "data": {"message_id": "om_sent"}}))
+    client = lark.Client.builder().app_id("app_test").app_secret("secret_test").build()
+    if legacy_config:
+        monkeypatch.delattr(lark.Client, "config")
+    sender = CardSender(Settings(), client)
+
+    assert await sender.send("{}", "oc_chat", "om_message") is True
+    assert await sender.send("{}", "oc_chat", "om_message") is True
+
+    assert token_route.call_count == 1
+    assert message_route.call_count == 2
+    assert message_route.calls.last.request.headers["Authorization"] == "Bearer test_async_token"
+    assert client._config.enable_set_token is False
+    assert client.im.v1.message.config.timeout == 30

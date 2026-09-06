@@ -7,19 +7,13 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from ..config import Settings
-from ..http_errors import describe_request_error
 from .base import LinkMetadata, MediaType, ParserError
+from .card_http import get_response, json_object
 from .og_meta import _request_headers
 
 logger = logging.getLogger(__name__)
 
 _SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-
-# Instagram answers 4xx with a JSON body explaining itself ("login_required",
-# "Please wait a few minutes before you try again"). Without it a bare status
-# code cannot tell a rate limit from a dead cookie.
-_ERROR_BODY_CHARS = 200
-
 
 class InstagramMediaInfoParser:
     def __init__(self, client: httpx.AsyncClient, settings: Settings) -> None:
@@ -31,9 +25,11 @@ class InstagramMediaInfoParser:
         if not shortcode:
             raise ParserError(url, "instagram shortcode not found")
 
-        endpoint = (
-            f"https://www.instagram.com/api/v1/media/{_shortcode_to_media_id(shortcode)}/info/"
-        )
+        try:
+            media_id = _shortcode_to_media_id(shortcode)
+        except ValueError as exc:
+            raise ParserError(url, "instagram invalid shortcode") from exc
+        endpoint = f"https://www.instagram.com/api/v1/media/{media_id}/info/"
         headers = _request_headers("https://www.instagram.com/", self._settings)
         headers.update(
             {
@@ -45,40 +41,10 @@ class InstagramMediaInfoParser:
         has_cookie = "Cookie" in headers
         logger.info("instagram media info request: shortcode=%s cookie=%s", shortcode, has_cookie)
 
-        try:
-            resp = await self._client.get(endpoint, headers=headers, follow_redirects=True)
-        except httpx.RequestError as e:
-            logger.warning(
-                "instagram media info transport error: shortcode=%s cookie=%s error=%s",
-                shortcode,
-                has_cookie,
-                describe_request_error(e),
-            )
-            raise ParserError(
-                url, f"instagram media info request error: {describe_request_error(e)}"
-            ) from e
-
-        if resp.status_code >= 400:
-            logger.warning(
-                "instagram media info HTTP %d: shortcode=%s cookie=%s content_type=%s body=%r",
-                resp.status_code,
-                shortcode,
-                has_cookie,
-                resp.headers.get("content-type", ""),
-                resp.text[:_ERROR_BODY_CHARS],
-            )
-            raise ParserError(url, f"instagram media info HTTP {resp.status_code}")
-
-        try:
-            data: dict[str, Any] = resp.json()
-        except ValueError as e:
-            logger.warning(
-                "instagram media info non-json: shortcode=%s content_type=%s body=%r",
-                shortcode,
-                resp.headers.get("content-type", ""),
-                resp.text[:_ERROR_BODY_CHARS],
-            )
-            raise ParserError(url, "instagram media info returned non-json response") from e
+        resp = await get_response(
+            self._client, endpoint, source_url=url, label="instagram media info", headers=headers,
+        )
+        data = json_object(resp, url, "instagram media info")
 
         item = _first_item(data)
         if not item:
@@ -88,6 +54,9 @@ class InstagramMediaInfoParser:
                 sorted(data.keys())[:10],
             )
             raise ParserError(url, "instagram media info returned no items")
+        returned_id = item.get("pk") or item.get("id")
+        if returned_id is not None and str(returned_id).split("_", 1)[0] != str(media_id):
+            raise ParserError(url, "target_mismatch: Instagram returned another post")
 
         cover_url = _cover_url_from_item(item, _img_index(url))
         if not cover_url:
@@ -97,7 +66,6 @@ class InstagramMediaInfoParser:
                 item.get("media_type"),
                 isinstance(item.get("carousel_media"), list),
             )
-            raise ParserError(url, "instagram media info returned no image")
 
         user = item.get("user") if isinstance(item.get("user"), dict) else {}
         caption = item.get("caption") if isinstance(item.get("caption"), dict) else {}
@@ -108,11 +76,16 @@ class InstagramMediaInfoParser:
             cover_url=cover_url,
             site_name="Instagram",
             platform="instagram",
-            media_type=MediaType.ARTICLE,
+            media_type=MediaType.VIDEO if item.get("media_type") == 2 else MediaType.ARTICLE,
             channel=str(user.get("full_name") or user.get("username") or "") or None,
             like_count=_as_int(item.get("like_count")),
             comment_count=_as_int(item.get("comment_count")),
             repost_count=_as_int(item.get("media_repost_count")),
+            duration_seconds=_as_int(item.get("video_duration")),
+            canonical_url=url,
+            cover_candidates=_cover_candidates_from_item(item, _img_index(url)),
+            has_visual=True,
+            content_verified=True,
         )
 
 
@@ -154,19 +127,40 @@ def _first_item(data: dict[str, Any]) -> dict[str, Any]:
 def _cover_url_from_item(item: dict[str, Any], img_index: int | None) -> str:
     media_items = item.get("carousel_media")
     if isinstance(media_items, list) and media_items:
-        if img_index is not None and img_index <= len(media_items):
+        if img_index is not None:
+            if img_index > len(media_items):
+                return ""
             selected = media_items[img_index - 1]
-            if isinstance(selected, dict):
-                cover_url = _image_url_from_media(selected)
-                if cover_url:
-                    return cover_url
+            return _image_url_from_media(selected) if isinstance(selected, dict) else ""
         for media_item in media_items:
             if isinstance(media_item, dict):
                 cover_url = _image_url_from_media(media_item)
                 if cover_url:
                     return cover_url
+    elif img_index is not None and img_index > 1:
+        return ""
 
     return _image_url_from_media(item)
+
+
+def _cover_candidates_from_item(item: dict[str, Any], img_index: int | None) -> list[str]:
+    primary = _cover_url_from_item(item, img_index)
+    media_items = item.get("carousel_media")
+    selected = item
+    if isinstance(media_items, list) and media_items:
+        index = img_index - 1 if img_index else 0
+        if index >= len(media_items) or not isinstance(media_items[index], dict):
+            return []
+        selected = media_items[index]
+    elif img_index is not None and img_index > 1:
+        return []
+    versions = selected.get("image_versions2")
+    candidates = versions.get("candidates", []) if isinstance(versions, dict) else []
+    covers = [primary] if primary else []
+    if isinstance(candidates, list):
+        covers.extend(str(candidate["url"]) for candidate in candidates
+                      if isinstance(candidate, dict) and candidate.get("url"))
+    return list(dict.fromkeys(covers))[:3]
 
 
 def _image_url_from_media(media: dict[str, Any]) -> str:

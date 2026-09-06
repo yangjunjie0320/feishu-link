@@ -72,6 +72,10 @@ def detect_platform(url: str) -> str:
         return "instagram"
     if domain == "tiktok.com" or domain.endswith(".tiktok.com"):
         return "tiktok"
+    if domain in {"douyin.com", "iesdouyin.com"} or domain.endswith(
+        (".douyin.com", ".iesdouyin.com")
+    ):
+        return "douyin"
     if domain in {"youtube.com", "youtu.be"} or domain.endswith(".youtube.com"):
         return "youtube"
     if domain in {"x.com", "twitter.com"} or domain.endswith(".twitter.com"):
@@ -80,4 +84,6 @@ def detect_platform(url: str) -> str:
 
 
 def is_short_video_platform(url: str) -> bool:
-    return detect_platform(url) in {"bilibili", "instagram", "tiktok", "youtube", "x"}
+    # Historical name: this is the card-processing allowlist, not permission
+    # to download a video. Douyin is deliberately card-only.
+    return detect_platform(url) in {"bilibili", "instagram", "tiktok", "youtube", "x", "douyin"}

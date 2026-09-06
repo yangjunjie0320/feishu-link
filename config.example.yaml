@@ -40,14 +40,13 @@ link_allowlist:
   - "youtu\\.be"
   - "x\\.com"
   - "twitter\\.com"
+  - "douyin\\.com"
+  - "iesdouyin\\.com"
 
 # Regex patterns to skip even when allowlisted (comma-separated or YAML list)
 link_blacklist:
   - "localhost"
   - "127\\.0\\.0\\.1"
-  - "v\\.douyin\\.com"
-  - "douyin\\.com"
-  - "iesdouyin\\.com"
 
 log_level: INFO
 log_dir: logs
@@ -57,6 +56,25 @@ request_timeout: 10.0
 
 # Number of send retry attempts before giving up
 send_retry_attempts: 3
+
+# Content preparation is separate from media extraction. No status-card updates.
+card_prepare_timeout: 60
+card_parse_timeout: 45
+card_enrichment_timeout: 10
+card_cache_ttl_seconds: 600
+card_cache_capacity: 256
+card_parse_concurrency: 4
+card_platform_concurrency: 2
+card_browser_timeout: 30
+card_browser_profile_dir: "browser-data/cards"
+card_browser_channel: "chrome"
+card_browser_headless: true
+card_browser_concurrency: 2
+card_browser_platform_concurrency: 1
+card_send_timeout: 30
+card_send_attempt_timeout: 10
+media_metadata_timeout: 60
+media_metadata_concurrency: 2
 
 # Short video append behavior. Cards are always sent first; videos are best-effort.
 video_append_enabled: true
@@ -86,6 +104,7 @@ platform_cookie_files: {}
 #   instagram: "cookies/instagram.txt"
 #   x: "cookies/x.txt"
 #   youtube: "cookies/youtube.txt"
+#   douyin: "cookies/douyin.txt"
 
 # Optional BibiGPT integration. Mention the bot with a YouTube or Bilibili URL
 # to send a summary instead of appending the video.

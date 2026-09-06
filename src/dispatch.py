@@ -1,34 +1,222 @@
 from __future__ import annotations
 
+import asyncio
+import copy
 import logging
 import re
-from urllib.parse import urlparse
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 import httpx
 
+from .card_metadata import CardMetadataCache, CardSourceError, card_result, merge_metadata
 from .config import Settings
-from .parsers.base import LinkMetadata, MediaType, ParserError
+from .cookie_refresh import ensure_fresh_cookies, force_refresh
+from .parsers.base import CardParseResult, CardStatus, LinkMetadata, MediaType, Parser, ParserError
 from .parsers.fallback import FallbackParser
 from .parsers.instagram_media_info import InstagramMediaInfoParser
+from .parsers.lightweight_oembed import LightweightOEmbedParser
 from .parsers.og_meta import OGMetaParser
 from .parsers.x_graphql import XGraphQLParser
 from .parsers.x_oembed import XOEmbedParser
-from .parsers.youtube import YouTubeParser, is_youtube_url
+from .parsers.youtube import YouTubeParser, extract_video_id, is_youtube_url
 from .parsers.ytdlp import YtDlpMetadataParser
 from .platforms import detect_platform
 
 logger = logging.getLogger(__name__)
 
+_CardRead = Callable[[str], Awaitable[LinkMetadata]]
+
+
+@dataclass
+class _CardRecovery:
+    network_retried: bool = False
+    auth_refreshed: bool = False
+    freshness_checked: bool = False
+
 
 class Dispatcher:
     def __init__(self, settings: Settings, client: httpx.AsyncClient) -> None:
-        self._youtube = YouTubeParser(client, api_key=settings.youtube_api_key)
+        self._settings = settings
+        self._youtube = YouTubeParser(client, api_key=settings.youtube_api_key, settings=settings)
         self._ytdlp = YtDlpMetadataParser(settings)
         self._instagram_media_info = InstagramMediaInfoParser(client, settings)
         self._x_graphql = XGraphQLParser(client, settings)
         self._x_oembed = XOEmbedParser(client)
         self._og = OGMetaParser(client, settings)
         self._fallback = FallbackParser(client, settings)
+        self._oembed = LightweightOEmbedParser(client)
+        self._card_cache = CardMetadataCache(
+            settings.card_cache_ttl_seconds, settings.card_cache_capacity,
+        )
+        self._card_slots = asyncio.Semaphore(settings.card_parse_concurrency)
+        self._platform_slots: dict[str, asyncio.Semaphore] = {}
+        self._rate_limited_until: dict[str, float] = {}
+        self._browser: Parser | None = None
+
+    async def parse_card(self, url: str) -> CardParseResult:
+        return await self._card_cache.get(url, lambda: self._parse_card_uncached(url))
+
+    def invalidate_card(self, url: str) -> None:
+        self._card_cache.invalidate(url)
+
+    async def prepare_video(self, meta: LinkMetadata) -> LinkMetadata:
+        """Resolve download information only after the card has been delivered."""
+        media = await self._ytdlp.parse(meta.canonical_url or meta.source_url)
+        prepared = copy.deepcopy(meta)
+        merge_metadata(prepared, media)
+        prepared.download_candidates = media.download_candidates
+        prepared.requires_auth = media.requires_auth
+        return prepared
+
+    async def _parse_card_uncached(self, url: str) -> CardParseResult:
+        platform = detect_platform(url)
+        meta = _initial_card_metadata(url, platform)
+        if not _supported_card_url(url, platform):
+            return CardParseResult(
+                meta, CardStatus.UNSUPPORTED, "unsupported", has_content=False,
+            )
+        sources: list[str] = []
+        failure_reason = ""
+        recovery = _CardRecovery()
+        deadline = time.monotonic() + self._settings.card_parse_timeout
+        platform_slots = self._platform_slots.setdefault(
+            platform, asyncio.Semaphore(self._settings.card_platform_concurrency),
+        )
+        try:
+            # Admission is inside the budget; a busy platform cannot hold every
+            # global slot while it waits for its own limit.
+            async with asyncio.timeout(self._settings.card_parse_timeout):
+                async with platform_slots, self._card_slots:
+                    for name, read, authenticated in self._card_sources(url, platform):
+                        if not await self._wait_for_platform(platform, deadline):
+                            failure_reason = "rate_limit"
+                            break
+                        try:
+                            if authenticated and not recovery.freshness_checked:
+                                recovery.freshness_checked = True
+                                await ensure_fresh_cookies(platform, self._settings)
+                            obtained = await self._read_card_source(
+                                url, platform, read, recovery, authenticated=authenticated,
+                            )
+                        except ParserError as exc:
+                            failure_reason = _card_failure_reason(exc, failure_reason)
+                            if isinstance(exc, CardSourceError) and exc.kind == "rate_limit":
+                                self._rate_limited_until[platform] = max(
+                                    self._rate_limited_until.get(platform, 0),
+                                    time.monotonic() + (
+                                        exc.retry_after if exc.retry_after is not None else 60.0
+                                    ),
+                                )
+                            logger.warning("card source failed: source=%s url=%s reason=%s",
+                                           name, url, exc.reason)
+                            continue
+                        except Exception as exc:
+                            # A changed response shape must not discard fields
+                            # already obtained from another independent source.
+                            failure_reason = _card_failure_reason(exc, failure_reason)
+                            logger.exception("card source error: source=%s url=%s", name, url)
+                            continue
+                        if (
+                            obtained.platform == "instagram"
+                            and obtained.media_type != MediaType.VIDEO
+                        ):
+                            _normalize_instagram_post_meta(obtained)
+                        merge_metadata(meta, obtained)
+                        sources.append(name)
+                        if card_result(meta).status == CardStatus.COMPLETE:
+                            break
+                    if (
+                        card_result(meta).status != CardStatus.COMPLETE
+                        and platform != "bilibili"
+                        and await self._wait_for_platform(platform, deadline)
+                    ):
+                        try:
+                            obtained = await self._read_browser_card(url)
+                            merge_metadata(meta, obtained)
+                            sources.append("browser")
+                        except ParserError as exc:
+                            failure_reason = _card_failure_reason(exc, failure_reason)
+                            logger.warning("card browser failed: url=%s reason=%s", url, exc.reason)
+                        except Exception as exc:
+                            failure_reason = _card_failure_reason(exc, failure_reason)
+                            logger.exception("card browser error: url=%s", url)
+        except TimeoutError:
+            failure_reason = "timeout"
+            logger.warning(
+                "card parse timed out: platform=%s url=%s sources=%s", platform, url, sources,
+            )
+        result = card_result(meta, sources, failure_reason)
+        if platform == "instagram" and meta.canonical_url:
+            original_index = dict(parse_qsl(urlparse(url).query)).get("img_index")
+            if original_index:
+                canonical = urlparse(meta.canonical_url)
+                query = dict(parse_qsl(canonical.query))
+                query["img_index"] = original_index
+                meta.canonical_url = canonical._replace(query=urlencode(query)).geturl()
+        logger.info("card parsed: platform=%s status=%s sources=%s url=%s",
+                    platform, result.status, result.sources, url)
+        return result
+
+    async def _wait_for_platform(self, platform: str, deadline: float) -> bool:
+        while True:
+            delay = self._rate_limited_until.get(platform, 0) - time.monotonic()
+            if delay <= 0:
+                return True
+            if delay >= deadline - time.monotonic():
+                return False
+            await asyncio.sleep(delay)
+
+    def _card_sources(self, url: str, platform: str) -> list[tuple[str, _CardRead, bool]]:
+        sources: list[tuple[str, _CardRead, bool]] = []
+        if platform == "youtube":
+            if self._settings.youtube_api_key:
+                sources.append(("youtube_api", self._youtube.parse_api, False))
+            sources.append(("youtube_oembed", self._oembed.parse, False))
+        elif platform == "instagram":
+            sources.append(("instagram_media_info", self._instagram_media_info.parse, True))
+        elif platform == "x":
+            sources.extend([
+                ("x_oembed", self._x_oembed.parse, False),
+                ("x_graphql", self._x_graphql.parse, True),
+            ])
+        elif platform == "tiktok" and "/video/" in urlparse(url).path:
+            sources.append(("tiktok_oembed", self._oembed.parse, False))
+        elif platform == "bilibili":
+            # Preserve Bilibili's existing metadata coverage; only the other
+            # social platforms switch to lightweight card sources in this change.
+            sources.append(("bilibili_metadata", self._ytdlp.parse, True))
+        sources.append(("page", self._og.parse, True))
+        if platform == "instagram":
+            sources.append(("instagram_public_page", self._og.parse_public, False))
+        return sources
+
+    async def _read_card_source(
+        self, url: str, platform: str, read: _CardRead, recovery: _CardRecovery,
+        *, authenticated: bool,
+    ) -> LinkMetadata:
+        while True:
+            try:
+                return await read(url)
+            except CardSourceError as exc:
+                if exc.kind == "network" and not recovery.network_retried:
+                    recovery.network_retried = True
+                    await asyncio.sleep(0.25)
+                    continue
+                if exc.kind == "auth" and authenticated and not recovery.auth_refreshed:
+                    recovery.auth_refreshed = True
+                    if await force_refresh(platform, self._settings):
+                        continue
+                raise
+
+    async def _read_browser_card(self, url: str) -> LinkMetadata:
+        if self._browser is None:
+            from .parsers.social_browser import SocialBrowserParser
+
+            self._browser = SocialBrowserParser(self._settings)
+        return await self._browser.parse(url)
 
     async def parse(self, url: str) -> LinkMetadata:
         if is_youtube_url(url):
@@ -124,6 +312,7 @@ class Dispatcher:
 
         meta.download_candidates = media_meta.download_candidates
         meta.requires_auth = media_meta.requires_auth
+        merge_metadata(meta, media_meta)
         meta.media_type = media_meta.media_type
         if not meta.canonical_url:
             meta.canonical_url = media_meta.canonical_url
@@ -141,6 +330,64 @@ class Dispatcher:
             meta.repost_count = media_meta.repost_count
         meta.parse_warnings.extend(media_meta.parse_warnings)
         return meta
+
+
+def _card_failure_reason(error: Exception, previous: str = "") -> str:
+    text = (error.reason if isinstance(error, ParserError) else str(error)).lower()
+    if isinstance(error, TimeoutError | httpx.TimeoutException) or "timeout" in text:
+        return "timeout"
+    if isinstance(error, CardSourceError) and error.kind != "content":
+        return error.kind
+    for reason, signals in (
+        ("rate_limit", ("429", "rate_limit", "rate limit", "too many requests")),
+        ("challenge", ("challenge", "captcha", "verify", "verification", "验证")),
+        ("auth", ("login", "sign in", "auth:", "authentication", "unauthorized", "cookie", "登录")),
+        ("geo", ("geo", "region", "country", "地区")),
+        ("deleted", ("404", "deleted", "removed", "not found", "不存在", "已删除")),
+    ):
+        if any(signal in text for signal in signals):
+            return reason
+    return previous or "unavailable"
+
+
+def _initial_card_metadata(url: str, platform: str) -> LinkMetadata:
+    path = urlparse(url).path
+    video = platform in {"youtube", "bilibili"} or any(
+        f"/{kind}/" in path for kind in ("video", "reel", "reels", "tv")
+    )
+    image = "/photo/" in path or "/note/" in path
+    canonical = ""
+    if platform == "youtube" and (video_id := extract_video_id(url)):
+        canonical = f"https://www.youtube.com/watch?v={video_id}"
+    return LinkMetadata(
+        source_url=url, platform=platform, canonical_url=canonical,
+        site_name={"youtube": "YouTube", "instagram": "Instagram", "x": "X",
+                   "tiktok": "TikTok", "douyin": "抖音", "bilibili": "Bilibili"}.get(platform, ""),
+        media_type=MediaType.VIDEO if video else (
+            MediaType.ARTICLE if image else MediaType.UNKNOWN
+        ),
+        has_visual=True if video or image else None,
+    )
+
+
+def _supported_card_url(url: str, platform: str) -> bool:
+    parsed = urlparse(url)
+    path = parsed.path
+    if platform == "youtube":
+        return extract_video_id(url) is not None
+    if platform == "instagram":
+        return bool(re.match(r"^/(?:p|reel|reels|tv)/[A-Za-z0-9_-]+(?:/|$)", path))
+    if platform == "x":
+        return bool(re.search(r"/status/\d+(?:/|$)", path))
+    if platform == "tiktok":
+        return bool(re.search(r"/(?:video|photo)/\d+(?:/|$)", path)) or (
+            parsed.hostname in {"vm.tiktok.com", "vt.tiktok.com"} and bool(path.strip("/"))
+        ) or path.startswith("/t/")
+    if platform == "douyin":
+        return bool(re.search(r"/(?:video|note|slides)/\d+(?:/|$)", path)) or (
+            parsed.hostname == "v.douyin.com" and bool(path.strip("/"))
+        ) or bool(re.search(r"(?:^|&)modal_id=\d+", parsed.query))
+    return platform == "bilibili" and ("/video/" in path or parsed.hostname == "b23.tv")
 
 
 def _friendly_parse_warning(url: str, platform: str, reason: str) -> str:
