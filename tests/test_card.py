@@ -292,9 +292,7 @@ def test_card_structure() -> None:
     assert "**Example Article**" in body_text
     assert "<font color='grey'>[Example]</font>" in body_text
     actions = [e for e in elements if e.get("tag") == "action"]
-    assert actions
-    assert actions[0]["actions"][0]["url"] == "https://example.com"
-    assert actions[0]["actions"][0]["text"]["content"] == "打开链接"
+    assert actions == []
 
 
 def test_markdown_card_uses_markdown_component_and_normalizes_bullets() -> None:
@@ -490,19 +488,15 @@ def test_card_with_youtube_metadata() -> None:
     )
     card = json.loads(build_card(meta))
     action_block = next(e for e in card["elements"] if e.get("tag") == "action")
-    assert action_block["actions"][1]["text"]["content"] == "总结视频"
-    assert action_block["actions"][1]["value"] == {
+    assert [action["text"]["content"] for action in action_block["actions"]] == [
+        "总结视频", "分析评论"
+    ]
+    assert action_block["actions"][0]["value"] == {
         "action": "summarize_video",
         "url": "https://youtu.be/abc123",
     }
-    assert action_block["actions"][2]["text"]["content"] == "分析评论"
-    assert action_block["actions"][2]["value"] == {
+    assert action_block["actions"][1]["value"] == {
         "action": "analyze_comments",
-        "url": "https://youtu.be/abc123",
-    }
-    assert action_block["actions"][3]["text"]["content"] == "下载视频"
-    assert action_block["actions"][3]["value"] == {
-        "action": "download_video",
         "url": "https://youtu.be/abc123",
     }
     body_text = next(e["text"]["content"] for e in card["elements"] if e.get("tag") == "div")
@@ -527,19 +521,16 @@ def test_card_actions_prefer_canonical_url() -> None:
     card = json.loads(build_card(meta))
     action_block = next(e for e in card["elements"] if e.get("tag") == "action")
 
-    assert action_block["actions"][0]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
+    assert len(action_block["actions"]) == 2
+    assert (
+        action_block["actions"][0]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
+    )
     assert (
         action_block["actions"][1]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
     )
-    assert (
-        action_block["actions"][2]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
-    )
-    assert (
-        action_block["actions"][3]["value"]["url"] == "https://www.bilibili.com/video/BV1BCGB66E8P/"
-    )
 
 
-def test_video_card_omits_summary_button_for_unsupported_platform() -> None:
+def test_video_card_omits_action_block_for_unsupported_platform() -> None:
     meta = LinkMetadata(
         source_url="https://example.com/video",
         title="Example Video",
@@ -548,10 +539,7 @@ def test_video_card_omits_summary_button_for_unsupported_platform() -> None:
     )
 
     card = json.loads(build_card(meta))
-    action_block = next(e for e in card["elements"] if e.get("tag") == "action")
-    labels = [action["text"]["content"] for action in action_block["actions"]]
-
-    assert labels == ["打开链接", "下载视频"]
+    assert all(element.get("tag") != "action" for element in card["elements"])
 
 
 def test_instagram_article_card_includes_comment_analysis_button() -> None:
@@ -567,8 +555,8 @@ def test_instagram_article_card_includes_comment_analysis_button() -> None:
     action_block = next(e for e in card["elements"] if e.get("tag") == "action")
     labels = [action["text"]["content"] for action in action_block["actions"]]
 
-    assert labels == ["打开链接", "分析评论"]
-    assert action_block["actions"][1]["value"] == {
+    assert labels == ["分析评论"]
+    assert action_block["actions"][0]["value"] == {
         "action": "analyze_comments",
         "url": "https://www.instagram.com/p/DYfWbunGlNg/",
     }

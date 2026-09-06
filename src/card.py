@@ -500,12 +500,9 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
     else:
         elements.append(text_element)
 
-    elements.append(
-        {
-            "tag": "action",
-            "actions": _build_actions(meta),
-        }
-    )
+    actions = _build_actions(meta)
+    if actions:
+        elements.append({"tag": "action", "actions": actions})
 
     card: dict[str, object] = {
         "config": {"wide_screen_mode": True},
@@ -517,14 +514,7 @@ def build_card(meta: LinkMetadata, img_key: str | None = None) -> str:
 
 def _build_actions(meta: LinkMetadata) -> list[dict[str, object]]:
     action_url = _action_url(meta)
-    actions: list[dict[str, object]] = [
-        {
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": "打开链接"},
-            "url": action_url,
-            "type": "primary",
-        }
-    ]
+    actions: list[dict[str, object]] = []
 
     if meta.media_type == MediaType.VIDEO and _supports_summary_action(meta):
         actions.append(
@@ -547,19 +537,6 @@ def _build_actions(meta: LinkMetadata) -> list[dict[str, object]]:
                 "type": "default",
                 "value": {
                     "action": "analyze_comments",
-                    "url": action_url,
-                },
-            }
-        )
-
-    if meta.media_type == MediaType.VIDEO:
-        actions.append(
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "下载视频"},
-                "type": "default",
-                "value": {
-                    "action": "download_video",
                     "url": action_url,
                 },
             }

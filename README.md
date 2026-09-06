@@ -260,12 +260,12 @@ Mention the bot and start the message with `下载` followed by a link to force 
 
 Manual downloads bypass BibiGPT summaries and the automatic short-video duration cap. They also use the lowest available video quality and size-targeted conversion to reduce upload failures. If the link cannot be parsed as a downloadable video, has no downloadable candidate, produces a final converted MP4 larger than `max_video_file_mb`, or fails Feishu upload/send, the bot replies with the failure reason.
 
-Supported video cards also include action buttons:
+New link cards include only the action buttons supported by the platform:
 
 - `总结视频` triggers the same BibiGPT summary-and-chapter-summary path as mentioning the bot with a YouTube or Bilibili URL.
-- Summary work uses Feishu's `Typing` reaction; comment analysis uses `THINKING`. When both run on one message, each reaction remains until its corresponding work finishes.
 - `分析评论` fetches up to 200 comments, ranks comments by likes and replies, translates the top 3, and sends a fixed-template comment analysis card with total-comment and sample counts.
-- `下载视频` triggers the same manual-download path and sends the result as a reply to the card message.
+
+Cards omit the action row when neither feature is supported. The `打开链接` and `下载视频` buttons are no longer included in new cards; existing cards keep their original layout. Summary work uses Feishu's `Typing` reaction; comment analysis uses `THINKING`. When both run on one message, each reaction remains until its corresponding work finishes.
 
 BibiGPT summary output is treated as draft material. When `deepseek_api_key` is configured, the bot sends that output through DeepSeek with fixed Chinese Markdown output requirements before rendering the Feishu card. After the summary card succeeds, the bot requests BibiGPT's `timeline` chapter summary using the returned content ID and appends a collapsed `字幕总结` card. DeepSeek may translate and proofread the chapter introduction, titles, and summaries, but timestamps remain code-owned and raw subtitles are never sent or used as a fallback. If the BibiGPT account cannot generate chapter summaries, the original summary remains available and the bot reports that the chapter summary is unavailable.
 
