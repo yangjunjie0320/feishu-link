@@ -32,7 +32,7 @@ from .card import (
 )
 from .comment_analyzer import CommentAnalysisError, CommentAnalyzer
 from .config import Settings
-from .dispatch import Dispatcher
+from .dispatch import Dispatcher, initial_card_result
 from .feishu_async import call_feishu_async
 from .image_uploader import upload_cover
 from .listener import CardActionEvent, ListenerEvent, MessageEvent
@@ -412,17 +412,39 @@ class Pipeline:
 
         domain = detect_platform(url)
 
-        if not result.has_content:
+        if manual_download and domain == "douyin":
+            await self._text_sender.send(
+                "抖音暂不支持视频下载。", event.chat_id, event.message_id,
+            )
             return
 
-        if manual_download:
-            if domain == "douyin":
-                await self._text_sender.send(
-                    "抖音暂不支持视频下载。",
-                    event.chat_id,
-                    event.message_id,
-                )
+        if not result.has_content:
+            if is_bot_mentioned and not manual_download:
                 return
+            skip_reason = ""
+            if result.status == CardStatus.UNSUPPORTED or result.reason in {
+                "auth", "challenge", "rate_limit", "deleted", "geo",
+            }:
+                skip_reason = _card_failure_description(result.reason)
+            elif meta.media_type == MediaType.ARTICLE:
+                skip_reason = f"not a video: media_type={meta.media_type}"
+            if skip_reason:
+                logger.info(
+                    "skip video append: url=%s message_id=%s reason=%s stage=card",
+                    url, event.message_id, skip_reason,
+                )
+                if manual_download:
+                    await self._text_sender.send(
+                        _download_failure_message(url, skip_reason),
+                        event.chat_id, event.message_id,
+                    )
+                return
+            logger.info(
+                "preparing video after card metadata failure: url=%s platform=%s reason=%s "
+                "message_id=%s", url, domain, result.reason or "unavailable", event.message_id,
+            )
+
+        if manual_download:
             await self._try_send_video(
                 meta,
                 event,
@@ -442,7 +464,7 @@ class Pipeline:
             await self._try_send_video(meta, event, img_key)
 
     async def _prepare_card(self, url: str, started: float) -> tuple[CardParseResult, str | None]:
-        result = CardParseResult(LinkMetadata(source_url=url, platform=detect_platform(url)))
+        result = initial_card_result(url)
         deadline = started + self._settings.card_prepare_timeout
         try:
             async with asyncio.timeout(min(

@@ -73,11 +73,10 @@ class Dispatcher:
 
     async def _parse_card_uncached(self, url: str) -> CardParseResult:
         platform = detect_platform(url)
-        meta = _initial_card_metadata(url, platform)
-        if not _supported_card_url(url, platform):
-            return CardParseResult(
-                meta, CardStatus.UNSUPPORTED, "unsupported", has_content=False,
-            )
+        initial = initial_card_result(url)
+        meta = initial.metadata
+        if initial.status == CardStatus.UNSUPPORTED:
+            return initial
         sources: list[str] = []
         failure_reason = ""
         recovery = _CardRecovery()
@@ -348,6 +347,15 @@ def _card_failure_reason(error: Exception, previous: str = "") -> str:
         if any(signal in text for signal in signals):
             return reason
     return previous or "unavailable"
+
+
+def initial_card_result(url: str) -> CardParseResult:
+    """Retain supported URL and media intent even when card preparation times out."""
+    platform = detect_platform(url)
+    meta = _initial_card_metadata(url, platform)
+    if not _supported_card_url(url, platform):
+        return CardParseResult(meta, CardStatus.UNSUPPORTED, "unsupported")
+    return CardParseResult(meta)
 
 
 def _initial_card_metadata(url: str, platform: str) -> LinkMetadata:
