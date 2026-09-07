@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import sys
 from datetime import datetime
@@ -14,6 +15,7 @@ from ..cookie_refresh import ensure_fresh_cookies
 from ..cookie_utils import temporary_cookie_file
 from ..platforms import detect_platform
 from .base import DownloadCandidate, LinkMetadata, MediaType, ParserError
+from .instagram_duration import instagram_duration_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +29,10 @@ class YtDlpMetadataParser:
         platform = detect_platform(url)
         try:
             async with asyncio.timeout(self._settings.media_metadata_timeout), self._slots:
-                await ensure_fresh_cookies(platform, self._settings)
-                cookie_file = self._settings.cookie_file_for_platform(platform)
-                with temporary_cookie_file(cookie_file) as temporary:
-                    data = await _run_metadata_worker(url, platform, temporary or "")
+                if platform == "instagram":
+                    data = await self._parse_instagram(url)
+                else:
+                    data = await self._parse_with_cookies(url, platform)
         except TimeoutError as exc:
             raise ParserError(url, "media metadata time budget exhausted") from exc
         try:
@@ -43,6 +45,66 @@ class YtDlpMetadataParser:
             return LinkMetadata(**data)
         except (TypeError, ValueError, KeyError) as exc:
             raise ParserError(url, "media worker returned invalid metadata") from exc
+
+    async def _parse_with_cookies(self, url: str, platform: str) -> dict[str, Any]:
+        await ensure_fresh_cookies(platform, self._settings)
+        cookie_file = self._settings.cookie_file_for_platform(platform)
+        with temporary_cookie_file(cookie_file) as temporary:
+            data = await _run_metadata_worker(url, platform, temporary or "")
+        data["download_uses_cookies"] = True
+        return data
+
+    async def _parse_instagram(self, url: str) -> dict[str, Any]:
+        # Public Instagram extraction can fail with a stale logged-in session even
+        # while its anonymous page works. Keep both attempts inside the same slot
+        # and deadline, and preserve the successful access mode through download.
+        cookie_file = self._settings.cookie_file_for_platform("instagram")
+        anonymous_error: ParserError | None = None
+        anonymous_data: dict[str, Any] | None = None
+        try:
+            anonymous_data = await _run_metadata_worker(url, "instagram", "")
+        except ParserError as exc:
+            if not cookie_file or not _instagram_login_required(exc.reason):
+                raise
+            anonymous_error = exc
+        else:
+            anonymous_data["download_uses_cookies"] = False
+            if (
+                anonymous_data.get("download_candidates")
+                or anonymous_data.get("requires_auth") is not True
+                or not cookie_file
+            ):
+                logger.info("instagram media metadata ready: url=%s access=anonymous", url)
+                return anonymous_data
+
+        logger.info("instagram media metadata fallback: url=%s reason=login_required", url)
+        await ensure_fresh_cookies("instagram", self._settings)
+        with temporary_cookie_file(cookie_file) as temporary:
+            if not temporary:
+                logger.warning("instagram media login fallback unavailable: cookie file missing")
+                if anonymous_error is not None:
+                    raise anonymous_error
+                assert anonymous_data is not None
+                return anonymous_data
+            data = await _run_metadata_worker(url, "instagram", temporary)
+        data["download_uses_cookies"] = True
+        logger.info("instagram media metadata ready: url=%s access=authenticated", url)
+        return data
+
+
+def _instagram_login_required(reason: str) -> bool:
+    """Only switch access mode for an explicit authentication failure."""
+    text = reason.lower()
+    if any(marker in text for marker in (
+        "429", "rate-limit", "rate limit", "too many requests", "challenge", "captcha",
+        "checkpoint", "deleted", "not found", "404", "geo-restrict", "geo restrict",
+        "geoblock", "region", "country", "unusual traffic", "automated requests",
+    )):
+        return False
+    return any(marker in text for marker in (
+        "private", "login required", "requires login", "log in", "sign in",
+        "authentication required", "requires authentication", "registered users", "needs_auth",
+    )) or bool(re.search(r"\b(?:http(?: error)?\s*|status(?: code)?[: ]*)(?:401|403)\b", text))
 
 
 async def _stop_worker(process: asyncio.subprocess.Process) -> None:
@@ -94,7 +156,8 @@ async def _run_metadata_worker(url: str, platform: str, cookie_file: str) -> dic
 
 
 def _metadata_from_info(url: str, platform: str, info: dict[str, Any]) -> LinkMetadata:
-    duration = _as_int(info.get("duration"))
+    duration = instagram_duration_seconds(info.get("duration")) \
+        if platform == "instagram" else _as_int(info.get("duration"))
     candidates = _download_candidates(info)
     warnings: list[str] = []
     if not candidates:

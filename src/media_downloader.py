@@ -100,7 +100,13 @@ async def download_video(
     if skip_reason:
         raise VideoSkipReason(skip_reason)
 
-    await ensure_fresh_cookies(meta.platform, settings)
+    if meta.download_uses_cookies:
+        await ensure_fresh_cookies(meta.platform, settings)
+    logger.info(
+        "video download starting: url=%s platform=%s access=%s",
+        meta.source_url, meta.platform,
+        "configured" if meta.download_uses_cookies else "anonymous",
+    )
 
     source_url = meta.canonical_url or meta.source_url
     temp_root = Path(settings.video_temp_dir)
@@ -135,7 +141,9 @@ async def download_video(
                 raise VideoDownloadError(f"yt-dlp download failed: {e}") from e
             return before
 
-        cookie_file = settings.cookie_file_for_platform(meta.platform)
+        cookie_file = (
+            settings.cookie_file_for_platform(meta.platform) if meta.download_uses_cookies else ""
+        )
         if cookie_file:
             with temporary_cookie_file(cookie_file) as temp_cookie_file:
                 if temp_cookie_file:
@@ -160,7 +168,11 @@ async def download_video(
             # exception, so check both. Refresh from the live browser and retry
             # once; if refresh is unavailable, keep the original failure.
             invalid = first_logger.cookie_invalid or looks_like_cookie_invalidation(str(e))
-            if not invalid or not await force_refresh(meta.platform, settings):
+            if (
+                not meta.download_uses_cookies
+                or not invalid
+                or not await force_refresh(meta.platform, settings)
+            ):
                 raise
             path = await loop.run_in_executor(None, _download, YtDlpSignalLogger(logger))
         path = await loop.run_in_executor(

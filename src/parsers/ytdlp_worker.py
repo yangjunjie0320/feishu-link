@@ -8,6 +8,7 @@ from dataclasses import asdict
 from typing import Any
 
 from ..ytdlp_options import YtDlpSignalLogger, apply_ytdlp_runtime
+from .instagram_duration import install_instagram_duration_fallback
 from .ytdlp import _metadata_from_info
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,8 @@ def main() -> int:
         payload = json.load(sys.stdin)
         url, platform = payload["url"], payload["platform"]
         with yt_dlp.YoutubeDL(metadata_options(platform, payload.get("cookie_file", ""))) as ydl:
+            if platform == "instagram":
+                install_instagram_duration_fallback(ydl)
             info = ydl.extract_info(url, download=False)
         if not isinstance(info, dict):
             raise ValueError("yt-dlp returned invalid metadata")

@@ -158,7 +158,7 @@ See `config.example.yaml` for the full reference. Common settings:
 | `archive_chat_id` | Empty | Required when `mode` is `B` |
 | `youtube_api_key` | Empty | Optional YouTube Data API key for stable YouTube metadata |
 | `link_blacklist` | `[]` | Regex URL patterns to ignore |
-| `enable_video_send` | `true` | Whether to try appending short videos after cards |
+| `video_append_enabled` | `true` | Whether to try appending short videos after cards |
 | `max_video_duration_seconds` | `180` | Max duration for automatic video append; manual downloads ignore this artificial cap |
 | `max_video_file_mb` | `30` | Max uploaded video size; Feishu `im/v1/files` rejects files over 30 MB |
 | `allowed_video_platforms` | Config example | Platforms allowed for video append |

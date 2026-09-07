@@ -2,6 +2,12 @@
 
 The card path is independent from video preparation. `Dispatcher.parse_card` returns metadata, `complete`/`partial`/`unavailable`/`unsupported`, content presence, failure category and sources. `prepare_video` runs after delivery for automatic video append, the manual command and legacy download callbacks. YouTube/Bilibili summary actions remain available; verified TikTok/Douyin videos also support on-demand summaries and chapters. Platform labels link to the original share URL; titles use the canonical content URL when available. Partial and unavailable cards retain this link without adding action buttons. Douyin supports cards, archive and on-demand video summaries; photo posts have no summary action, and video download/comment actions remain disabled.
 
+A card timeout or missing metadata does not block independent media preparation after the result card is sent. Media extraction must still confirm a video and its duration before automatic download; the 180-second and final 30-MB limits remain. Unsupported content, confirmed photo posts and explicit access restrictions are not retried through automatic download. Unavailable cards remain excluded from the archive. Manual download failures receive an explicit reply.
+
+Instagram media extraction tries public access first. Expired login cookies can make otherwise public Reels fail with HTTP 400. Only an explicit login requirement enables one fallback with the configured cookies, within the same media preparation budget; rate limits and verification failures do not switch identities. The successful cookie mode follows the metadata into the actual download, so an anonymous success never silently reattaches stale cookies. Existing cookie behavior for other platforms is unchanged.
+
+When Instagram omits `video_duration`, the isolated media worker preserves the exact total duration from that same video's static DASH manifest. It never estimates duration from bitrate or fragment counts, and dynamic or invalid manifests remain unknown. Fractional Instagram durations round up before the automatic duration limit is checked. The download, conversion and upload path remains unchanged.
+
 ## Sources and completeness
 
 | Platform | Sources, in order |

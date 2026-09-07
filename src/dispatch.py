@@ -69,6 +69,9 @@ class Dispatcher:
         merge_metadata(prepared, media)
         prepared.download_candidates = media.download_candidates
         prepared.requires_auth = media.requires_auth
+        prepared.download_uses_cookies = media.download_uses_cookies
+        if media.duration_seconds is not None:
+            prepared.duration_seconds = media.duration_seconds
         return prepared
 
     async def _parse_card_uncached(self, url: str) -> CardParseResult:

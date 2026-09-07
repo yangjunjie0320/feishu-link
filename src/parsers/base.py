@@ -62,6 +62,8 @@ class LinkMetadata:
     # False means a source confirmed a text-only post; None means unknown.
     has_visual: bool | None = None
     content_verified: bool = False
+    # Preserve the access mode that succeeded during media extraction for the download itself.
+    download_uses_cookies: bool = True
 
 
 @dataclass
