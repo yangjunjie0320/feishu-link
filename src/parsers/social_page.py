@@ -133,6 +133,7 @@ def _image_urls(value: Any) -> list[str]:
                     "url_list",
                     "urlList",
                     "displayImage",
+                    "imageURL",
                     "thumbnail",
                     "thumbnails",
                     "candidates",

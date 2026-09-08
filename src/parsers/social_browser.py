@@ -8,6 +8,7 @@ import json
 import logging
 import time
 import weakref
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
@@ -49,6 +50,11 @@ _RESPONSE_PATHS = {
 }
 # Semaphores belong to an event loop and are shared across parser instances.
 _LIMITS: weakref.WeakKeyDictionary[Any, dict[str, asyncio.Semaphore]] = weakref.WeakKeyDictionary()
+
+
+@dataclass
+class _MetricsProgress:
+    best: LinkMetadata | None = None
 
 
 def _limits(platform: str, settings: Settings) -> tuple[asyncio.Semaphore, asyncio.Semaphore]:
@@ -100,13 +106,24 @@ class SocialBrowserParser:
             budget = min(budget, timeout)
         started = time.monotonic()
         global_sem, platform_sem = _limits(platform, self._settings)
+        progress = _MetricsProgress() if metrics else None
+        browser_timeout = asyncio.timeout(budget)
         try:
             # Waiting for a slot consumes the same budget as page loading.
-            async with asyncio.timeout(budget), platform_sem, global_sem:
+            async with browser_timeout, platform_sem, global_sem:
                 if metrics:
-                    return await self._collect(url, platform, started + budget, metrics=True)
+                    return await self._collect(
+                        url, platform, started + budget, metrics=True, progress=progress,
+                    )
                 return await self._collect(url, platform, started + budget)
         except TimeoutError as exc:
+            if browser_timeout.expired() and progress is not None and progress.best is not None:
+                logger.warning(
+                    "social browser metrics deadline exceeded; preserving verified content: "
+                    "platform=%s missing=%s elapsed=%.2f",
+                    platform, list(missing_card_metrics(progress.best)), time.monotonic() - started,
+                )
+                return progress.best
             raise ParserError(url, "timeout: social browser card deadline exceeded") from exc
         except BrowserUnavailableError as exc:
             raise ParserError(url, "browser_unavailable: Chrome could not start") from exc
@@ -120,7 +137,8 @@ class SocialBrowserParser:
             raise ParserError(url, f"browser_error: {type(exc).__name__}") from exc
 
     async def _collect(
-        self, url: str, platform: str, deadline: float, *, metrics: bool = False
+        self, url: str, platform: str, deadline: float, *, metrics: bool = False,
+        progress: _MetricsProgress | None = None,
     ) -> LinkMetadata:
         settings = self._settings
         profile = Path(settings.card_browser_profile_dir) / platform
@@ -300,6 +318,8 @@ class SocialBrowserParser:
                                         merge_metadata(best, current)
                                         if missing_card_metrics(best) != missing_before:
                                             metrics_changed_at = time.monotonic()
+                                    if progress is not None:
+                                        progress.best = best
                                     if card_result(best).status == CardStatus.COMPLETE:
                                         now = time.monotonic()
                                         if content_completed_at is None:

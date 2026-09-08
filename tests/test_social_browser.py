@@ -593,3 +593,56 @@ async def test_metrics_configuration_does_not_cut_off_initial_content_collection
     assert result.view_count is None
     assert page.content.await_count == 3
     assert closed.is_set()
+
+
+@pytest.mark.parametrize("outcome", ["own_timeout", "external_cancel", "no_content"])
+async def test_metrics_stalled_context_exit_preserves_only_verified_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, outcome: str,
+) -> None:
+    page = FakePage(
+        html="" if outcome == "no_content" else _html(
+            {"playCount": 12, "diggCount": 0}
+        ).replace(_IMAGE, ""),
+    )
+    _, context, _ = _install_context(monkeypatch, page)
+    closing = asyncio.Event()
+    close_cancelled = asyncio.Event()
+
+    @asynccontextmanager
+    async def stalled_context(profile: str, **kwargs: Any) -> AsyncIterator[FakeContext]:
+        try:
+            yield context
+        finally:
+            closing.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                close_cancelled.set()
+
+    monkeypatch.setattr(social_browser, "persistent_context", stalled_context)
+    parser = social_browser.SocialBrowserParser(_settings(tmp_path))
+    started = time.monotonic()
+    task = asyncio.create_task(parser.parse_metrics(_URL, timeout=0.15))
+    async with asyncio.timeout(0.4):
+        await closing.wait()
+        if outcome == "external_cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif outcome == "no_content":
+            with pytest.raises(ParserError, match="timeout"):
+                await task
+        else:
+            result = await task
+            assert result.title == "Verified caption"
+            assert result.cover_url == ""
+            assert result.view_count == 12
+            assert result.like_count == 0
+            assert result.comment_count is None
+            assert "preserving verified content" in caplog.text
+
+    assert time.monotonic() - started < 0.3
+    assert close_cancelled.is_set()
+    assert not page.listeners
+    if outcome != "own_timeout":
+        assert "preserving verified content" not in caplog.text

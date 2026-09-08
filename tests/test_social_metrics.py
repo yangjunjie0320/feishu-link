@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from src.parsers.base import MediaType
 from src.parsers.social_page import parse_page_metadata
 from src.parsers.youtube_page_metrics import public_count
 
@@ -184,3 +185,25 @@ def test_public_counts_keep_real_zero_and_reject_unknown(
     value: object, expected: int | None,
 ) -> None:
     assert public_count(value) == expected
+
+
+def test_tiktok_real_photo_image_url_retains_first_image_and_all_counts() -> None:
+    url = 'https://www.tiktok.com/@creator/photo/7470966924462132486'
+    first = 'https://cdn.example/first-image?signature=first&expires=123'
+    alternate = 'https://cdn.example/first-image-alt?signature=alternate&expires=123'
+    target = {
+        'id': '7470966924462132486', 'desc': 'A photo story',
+        'imagePost': {'images': [
+            {'imageURL': {'urlList': [first, alternate]}},
+            {'imageURL': {'urlList': ['https://cdn.example/second-image']}},
+        ]},
+        'stats': {'playCount': 264900, 'diggCount': 42900,
+                  'commentCount': 232, 'shareCount': 2639},
+    }
+    meta = parse_page_metadata(url, '', payloads=[{'itemInfo': {'itemStruct': target}}])
+    assert meta.cover_candidates == [first, alternate]
+    assert meta.cover_url == first
+    assert meta.media_type == MediaType.ARTICLE
+    assert (meta.view_count, meta.like_count, meta.comment_count, meta.repost_count) == (
+        264900, 42900, 232, 2639,
+    )
