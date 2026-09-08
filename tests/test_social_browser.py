@@ -25,8 +25,10 @@ def _settings(tmp_path: Path, **overrides: Any) -> Settings:
     ).model_copy(update=overrides)
 
 
-def _html() -> str:
+def _html(stats: dict[str, int] | None = None) -> str:
     payload = {"id": "1234567890", "desc": "Verified caption", "video": {"cover": _IMAGE}}
+    if stats is not None:
+        payload["stats"] = stats
     return f'<script type="application/json">{json.dumps(payload)}</script>'
 
 
@@ -334,3 +336,260 @@ async def test_successful_short_link_keeps_original_source_url(
     assert result.canonical_url == target
     assert result.description == "Target photo caption"
     assert result.cover_url == _IMAGE
+
+
+async def test_metrics_waits_past_cover_and_preserves_counters_across_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = FakePage()
+    seen, _, closed = _install_context(monkeypatch, page)
+    page.content.side_effect = [
+        _html(),
+        _html({"playCount": 0}),
+        _html({"playCount": 9, "diggCount": 0, "commentCount": 3, "shareCount": 0}),
+    ]
+    monkeypatch.setattr(social_browser, "_POLL_SECONDS", 0)
+
+    result = await social_browser.SocialBrowserParser(_settings(tmp_path)).parse_metrics(
+        _URL, timeout=2
+    )
+
+    assert (result.view_count, result.like_count, result.comment_count, result.repost_count) == (
+        0, 0, 3, 0
+    )
+    assert result.title == "Verified caption"
+    assert page.content.await_count == 3
+    assert seen["profile"] == str(tmp_path / "cards" / "tiktok")
+    assert seen["close_timeout_seconds"] < 2
+    page.goto.assert_awaited_once()
+    assert not result.download_candidates
+    assert not page.listeners
+    assert closed.is_set()
+
+
+async def test_metrics_returns_partial_after_short_settle_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = FakePage(html=_html({"playCount": 12}))
+    _, _, closed = _install_context(monkeypatch, page)
+    monkeypatch.setattr(social_browser, "_POLL_SECONDS", 0.002)
+    monkeypatch.setattr(social_browser, "_METRICS_SETTLE_SECONDS", 0.01)
+
+    started = time.monotonic()
+    result = await social_browser.SocialBrowserParser(_settings(tmp_path)).parse_metrics(
+        _URL, timeout=1
+    )
+
+    assert result.view_count == 12
+    assert result.like_count is None
+    assert page.content.await_count >= 2
+    assert time.monotonic() - started < 0.25
+    assert closed.is_set()
+
+
+@pytest.mark.parametrize("stats", [None, {"playCount": 12}])
+async def test_metrics_timeout_keeps_best_snapshot_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stats: dict[str, int] | None
+) -> None:
+    page = FakePage(html=_html(stats))
+    _, _, closed = _install_context(monkeypatch, page, close_delay=0.01)
+    cancelled = asyncio.Event()
+
+    async def snapshot() -> str:
+        if page.content.await_count == 1:
+            return page.html
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        return ""
+
+    page.content.side_effect = snapshot
+    monkeypatch.setattr(social_browser, "_POLL_SECONDS", 0)
+    started = time.monotonic()
+
+    result = await social_browser.SocialBrowserParser(_settings(tmp_path)).parse_metrics(
+        _URL, timeout=0.15
+    )
+
+    assert result.view_count == (12 if stats is not None else None)
+    assert result.title == "Verified caption"
+    assert cancelled.is_set()
+    assert closed.is_set()
+    assert not page.listeners
+    assert time.monotonic() - started < 0.25
+
+
+async def test_metrics_queue_wait_consumes_explicit_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    _, platform_sem = social_browser._limits("tiktok", settings)
+    collect = AsyncMock(side_effect=AssertionError("must not start without a slot"))
+    monkeypatch.setattr(social_browser.SocialBrowserParser, "_collect", collect)
+
+    async with platform_sem:
+        with pytest.raises(ParserError, match="timeout"):
+            await social_browser.SocialBrowserParser(settings).parse_metrics(_URL, timeout=0.02)
+
+    collect.assert_not_awaited()
+
+
+async def test_metrics_cancellation_after_content_propagates_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = FakePage(html=_html({"playCount": 12}))
+    _, _, closed = _install_context(monkeypatch, page)
+    waiting = asyncio.Event()
+    response_cancelled = asyncio.Event()
+
+    class Response:
+        url = "https://www.tiktok.com/api/item/detail/?itemId=1234567890"
+
+        def __init__(self) -> None:
+            self.headers = {"content-type": "application/json"}
+
+        async def text(self) -> str:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                response_cancelled.set()
+            return ""
+
+    async def navigate(*args: Any, **kwargs: Any) -> None:
+        page.listeners["response"](Response())
+        await asyncio.sleep(0)
+
+    async def snapshot() -> str:
+        if page.content.await_count == 1:
+            return page.html
+        waiting.set()
+        await asyncio.Event().wait()
+        return ""
+
+    page.goto.side_effect = navigate
+    page.content.side_effect = snapshot
+    monkeypatch.setattr(social_browser, "_POLL_SECONDS", 0)
+    parser = social_browser.SocialBrowserParser(_settings(tmp_path))
+    task = asyncio.create_task(parser.parse_metrics(_URL, timeout=1))
+    await waiting.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert closed.is_set()
+    assert response_cancelled.is_set()
+    assert not page.listeners
+
+
+async def test_metrics_rejects_wrong_target_instead_of_reusing_recommendation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = FakePage(
+        url=_URL.replace("1234567890", "9999999999"),
+        html=_html({"playCount": 99}).replace("1234567890", "9999999999"),
+    )
+    _, _, closed = _install_context(monkeypatch, page)
+    with pytest.raises(ParserError, match="target_mismatch"):
+        await social_browser.SocialBrowserParser(_settings(tmp_path)).parse_metrics(_URL)
+    assert closed.is_set()
+
+
+async def test_youtube_metrics_does_not_require_share_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    page = FakePage(url=url)
+    _install_context(monkeypatch, page)
+    expected = LinkMetadata(
+        source_url=url, title="Target", platform="youtube", view_count=100, like_count=0,
+        comment_count=2, cover_url=_IMAGE,
+    )
+    monkeypatch.setattr(social_browser, "parse_page_metadata", lambda *a, **kw: expected)
+
+    result = await social_browser.SocialBrowserParser(_settings(tmp_path)).parse_metrics(url)
+
+    assert result is expected
+    assert result.repost_count is None
+    page.content.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "stats",
+    [{"playCount": 12}, {"playCount": 12, "diggCount": 0, "commentCount": 3, "shareCount": 0}],
+)
+async def test_metrics_early_completion_waits_for_later_cover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stats: dict[str, int]
+) -> None:
+    page = FakePage()
+    _, _, closed = _install_context(monkeypatch, page)
+    page.content.side_effect = [_html(stats).replace(_IMAGE, ""), _html(stats)]
+    monkeypatch.setattr(social_browser, "_POLL_SECONDS", 0)
+    monkeypatch.setattr(social_browser, "_METRICS_SETTLE_SECONDS", 0)
+
+    result = await social_browser.SocialBrowserParser(_settings(tmp_path)).parse_metrics(_URL)
+
+    assert result.cover_url == _IMAGE
+    assert result.view_count == 12
+    assert result.title == "Verified caption"
+    assert page.content.await_count == 2
+    assert closed.is_set()
+
+
+async def test_metrics_configuration_caps_wait_after_content_is_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = FakePage(html=_html())
+    _, _, closed = _install_context(monkeypatch, page, close_delay=0.002)
+    cancelled = asyncio.Event()
+
+    async def snapshot() -> str:
+        if page.content.await_count == 1:
+            return page.html
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+        return ""
+
+    page.content.side_effect = snapshot
+    monkeypatch.setattr(social_browser, "_POLL_SECONDS", 0)
+    settings = _settings(tmp_path, card_metrics_timeout=0.03)
+    started = time.monotonic()
+    async with asyncio.timeout(0.3):
+        result = await social_browser.SocialBrowserParser(settings).parse_metrics(_URL, timeout=30)
+
+    assert time.monotonic() - started < 0.15
+    assert result.title == "Verified caption"
+    assert result.cover_url == _IMAGE
+    assert result.view_count is None
+    assert cancelled.is_set()
+    assert closed.is_set()
+    assert not page.listeners
+
+
+async def test_metrics_configuration_does_not_cut_off_initial_content_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = FakePage()
+    _, _, closed = _install_context(monkeypatch, page)
+
+    async def snapshot() -> str:
+        if page.content.await_count == 1:
+            return _html().replace(_IMAGE, "")
+        if page.content.await_count == 2:
+            await asyncio.sleep(0.04)
+            return _html()
+        await asyncio.Event().wait()
+        return ""
+
+    page.content.side_effect = snapshot
+    monkeypatch.setattr(social_browser, "_POLL_SECONDS", 0)
+    settings = _settings(tmp_path, card_metrics_timeout=0.02)
+    async with asyncio.timeout(0.3):
+        result = await social_browser.SocialBrowserParser(settings).parse_metrics(_URL, timeout=30)
+
+    assert result.cover_url == _IMAGE
+    assert result.view_count is None
+    assert page.content.await_count == 3
+    assert closed.is_set()

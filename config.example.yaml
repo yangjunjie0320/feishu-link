@@ -60,6 +60,8 @@ send_retry_attempts: 3
 # Content preparation is separate from media extraction. No status-card updates.
 card_prepare_timeout: 60
 card_parse_timeout: 45
+# Optional YouTube/TikTok counters, within card_parse_timeout; 0 disables extra reads.
+card_metrics_timeout: 15
 card_enrichment_timeout: 10
 card_cache_ttl_seconds: 600
 card_cache_capacity: 256

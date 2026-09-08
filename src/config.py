@@ -97,6 +97,7 @@ class Settings(BaseSettings):
     send_retry_attempts: int = 3
     card_prepare_timeout: float = Field(default=60.0, gt=0)
     card_parse_timeout: float = Field(default=45.0, gt=0)
+    card_metrics_timeout: float = Field(default=15.0, ge=0)
     card_enrichment_timeout: float = Field(default=10.0, gt=0)
     card_parse_concurrency: int = Field(default=4, ge=1)
     card_platform_concurrency: int = Field(default=2, ge=1)

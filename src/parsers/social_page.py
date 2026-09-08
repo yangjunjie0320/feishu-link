@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup, Tag
 
 from ..card_metadata import is_placeholder
 from .base import LinkMetadata, MediaType, ParserError
+from .youtube_page_metrics import public_count, youtube_page_metrics
 
 _LABELS = {
     "tiktok": "TikTok",
@@ -306,6 +307,12 @@ def _structured_fields(
         author = node.get("author") or node.get("authorInfo") or {}
         stats = node.get("statistics") if is_douyin else node.get("stats")
         stats = stats if isinstance(stats, dict) else {}
+        alternate_stats = node.get("statsV2") if not is_douyin else {}
+        alternate_stats = alternate_stats if isinstance(alternate_stats, dict) else {}
+
+        def count(field: str) -> int | None:
+            value = public_count(stats.get(field))
+            return value if value is not None else public_count(alternate_stats.get(field))
         images = node.get("images") or _at(node, "imagePost", "images")
         if isinstance(images, list) and images:
             # A photo card represents its first image; CDN alternatives must refer to
@@ -325,10 +332,10 @@ def _structured_fields(
             if is_douyin and duration is not None
             else duration,
             "media_type": MediaType.ARTICLE if images else MediaType.VIDEO,
-            "view_count": _number(stats.get("play_count" if is_douyin else "playCount")),
-            "like_count": _number(stats.get("digg_count" if is_douyin else "diggCount")),
-            "comment_count": _number(stats.get("comment_count" if is_douyin else "commentCount")),
-            "repost_count": _number(stats.get("share_count" if is_douyin else "shareCount")),
+            "view_count": count("play_count" if is_douyin else "playCount"),
+            "like_count": count("digg_count" if is_douyin else "diggCount"),
+            "comment_count": count("comment_count" if is_douyin else "commentCount"),
+            "repost_count": count("share_count" if is_douyin else "shareCount"),
         }
     if platform == "instagram":
         if str(node.get("shortcode") or node.get("code") or "") != content_id:
@@ -435,6 +442,8 @@ def _apply(meta: LinkMetadata, fields: dict[str, Any]) -> None:
         elif key == "media_type" and value == MediaType.UNKNOWN:
             continue
         elif value is not None and value != "":
+            if key.endswith("_count") and getattr(meta, key) is not None:
+                continue
             if key in {"title", "description"} and len(str(value)) < len(getattr(meta, key)):
                 continue
             setattr(meta, key, value)
@@ -560,6 +569,8 @@ def parse_page_metadata(
             if fields:
                 matched_structure = True
                 _apply(meta, fields)
+        if platform == "youtube":
+            _apply(meta, youtube_page_metrics(payload, content_id))
     dom = _dom_fields(soup, platform, content_id)
     if meta.title or meta.description:
         dom.pop("title", None)

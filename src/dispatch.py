@@ -11,7 +11,14 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 
 import httpx
 
-from .card_metadata import CardMetadataCache, CardSourceError, card_result, merge_metadata
+from .card_metadata import (
+    CardMetadataCache,
+    CardSourceError,
+    card_result,
+    content_key,
+    merge_metadata,
+    missing_card_metrics,
+)
 from .config import Settings
 from .cookie_refresh import ensure_fresh_cookies, force_refresh
 from .parsers.base import CardParseResult, CardStatus, LinkMetadata, MediaType, Parser, ParserError
@@ -81,6 +88,7 @@ class Dispatcher:
         if initial.status == CardStatus.UNSUPPORTED:
             return initial
         sources: list[str] = []
+        attempted: set[str] = set()
         failure_reason = ""
         recovery = _CardRecovery()
         deadline = time.monotonic() + self._settings.card_parse_timeout
@@ -97,6 +105,7 @@ class Dispatcher:
                             failure_reason = "rate_limit"
                             break
                         try:
+                            attempted.add(name)
                             if authenticated and not recovery.freshness_checked:
                                 recovery.freshness_checked = True
                                 await ensure_fresh_cookies(platform, self._settings)
@@ -136,7 +145,16 @@ class Dispatcher:
                         and await self._wait_for_platform(platform, deadline)
                     ):
                         try:
-                            obtained = await self._read_browser_card(url)
+                            attempted.add("browser")
+                            if (
+                                platform in {"youtube", "tiktok"}
+                                and self._settings.card_metrics_timeout
+                            ):
+                                obtained = await self._read_browser_metrics(
+                                    url, deadline - time.monotonic(),
+                                )
+                            else:
+                                obtained = await self._read_browser_card(url)
                             merge_metadata(meta, obtained)
                             sources.append("browser")
                         except ParserError as exc:
@@ -145,6 +163,10 @@ class Dispatcher:
                         except Exception as exc:
                             failure_reason = _card_failure_reason(exc, failure_reason)
                             logger.exception("card browser error: url=%s", url)
+                    if card_result(meta).has_content:
+                        await self._enrich_card_metrics(
+                            meta, sources, attempted, recovery, deadline,
+                        )
         except TimeoutError:
             failure_reason = "timeout"
             logger.warning(
@@ -161,6 +183,104 @@ class Dispatcher:
         logger.info("card parsed: platform=%s status=%s sources=%s url=%s",
                     platform, result.status, result.sources, url)
         return result
+
+    async def _enrich_card_metrics(
+        self, meta: LinkMetadata, sources: list[str], attempted: set[str],
+        recovery: _CardRecovery, deadline: float,
+    ) -> None:
+        """Optional counters share the card budget and never discard usable content."""
+        missing = missing_card_metrics(meta)
+        if not missing:
+            return
+        started = time.monotonic()
+        budget = min(self._settings.card_metrics_timeout, deadline - started)
+        if budget <= 0:
+            return
+        metrics_deadline = started + budget
+        url = meta.canonical_url or meta.source_url
+        if meta.platform == "youtube" and (video_id := extract_video_id(url)):
+            url = f"https://www.youtube.com/watch?v={video_id}"
+        outcome = "unavailable"
+        try:
+            async with asyncio.timeout_at(metrics_deadline):
+                for name in ("page", "browser"):
+                    if name in attempted:
+                        continue
+                    if not await self._wait_for_platform(meta.platform, metrics_deadline):
+                        outcome = "rate_limit"
+                        break
+                    attempted.add(name)
+                    try:
+                        if name == "page":
+                            # Reserve time for Chrome if the public HTTP page stalls.
+                            timeout = min(5.0, (metrics_deadline - time.monotonic()) / 2)
+                            async with asyncio.timeout(max(0.001, timeout)):
+                                obtained = await self._read_card_source(
+                                    url, meta.platform, self._read_card_page, recovery,
+                                    authenticated=True,
+                                )
+                        else:
+                            obtained = await self._read_browser_metrics(
+                                url, metrics_deadline - time.monotonic(),
+                            )
+                        if (
+                            obtained.platform != meta.platform
+                            or content_key(obtained.canonical_url or obtained.source_url)
+                            != content_key(url)
+                        ):
+                            raise ParserError(url, "target_mismatch: metrics identify another post")
+                        filled = []
+                        for field in missing_card_metrics(meta):
+                            value = getattr(obtained, field)
+                            if value is not None:
+                                setattr(meta, field, value)
+                                filled.append(field)
+                        if filled:
+                            sources.append(f"{name}_metrics")
+                            outcome = "partial"
+                        if not missing_card_metrics(meta):
+                            outcome = "complete"
+                            break
+                    except TimeoutError:
+                        outcome = "timeout"
+                        logger.warning("card metrics source timed out: source=%s url=%s", name, url)
+                    except ParserError as exc:
+                        outcome = _card_failure_reason(exc, "")
+                        logger.warning("card metrics source failed: source=%s url=%s reason=%s",
+                                       name, url, exc.reason)
+                        if outcome == "rate_limit":
+                            retry_after = (
+                                exc.retry_after if isinstance(exc, CardSourceError) else None
+                            )
+                            self._rate_limited_until[meta.platform] = max(
+                                self._rate_limited_until.get(meta.platform, 0),
+                                time.monotonic() + (
+                                    retry_after if retry_after is not None else 60.0
+                                ),
+                            )
+                        if outcome in {"auth", "challenge", "deleted", "geo"} or (
+                            "target_mismatch" in exc.reason
+                        ):
+                            break
+                    except Exception:
+                        outcome = "error"
+                        logger.exception("card metrics source error: source=%s url=%s", name, url)
+        except TimeoutError:
+            outcome = "timeout"
+        finally:
+            logger.info(
+                "card metrics: platform=%s outcome=%s filled=%s missing=%s elapsed=%.2f url=%s",
+                meta.platform, outcome,
+                [field for field in missing if getattr(meta, field) is not None],
+                list(missing_card_metrics(meta)), time.monotonic() - started, url,
+            )
+
+    async def _read_browser_metrics(self, url: str, timeout: float) -> LinkMetadata:
+        if self._browser is None:
+            from .parsers.social_browser import SocialBrowserParser
+
+            self._browser = SocialBrowserParser(self._settings)
+        return await self._browser.parse_metrics(url, timeout=timeout)
 
     async def _wait_for_platform(self, platform: str, deadline: float) -> bool:
         while True:
@@ -190,10 +310,17 @@ class Dispatcher:
             # Preserve Bilibili's existing metadata coverage; only the other
             # social platforms switch to lightweight card sources in this change.
             sources.append(("bilibili_metadata", self._ytdlp.parse, True))
-        sources.append(("page", self._og.parse, True))
+        sources.append(("page", self._read_card_page, True))
         if platform == "instagram":
             sources.append(("instagram_public_page", self._og.parse_public, False))
         return sources
+
+    async def _read_card_page(self, url: str) -> LinkMetadata:
+        # Shorts and youtu.be identify the same video; the watch page exposes
+        # its full public metadata and counts in a single response.
+        if video_id := extract_video_id(url):
+            url = f"https://www.youtube.com/watch?v={video_id}"
+        return await self._og.parse(url)
 
     async def _read_card_source(
         self, url: str, platform: str, read: _CardRead, recovery: _CardRecovery,

@@ -30,6 +30,7 @@ async def dispatcher() -> AsyncIterator[Dispatcher]:
         result._og.parse_public.side_effect = ParserError(X, "public page failed")
         result._browser = AsyncMock()
         result._browser.parse.side_effect = ParserError(X, "browser failed")
+        result._browser.parse_metrics.side_effect = ParserError(X, "browser failed")
         yield result
 
 
@@ -40,6 +41,7 @@ def video(url: str, platform: str = "youtube") -> LinkMetadata:
 
 
 async def test_card_uses_oembed_without_media_extraction_or_browser(dispatcher: Dispatcher) -> None:
+    dispatcher._settings.card_metrics_timeout = 0
     dispatcher._oembed = AsyncMock()
     dispatcher._oembed.parse.return_value = video(YOUTUBE)
     result = await dispatcher.parse_card(YOUTUBE)
@@ -166,7 +168,9 @@ async def test_parse_limits_global_and_platform_concurrency() -> None:
         return video(url, platform)
 
     async with httpx.AsyncClient() as client:
-        dispatcher = Dispatcher(Settings(cookie_refresh_enabled=False), client)
+        dispatcher = Dispatcher(
+            Settings(cookie_refresh_enabled=False, card_metrics_timeout=0), client,
+        )
         dispatcher._oembed = AsyncMock()
         dispatcher._oembed.parse.side_effect = parse
         dispatcher._x_oembed = AsyncMock()

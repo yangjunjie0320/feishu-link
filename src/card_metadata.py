@@ -23,6 +23,14 @@ class CardSourceError(ParserError):
         self.retry_after = retry_after
 
 
+def missing_card_metrics(meta: LinkMetadata) -> tuple[str, ...]:
+    fields = {
+        "youtube": ("view_count", "like_count", "comment_count"),
+        "tiktok": ("view_count", "like_count", "comment_count", "repost_count"),
+    }.get(meta.platform, ())
+    return tuple(field for field in fields if getattr(meta, field) is None)
+
+
 def is_placeholder(text: str, platform: str, url: str = "") -> bool:
     value = " ".join(text.strip().lower().split())
     domain = (urlparse(url).hostname or "").removeprefix("www.")
