@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .parsers.base import CardParseResult, CardStatus, LinkMetadata, MediaType, ParserError
 from .platforms import detect_platform, normalize_url
+from .xiaohongshu import note_key, prefer_access_url
 
 
 class CardSourceError(ParserError):
@@ -37,6 +38,7 @@ def is_placeholder(text: str, platform: str, url: str = "") -> bool:
     if value in {
         "", domain, platform, "x", "twitter", "instagram", "youtube", "tiktok", "douyin",
         "x.com", "twitter.com", "instagram.com", "youtube.com", "youtu.be", "tiktok.com",
+        "xiaohongshu", "xiaohongshu.com", "小红书", "小红书 - 你的生活兴趣社区",
         "douyin.com", "抖音", "抖音-记录美好生活", "抖音 - 记录美好生活",
         "tiktok - make your day", "make your day", "instagram post", "instagram reel",
         "x post", "x video", "youtube video", "tiktok post", "tiktok video", "douyin video",
@@ -96,7 +98,7 @@ def merge_metadata(target: LinkMetadata, source: LinkMetadata) -> None:
     if target.platform == "web" and source.platform != "web":
         target.platform = source.platform
     verified_social_type = (
-        target.platform in {"instagram", "tiktok", "douyin", "x"}
+        target.platform in {"instagram", "tiktok", "douyin", "x", "xiaohongshu"}
         and source.platform == target.platform
         and source.content_verified
         and not target.content_verified
@@ -191,7 +193,17 @@ class CardMetadataCache:
         self._inflight: dict[str, asyncio.Task[CardParseResult]] = {}
 
     def invalidate(self, url: str) -> None:
-        self._cache.pop(content_key(url), None)
+        key = content_key(url)
+        cached = self._cache.pop(key, None)
+        identity = note_key(url) or (
+            note_key(cached[1].metadata.canonical_url) if cached else ""
+        )
+        if identity:
+            # Short and long aliases share a result; invalidating an expired
+            # signed image must evict every alias of that note.
+            for alias, (_, result) in list(self._cache.items()):
+                if note_key(result.metadata.canonical_url) == identity:
+                    self._cache.pop(alias, None)
 
     async def get(
         self, url: str, factory: Callable[[], Awaitable[CardParseResult]],
@@ -220,6 +232,9 @@ class CardMetadataCache:
             return
         self._cache[key] = (time.monotonic() + self._ttl, copy.deepcopy(result))
         self._cache.move_to_end(key)
+        if alias := note_key(result.metadata.canonical_url):
+            self._cache[alias] = self._cache[key]
+            self._cache.move_to_end(alias)
         while len(self._cache) > self._capacity:
             self._cache.popitem(last=False)
 
@@ -227,4 +242,6 @@ class CardMetadataCache:
     def _copy(result: CardParseResult, url: str) -> CardParseResult:
         result = copy.deepcopy(result)
         result.metadata.source_url = url
+        if note_key(url) and note_key(url) == note_key(result.metadata.canonical_url):
+            result.metadata.canonical_url = prefer_access_url(url, result.metadata.canonical_url)
         return result

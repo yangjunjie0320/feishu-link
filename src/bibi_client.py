@@ -25,6 +25,7 @@ from .cookie_refresh import write_netscape
 from .cookie_utils import get_cookie_header, playwright_cookies_from_file
 from .platforms import detect_platform, normalize_url
 from .summary_support import canonical_summary_url, is_summary_video_url
+from .xiaohongshu import note_id
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,9 @@ class BibiClient:
         """
         if self._cookie_error and self._settings.bibigpt_access_mode != "browser":
             raise AuthenticationError(0, self._cookie_error)
+
+        if detect_platform(video_url) == "xiaohongshu":
+            return await self._summarize_note(video_url)
 
         # The caller resolves short links and proves the actual media type.
         # Keep one canonical target throughout preparation and recovery so the
@@ -745,6 +749,63 @@ class BibiClient:
             raise AuthenticationError(response.status_code, response.text)
         if not response.is_success:
             raise BibiAPIError(response.status_code, response.text)
+
+    async def _summarize_note(self, url: str) -> SummaryResult:
+        """Summarize verified images through the desktop task route, without subtitles."""
+        identity = note_id(url)
+        if not identity:
+            raise BibiAPIError(400, "A resolved Xiaohongshu note URL is required.")
+        info_url = _trpc_query_url(
+            self._routes.api_base_url, "content.info",
+            {"url": url, "skipSubtitleTask": True, "isRefresh": False},
+        )
+        if self._settings.bibigpt_access_mode == "browser":
+            raw = await self._browser_fetch_json(info_url, None, method="GET")
+        else:
+            async with httpx.AsyncClient(timeout=self._settings.bibigpt_timeout) as client:
+                response = await client.get(info_url, headers=self._headers)
+            self._check_response(response)
+            raw = response.json()
+        detail = _extract_trpc_data(raw)
+        content_id = detail.get("dbId")
+        images = detail.get("images")
+        if (
+            not isinstance(content_id, str) or not content_id.strip()
+            or note_id(str(detail.get("url") or "")) != identity
+            or detail.get("id") != identity
+            or detail.get("audioUrl") or detail.get("playUrl")
+            or not isinstance(images, list) or not images
+            or not all(isinstance(image, str) and image.startswith(("https://", "http://"))
+                       for image in images)
+        ):
+            raise BibiAPIError(200, "BibiGPT did not return verified images for this note.")
+        settings = _web_prompt_config(
+            "请结合笔记全部图片与正文总结图文内容。用笔记或图片称呼来源，"
+            "不要使用视频口吻，不要生成时间轴或时间戳。",
+            model=self._settings.bibigpt_model, refresh=True,
+        )
+        settings.update(customPromptTitle="图文笔记", showTimestamp=False)
+        payload = {"url": url, "promptConfig": settings}
+        try:
+            if self._settings.bibigpt_access_mode == "browser":
+                result = await self._content_pipeline_call("summarize", payload)
+            else:
+                endpoint = f"{self._routes.api_base_url}/api/trpc/contentPipeline.summarize?batch=1"
+                async with httpx.AsyncClient(timeout=self._settings.bibigpt_timeout) as client:
+                    response = await client.post(
+                        endpoint, json={"0": {"json": payload}}, headers=self._headers,
+                    )
+                self._check_response(response)
+                result = _extract_trpc_data(response.json())
+        except httpx.TimeoutException as exc:
+            raise BibiTimeoutError(0, "BibiGPT image summary request timed out.") from exc
+        content = result.get("summaryText")
+        if result.get("id") != content_id or not isinstance(content, str) or not content.strip():
+            raise BibiAPIError(200, "BibiGPT returned an empty or mismatched image summary.")
+        return SummaryResult.from_web_response(
+            {"summary": content, "contentId": content_id, "model": self._settings.bibigpt_model},
+            video_url=url,
+        )
 
     async def _browser_fetch_json(
         self,

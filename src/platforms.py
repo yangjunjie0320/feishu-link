@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from .xiaohongshu import note_key
+
 # 跟踪/分享参数,归档去重比对时忽略(尽力而为的黑名单,来自实际见过的分享链接)
 _TRACKING_PARAMS = {
     "share_source",
@@ -47,6 +49,8 @@ def normalize_url(url: str) -> str:
 
     只作为内部比较键,不改变实际存档/展示的 URL。
     """
+    if key := note_key(url):
+        return key
     p = urlparse(url.strip())
     host = p.netloc.lower()
     if "@" in host:
@@ -66,6 +70,8 @@ def normalized_domain(url: str) -> str:
 
 def detect_platform(url: str) -> str:
     domain = normalized_domain(url)
+    if domain in {"xiaohongshu.com", "xhslink.com"} or domain.endswith(".xiaohongshu.com"):
+        return "xiaohongshu"
     if domain in {"bilibili.com", "b23.tv"} or domain.endswith(".bilibili.com"):
         return "bilibili"
     if domain == "instagram.com" or domain.endswith(".instagram.com"):
@@ -86,4 +92,6 @@ def detect_platform(url: str) -> str:
 def is_short_video_platform(url: str) -> bool:
     # Historical name: this is the card-processing allowlist, not permission
     # to download a video. Douyin supports cards and summaries, but no downloads.
-    return detect_platform(url) in {"bilibili", "instagram", "tiktok", "youtube", "x", "douyin"}
+    return detect_platform(url) in {
+        "bilibili", "instagram", "tiktok", "youtube", "x", "douyin", "xiaohongshu",
+    }

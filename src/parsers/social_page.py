@@ -12,10 +12,12 @@ from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlsplit, urluns
 from bs4 import BeautifulSoup, Tag
 
 from ..card_metadata import is_placeholder
+from ..xiaohongshu import note_id
 from .base import LinkMetadata, MediaType, ParserError
 from .youtube_page_metrics import public_count, youtube_page_metrics
 
 _LABELS = {
+    "xiaohongshu": "小红书",
     "tiktok": "TikTok",
     "douyin": "抖音",
     "instagram": "Instagram",
@@ -55,7 +57,9 @@ def page_identity(url: str) -> tuple[str, str, str]:
     host = (parsed.hostname or "").lower()
     path = parsed.path
     platform, content_id, kind = "", "", ""
-    if host == "tiktok.com" or host.endswith(".tiktok.com"):
+    if host in {"xiaohongshu.com", "xhslink.com"} or host.endswith(".xiaohongshu.com"):
+        platform, content_id = "xiaohongshu", note_id(url)
+    elif host == "tiktok.com" or host.endswith(".tiktok.com"):
         platform = "tiktok"
         match = re.search(r"/(video|photo)/(\d+)(?:/|$)", path)
         if match:
@@ -524,6 +528,10 @@ def parse_page_metadata(
     """Parse already obtained HTML/JSON; this function performs no I/O."""
     final = final_url or url
     platform, expected, kind = page_identity(url)
+    if platform == "xiaohongshu":
+        from .xiaohongshu import parse_note
+
+        return parse_note(url, html, final)
     final_platform, landed_id, landed_kind = page_identity(final)
     if platform not in _LABELS:
         raise ParserError(url, "unsupported: no social page parser for this platform")

@@ -268,7 +268,7 @@ class Settings(BaseSettings):
 
         # Douyin has an independent session; never treat the generic legacy
         # cookie file as its login state.
-        if normalized == "douyin":
+        if normalized in {"douyin", "xiaohongshu"}:
             return ""
 
         if self.cookie_file and Path(self.cookie_file).exists():

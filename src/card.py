@@ -12,10 +12,12 @@ from .bibi_models import ChapterSummarySection
 from .card_metadata import is_placeholder
 from .parsers.base import LinkMetadata, MediaType
 from .platforms import detect_platform
-from .summary_support import summary_url_for_metadata, supports_video_summary
+from .summary_support import summary_url_for_metadata, supports_note_summary, supports_summary
 
 _SOURCE_COLORS = {
     "youtube": "red",
+    "小红书": "red",
+    "xiaohongshu": "red",
     "github": "grey",
     "twitter": "blue",
     "x": "blue",
@@ -530,11 +532,12 @@ def _build_actions(meta: LinkMetadata) -> list[dict[str, object]]:
     action_url = _action_url(meta)
     actions: list[dict[str, object]] = []
 
-    if supports_video_summary(meta):
+    if supports_summary(meta):
         actions.append(
             {
                 "tag": "button",
-                "text": {"tag": "plain_text", "content": "总结视频"},
+                "text": {"tag": "plain_text",
+                         "content": "总结笔记" if supports_note_summary(meta) else "总结视频"},
                 "type": "default",
                 "value": {
                     "action": "summarize_video",
@@ -577,7 +580,7 @@ def _supports_comment_analysis_action(meta: LinkMetadata) -> bool:
 def _description_should_be_primary(meta: LinkMetadata, description_block: str) -> bool:
     return bool(
         description_block
-        and meta.platform != "douyin"
+        and meta.platform not in {"douyin", "xiaohongshu"}
         and not _has_distinct_x_article_title(meta)
         and (
             (meta.media_type == MediaType.ARTICLE and meta.platform != "web")

@@ -35,6 +35,7 @@ _METRIC_FIELDS = {
 _MAX_RESPONSE_BYTES = 3_000_000
 _MAX_PAYLOADS = 16
 _COOKIE_DOMAINS = {
+    "xiaohongshu": ("xiaohongshu.com",),
     "tiktok": ("tiktok.com",),
     "douyin": ("douyin.com", "iesdouyin.com"),
     "instagram": ("instagram.com",),
@@ -42,6 +43,7 @@ _COOKIE_DOMAINS = {
     "x": ("x.com", "twitter.com"),
 }
 _RESPONSE_PATHS = {
+    "xiaohongshu": (),
     "tiktok": ("/api/item/detail",),
     "douyin": ("/aweme/v1/web/aweme/detail/",),
     "instagram": ("/graphql/query", "/api/graphql", "/api/v1/media/"),
@@ -198,7 +200,7 @@ class SocialBrowserParser:
                                 [
                                     (key, value)
                                     for key, value in parse_qsl(parsed.query)
-                                    if key in {"modal_id", "img_index"}
+                                    if platform == "xiaohongshu" or key in {"modal_id", "img_index"}
                                 ]
                             )
                             locked_url = urlunsplit(

@@ -5,7 +5,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from .card_metadata import is_placeholder
 from .parsers.base import LinkMetadata, MediaType
-from .platforms import normalize_url
+from .platforms import detect_platform, normalize_url
+from .xiaohongshu import access_url, note_id, note_key
 
 _VIDEO_ID = re.compile(r"[0-9]+")
 _YOUTUBE_ID = re.compile(r"[A-Za-z0-9_-]{11}")
@@ -34,6 +35,11 @@ def _summary_platform(url: str) -> str:
 
 def canonical_summary_url(url: str) -> str:
     """Normalize known video URLs without resolving links or changing photo content."""
+    try:
+        if detect_platform(url) == "xiaohongshu":
+            return access_url(url)
+    except ValueError:
+        return url.strip()
     platform = _summary_platform(url.strip())
     if not platform:
         return url.strip()
@@ -139,3 +145,21 @@ def supports_video_summary(meta: LinkMetadata) -> bool:
         for value in (meta.title, meta.description)
     )
     return real_text or bool(meta.content_verified and (meta.cover_url or meta.cover_candidates))
+
+
+def supports_note_summary(meta: LinkMetadata) -> bool:
+    return bool(
+        meta.platform == "xiaohongshu"
+        and note_id(meta.canonical_url or meta.source_url)
+        and meta.media_type == MediaType.ARTICLE
+        and meta.content_verified
+        and meta.has_visual is True
+    )
+
+
+def supports_summary(meta: LinkMetadata) -> bool:
+    return supports_video_summary(meta) or supports_note_summary(meta)
+
+
+def summary_key(url: str) -> str:
+    return note_key(url) or canonical_summary_url(url)

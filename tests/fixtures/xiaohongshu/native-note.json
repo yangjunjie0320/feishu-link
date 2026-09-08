@@ -1,0 +1,43 @@
+{
+  "note": {
+    "noteDetailMap": {
+      "6a9dfe020000000026038898": {
+        "note": {
+          "noteId": "6a9dfe020000000026038898",
+          "type": "normal",
+          "title": "一个大学教授与新生家长的对话",
+          "desc": "现在很多家长将大学教育完全照抄义务教育那一套，总觉得老师就能决定学生学与不学。大学全靠自觉，人和人之间的差距说到底也就是自我认知的差异。#大一新生[话题]# #教育[话题]# #教育的意义在于唤醒[话题]# #家长[话题]# #职业规划[话题]#",
+          "user": {
+            "nickname": "启航合伙人"
+          },
+          "imageList": [
+            {
+              "urlDefault": "https://sns-webpic-qc.xhscdn.com/redacted/image-1.jpg",
+              "urlPre": "https://sns-webpic-qc.xhscdn.com/redacted/thumb-1.jpg"
+            },
+            {
+              "urlDefault": "https://sns-webpic-qc.xhscdn.com/redacted/image-2.jpg",
+              "urlPre": "https://sns-webpic-qc.xhscdn.com/redacted/thumb-2.jpg"
+            },
+            {
+              "urlDefault": "https://sns-webpic-qc.xhscdn.com/redacted/image-3.jpg",
+              "urlPre": "https://sns-webpic-qc.xhscdn.com/redacted/thumb-3.jpg"
+            },
+            {
+              "urlDefault": "https://sns-webpic-qc.xhscdn.com/redacted/image-4.jpg",
+              "urlPre": "https://sns-webpic-qc.xhscdn.com/redacted/thumb-4.jpg"
+            },
+            {
+              "urlDefault": "https://sns-webpic-qc.xhscdn.com/redacted/image-5.jpg",
+              "urlPre": "https://sns-webpic-qc.xhscdn.com/redacted/thumb-5.jpg"
+            },
+            {
+              "urlDefault": "https://sns-webpic-qc.xhscdn.com/redacted/image-6.jpg",
+              "urlPre": "https://sns-webpic-qc.xhscdn.com/redacted/thumb-6.jpg"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

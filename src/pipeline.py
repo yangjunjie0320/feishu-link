@@ -43,7 +43,9 @@ from .sender import CardSender, TextSender, TypingReactionSender, VideoSender
 from .summary_support import (
     canonical_summary_url,
     is_summary_video_url,
+    summary_key,
     summary_url_for_metadata,
+    supports_summary,
     supports_video_summary,
 )
 from .translator import TitleTranslator
@@ -53,6 +55,7 @@ from .url_extract import (
     extract_urls,
     is_manual_download_command,
 )
+from .xiaohongshu import prefer_access_url
 
 logger = logging.getLogger(__name__)
 
@@ -382,7 +385,7 @@ class Pipeline:
                 meta.title[:50] if meta.title else "",
                 event.message_id,
             )
-            if result.has_content and supports_video_summary(meta):
+            if result.has_content and supports_summary(meta):
                 self._remember_summary_target(url, meta)
 
             if self._archive is not None and result.has_content:
@@ -405,12 +408,20 @@ class Pipeline:
                 _remember(
                     self._source_archive_url, canonical_summary_url(archive_url), archive_url
                 )
-                if supports_video_summary(meta):
+                if supports_summary(meta):
                     _remember(
                         self._source_archive_url, summary_url_for_metadata(meta), archive_url
                     )
 
         domain = detect_platform(url)
+
+        if domain == "xiaohongshu":
+            if manual_download:
+                await self._text_sender.send(
+                    "小红书暂不支持下载，请使用卡片上的总结笔记按钮。",
+                    event.chat_id, event.message_id,
+                )
+            return
 
         if manual_download and domain == "douyin":
             await self._text_sender.send(
@@ -582,8 +593,8 @@ class Pipeline:
         enforce_duration_limit: bool,
     ) -> None:
         try:
-            if meta.platform == "douyin":
-                raise VideoSkipReason("platform not allowed: douyin")
+            if meta.platform in {"douyin", "xiaohongshu"}:
+                raise VideoSkipReason(f"platform not allowed: {meta.platform}")
             if (
                 self._settings.video_append_enabled
                 and meta.platform in self._settings.allowed_video_platforms
@@ -784,23 +795,29 @@ class Pipeline:
                     )
                 )
 
-            await self._try_send_bibigpt_chapter_summary(event, result)
+            if detect_platform(url) != "xiaohongshu":
+                await self._try_send_bibigpt_chapter_summary(event, result)
 
     def _remember_summary_target(self, source_url: str, meta: LinkMetadata) -> str:
         target = summary_url_for_metadata(meta)
         for alias in (source_url, meta.source_url, target):
-            _remember(self._summary_targets, canonical_summary_url(alias), target)
+            _remember(self._summary_targets, summary_key(alias), target)
         return target
 
     async def _resolve_summary_target(self, source_url: str) -> str:
         platform = detect_platform(source_url)
-        if platform not in {"bilibili", "youtube", "tiktok", "douyin"}:
-            raise SummaryUnavailableError("目前仅支持 B站、YouTube、TikTok 和抖音的视频总结。")
+        if platform not in {"bilibili", "youtube", "tiktok", "douyin", "xiaohongshu"}:
+            raise SummaryUnavailableError(
+                "目前支持 B站、YouTube、TikTok、抖音视频和小红书图文总结。"
+            )
         normalized = canonical_summary_url(source_url)
-        target = self._summary_targets.get(normalized)
+        target = self._summary_targets.get(summary_key(source_url))
         if target:
+            if platform == "xiaohongshu" and summary_key(source_url) == summary_key(target):
+                # The identity is verified, but a newly shared signature may be fresher.
+                return prefer_access_url(normalized, target)
             return target
-        if platform not in {"tiktok", "douyin"}:
+        if platform not in {"tiktok", "douyin", "xiaohongshu"}:
             return normalized
         # A callback can come from an old card, or carry a short URL. Confirm
         # actual content type instead of trusting a button payload or path.
@@ -808,14 +825,18 @@ class Pipeline:
             async with asyncio.timeout(self._settings.card_parse_timeout):
                 parsed = await self._dispatcher.parse_card(source_url)
         except TimeoutError as exc:
-            raise SummaryUnavailableError("视频信息确认超时，请稍后重试。") from exc
+            raise SummaryUnavailableError("内容信息确认超时，请稍后重试。") from exc
         meta = parsed.metadata
         if not parsed.has_content:
             raise SummaryUnavailableError(_card_failure_description(parsed.reason))
-        if not supports_video_summary(meta):
+        if not supports_summary(meta):
+            if platform == "xiaohongshu":
+                raise SummaryUnavailableError("目前仅支持已确认的小红书图文笔记总结。")
             raise SummaryUnavailableError("暂未确认这是可总结的视频；图文或照片帖暂不支持。")
         target = canonical_summary_url(meta.canonical_url or meta.source_url)
-        if detect_platform(target) != platform or not is_summary_video_url(target):
+        if detect_platform(target) != platform or (
+            platform != "xiaohongshu" and not is_summary_video_url(target)
+        ):
             raise SummaryUnavailableError("没有取得已确认的视频链接，请发送作品的完整链接。")
         if self._archive is not None:
             _remember(
@@ -829,22 +850,23 @@ class Pipeline:
         requests for the same URL wait on the first run's result instead of
         launching another browser; a repeat from the very same message is
         dropped (None) because the first run already replies to that thread."""
+        key = summary_key(url)
         now = time.monotonic()
-        cached = self._recent_summaries.get(url)
+        cached = self._recent_summaries.get(key)
         if cached is not None:
             expires_at, cached_result = cached
             if expires_at > now:
                 logger.info("using recent summary cache: url=%s message_id=%s", url, message_id)
                 return cached_result
-            self._recent_summaries.pop(url, None)
-        failed = self._summary_failures.get(url)
+            self._recent_summaries.pop(key, None)
+        failed = self._summary_failures.get(key)
         if failed is not None:
             expires_at, reason = failed
             if expires_at > now:
                 raise SummaryCooldownError(int(expires_at - now) + 1, reason)
-            self._summary_failures.pop(url, None)
+            self._summary_failures.pop(key, None)
 
-        inflight = self._inflight_summaries.get(url)
+        inflight = self._inflight_summaries.get(key)
         if inflight is not None:
             owner_message_id, future = inflight
             if owner_message_id == message_id:
@@ -860,7 +882,7 @@ class Pipeline:
             return await asyncio.shield(future)
 
         future: asyncio.Future[SummaryResult] = asyncio.get_running_loop().create_future()
-        self._inflight_summaries[url] = (message_id, future)
+        self._inflight_summaries[key] = (message_id, future)
         try:
             result = await self._lookup_cached_summary(url, None, message_id)
             if result is None:
@@ -872,7 +894,7 @@ class Pipeline:
                 if cooldown > 0 and not isinstance(e, BibiContentPendingError):
                     _remember(
                         self._summary_failures,
-                        url,
+                        key,
                         (time.monotonic() + cooldown, _summary_failure_message(e)),
                     )
             else:  # cancellation: waiters get a normal failure, not our cancel
@@ -883,10 +905,10 @@ class Pipeline:
             future.set_result(result)
             ttl = self._settings.bibigpt_summary_cache_ttl_seconds
             if ttl > 0:
-                _remember(self._recent_summaries, url, (time.monotonic() + ttl, result))
+                _remember(self._recent_summaries, key, (time.monotonic() + ttl, result))
             return result
         finally:
-            self._inflight_summaries.pop(url, None)
+            self._inflight_summaries.pop(key, None)
 
     async def _lookup_cached_summary(
         self,
@@ -898,6 +920,9 @@ class Pipeline:
         one: a contentId remembered in-process or read back from the archived
         row's BibiGPT link. Any miss or lookup failure returns None and the
         caller regenerates; custom-prompt requests never take this path."""
+        # Old graph/text-only summaries have no evidence of image understanding.
+        if detect_platform(url) == "xiaohongshu":
+            return None
         content_id = self._bibigpt_content_id.get(url) or ""
         if not content_id and self._archive is not None:
             try:
@@ -1188,7 +1213,7 @@ def _summary_failure_message(exc: Exception) -> str:
         wait_text = f"{wait} 秒" if wait < 120 else f"{round(wait / 60)} 分钟"
         reason = exc.reason.removeprefix("BibiGPT 总结失败: ")
         return (
-            f"BibiGPT 总结失败: 该视频刚失败过, 已进入冷却, 请 {wait_text}后再试。"
+            f"BibiGPT 总结失败: 该内容刚失败过, 已进入冷却, 请 {wait_text}后再试。"
             f"上次原因: {reason}"
         )
 

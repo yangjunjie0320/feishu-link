@@ -81,7 +81,7 @@ class OGMetaParser:
                 or not is_placeholder(description, platform, url)
             ),
         )
-        if platform not in {"youtube", "instagram", "x", "tiktok", "douyin"}:
+        if platform not in {"youtube", "instagram", "x", "tiktok", "douyin", "xiaohongshu"}:
             return result
         # The fetched page is also the fallback document: do not request it
         # again just to inspect structured data, title, or a different meta tag.
@@ -117,6 +117,9 @@ class OGMetaParser:
             # OG describes the whole post or its poster. Preserve an explicit
             # native media/selected carousel type instead of replacing it.
             result.media_type = MediaType.UNKNOWN
+        if platform == "xiaohongshu":
+            # Native note type and first image are authoritative; OG may describe a video poster.
+            return structured
         merge_metadata(structured, result)
         return structured
 

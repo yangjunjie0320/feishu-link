@@ -31,6 +31,7 @@ from .parsers.x_oembed import XOEmbedParser
 from .parsers.youtube import YouTubeParser, extract_video_id, is_youtube_url
 from .parsers.ytdlp import YtDlpMetadataParser
 from .platforms import detect_platform
+from .xiaohongshu import note_id
 
 logger = logging.getLogger(__name__)
 
@@ -500,7 +501,8 @@ def _initial_card_metadata(url: str, platform: str) -> LinkMetadata:
     return LinkMetadata(
         source_url=url, platform=platform, canonical_url=canonical,
         site_name={"youtube": "YouTube", "instagram": "Instagram", "x": "X",
-                   "tiktok": "TikTok", "douyin": "抖音", "bilibili": "Bilibili"}.get(platform, ""),
+                   "tiktok": "TikTok", "douyin": "抖音", "bilibili": "Bilibili",
+                   "xiaohongshu": "小红书"}.get(platform, ""),
         media_type=MediaType.VIDEO if video else (
             MediaType.ARTICLE if image else MediaType.UNKNOWN
         ),
@@ -511,6 +513,10 @@ def _initial_card_metadata(url: str, platform: str) -> LinkMetadata:
 def _supported_card_url(url: str, platform: str) -> bool:
     parsed = urlparse(url)
     path = parsed.path
+    if platform == "xiaohongshu":
+        return bool(note_id(url)) or (
+            parsed.hostname == "xhslink.com" and bool(path.strip("/"))
+        )
     if platform == "youtube":
         return extract_video_id(url) is not None
     if platform == "instagram":
