@@ -229,3 +229,29 @@ async def test_media_slot_queue_is_bounded_by_deadline(monkeypatch) -> None:
     with pytest.raises(ParserError):
         await first
     assert len(calls) <= 2
+
+
+def test_worker_error_summary_keeps_the_error_line_not_the_report_footer() -> None:
+    from src.parsers.ytdlp import _worker_error_summary
+
+    stderr = (
+        b"WARNING: [Instagram] some unrelated warning\n"
+        b"ERROR:__main__:DownloadError: ERROR: [Instagram] DeZUTxZOu5d: Unable to download "
+        b"webpage: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol; "
+        b"please report this issue on  https://github.com/yt-dlp/yt-dlp/issues?q= , filling "
+        b"out the appropriate issue template. Confirm you are on the latest version using  "
+        b"yt-dlp -U\n"
+    )
+
+    summary = _worker_error_summary(stderr)
+
+    assert "UNEXPECTED_EOF_WHILE_READING" in summary
+    assert "please report" not in summary
+    assert "\n" not in summary
+
+
+def test_worker_error_summary_falls_back_to_tail_without_error_lines() -> None:
+    from src.parsers.ytdlp import _worker_error_summary
+
+    assert _worker_error_summary(b"x" * 700 + b"tail").endswith("tail")
+    assert len(_worker_error_summary(b"x" * 700)) == 600

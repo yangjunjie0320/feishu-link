@@ -130,6 +130,21 @@ async def _stop_worker(process: asyncio.subprocess.Process) -> None:
         await asyncio.wait_for(process.wait(), timeout=1)
 
 
+def _worker_error_summary(stderr: bytes, limit: int = 600) -> str:
+    # A plain tail of stderr starts mid-line inside yt-dlp's "please report this
+    # issue" footer and spills onto several log lines; keep only the worker's
+    # ERROR lines, minus that footer, so the real cause stays on one line.
+    text = stderr.decode(errors="replace")
+    error_lines = [
+        line.strip().split("; please report this issue", 1)[0]
+        for line in text.splitlines()
+        if line.lstrip().startswith("ERROR:")
+    ]
+    if error_lines:
+        return " | ".join(error_lines)[:limit]
+    return text[-limit:]
+
+
 async def _run_metadata_worker(url: str, platform: str, cookie_file: str) -> dict[str, Any]:
     process = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "src.parsers.ytdlp_worker",
@@ -145,7 +160,7 @@ async def _run_metadata_worker(url: str, platform: str, cookie_file: str) -> dic
         await asyncio.shield(_stop_worker(process))
         raise
     if process.returncode:
-        raise ParserError(url, "yt-dlp metadata failed: " + errors.decode(errors="replace")[-600:])
+        raise ParserError(url, "yt-dlp metadata failed: " + _worker_error_summary(errors))
     try:
         data = json.loads(output)
     except ValueError as exc:
