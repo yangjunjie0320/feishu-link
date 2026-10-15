@@ -13,7 +13,7 @@ from urllib.parse import quote
 import httpx
 from dateutil import tz
 
-from .card import build_markdown_card
+from .card import build_notice_card
 from .config import Settings
 from .http_errors import describe_request_error
 from .sender import CardSender
@@ -25,6 +25,17 @@ _DELAY_TEST_URL = "https://www.gstatic.com/generate_204"
 _DELAY_TEST_TIMEOUT_MS = 5000
 _SWITCH_SETTLE_SECONDS = 2.0
 _MAX_GROUP_DEPTH = 5
+_FIELD_GAP = "\u3000"
+# Short names for the probe table; unknown hosts are shown as-is.
+_TARGET_LABELS = {
+    "api.anthropic.com": "Anthropic",
+    "www.youtube.com": "YouTube",
+    "youtube.com": "YouTube",
+    "www.instagram.com": "Instagram",
+    "instagram.com": "Instagram",
+    "x.com": "X",
+    "twitter.com": "X",
+}
 
 
 class ControllerUnavailableError(RuntimeError):
@@ -52,6 +63,27 @@ class ProbeResult:
             return f"{host} 不通（{self.error}）"
         return f"{host} HTTP {self.status} {self.elapsed_ms}ms"
 
+    def label(self) -> str:
+        host = httpx.URL(self.url).host
+        return _TARGET_LABELS.get(host, host)
+
+    def short_error(self) -> str:
+        error = self.error.lower()
+        if "timeout" in error or "timed out" in error:
+            return "超时"
+        if "proxy" in error:
+            return "代理错误"
+        if "connect" in error:
+            return "连接失败"
+        return "不通"
+
+    def cell(self, required: bool) -> str:
+        if self.status is None:
+            return f"失败 {self.short_error()}"
+        if required and not self.passes_required():
+            return f"失败 {self.status}"
+        return f"正常 {self.elapsed_ms}ms"
+
 
 @dataclass(frozen=True)
 class ProbeRound:
@@ -68,6 +100,53 @@ class ProbeRound:
 
     def summary(self) -> str:
         return "；".join(result.describe() for result in [*self.required, *self.optional])
+
+    def cells(self) -> list[tuple[str, str]]:
+        return [(r.label(), r.cell(True)) for r in self.required] + [
+            (r.label(), r.cell(False)) for r in self.optional
+        ]
+
+    def brief(self) -> str:
+        return "，".join(f"{label} {cell}" for label, cell in self.cells())
+
+    def failure_reason(self) -> str:
+        for result in self.required:
+            if result.status is None:
+                return f"{result.label()} 不通（{result.short_error()}）"
+            if not result.passes_required():
+                return f"{result.label()} 返回 {result.status}（该地区被拒）"
+        down = [result.label() for result in self.optional if not result.reachable()]
+        if down:
+            return f"{'、'.join(down)} 不通"
+        return "检测未通过"
+
+
+@dataclass(frozen=True)
+class Notice:
+    title: str
+    body: str
+    template: str
+    details: str = ""
+
+
+def _fields(*pairs: tuple[str, str]) -> str:
+    return "\n".join(f"**{label}**{_FIELD_GAP}{value}" for label, value in pairs)
+
+
+def _probe_table(columns: list[tuple[str, ProbeRound]]) -> str:
+    header = ["目标", *(name for name, _ in columns)]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "|" + "|".join("---" for _ in header) + "|",
+    ]
+    rows = [probes.cells() for _, probes in columns]
+    for index, (label, _) in enumerate(rows[0]):
+        lines.append("| " + " | ".join([label, *(row[index][1] for row in rows)]) + " |")
+    return "\n".join(lines)
+
+
+def _compose(lead: str, fields: str, table: str = "") -> str:
+    return "\n\n".join(part for part in (f"**{lead}**", fields, table) if part)
 
 
 Probe = Callable[[str, bool], Awaitable[ProbeResult]]
@@ -176,7 +255,7 @@ class NetMonitor:
         self._sleep = sleep
         self._zone = tz.gettz(settings.report_timezone)
         self._feishu_down_since: datetime | None = None
-        self._pending: list[tuple[str, str]] = []
+        self._pending: list[Notice] = []
         self._outage_alerted = False
 
     async def run(self) -> None:
@@ -202,7 +281,17 @@ class NetMonitor:
             probes = await self._probe_round()
             if not probes.healthy():
                 await self._alert_outage(
-                    f"代理内核管理接口不可用（{e}），且代理检测失败：{probes.summary()}"
+                    Notice(
+                        "网络监控：没有可用节点",
+                        _compose(
+                            "代理内核管理接口不可用，且代理检测失败",
+                            _fields(("原因", probes.failure_reason()), ("时间", self._now())),
+                            _probe_table([("检测结果", probes)]),
+                        ),
+                        "red",
+                        f"管理接口：{e}\n\n检测：{probes.summary()}",
+                    ),
+                    f"controller unavailable ({e}); {probes.summary()}",
                 )
             return
 
@@ -220,16 +309,17 @@ class NetMonitor:
 
         if probes.healthy() and self._allowed(node):
             logger.info("net monitor ok: node=%s %s", node, probes.summary())
-            await self._clear_outage(node)
+            await self._clear_outage(node, probes)
             return
 
         if probes.healthy():
-            reason = f"当前节点 {node} 不在白名单"
+            keywords = "、".join(self._settings.net_monitor_allowed_node_keywords)
+            reason = f"当前节点不在白名单（{keywords}）"
         else:
-            reason = f"节点 {node} 检测失败：{probes.summary()}"
-        await self._switch(node, reason)
+            reason = probes.failure_reason()
+        await self._switch(node, reason, probes)
 
-    async def _switch(self, current: str, reason: str) -> None:
+    async def _switch(self, current: str, reason: str, before: ProbeRound) -> None:
         group = self._settings.net_monitor_selector_group
         delays = await self._controller.group_delays(self._settings.net_monitor_candidate_group)
         candidates = sorted(
@@ -238,11 +328,23 @@ class NetMonitor:
             if name != current and self._allowed(name)
         )[: self._settings.net_monitor_max_switch_attempts]
         if not candidates:
-            await self._alert_outage(f"{reason}；白名单内没有测速可达的节点")
+            await self._alert_outage(
+                Notice(
+                    "网络监控：没有可用节点",
+                    _compose(
+                        f"白名单内没有测速可达的节点，仍在用「{current}」",
+                        _fields(("原因", reason), ("时间", self._now())),
+                        _probe_table([("当前节点", before)]),
+                    ),
+                    "red",
+                    f"{current}：{before.summary()}",
+                ),
+                f"{reason}; no allowed node passed the delay test",
+            )
             return
 
         original = str((await self._controller.group(group)).get("now") or "")
-        attempts: list[str] = []
+        attempts: list[tuple[str, ProbeRound]] = []
         for ms, name in candidates:
             await self._controller.select(group, name)
             await self._sleep(_SWITCH_SETTLE_SECONDS)
@@ -251,31 +353,70 @@ class NetMonitor:
                 logger.warning(
                     "net monitor switched node: %s -> %s reason=%s", current, name, reason
                 )
+                fields = [("原因", reason), ("新节点测速", f"{ms}ms")]
+                if attempts:
+                    fields.append(("已跳过", "、".join(skipped for skipped, _ in attempts)))
+                fields.append(("时间", self._now()))
                 await self._notify(
-                    "网络监控：已切换节点",
-                    f"- 原节点：{current}\n- 新节点：{name}（测速 {ms}ms）\n"
-                    f"- 原因：{reason}\n- 检测：{probes.summary()}\n- 时间：{self._now()}",
+                    Notice(
+                        "网络监控：已切换节点",
+                        _compose(
+                            f"出口已从「{current}」切换到「{name}」",
+                            _fields(*fields),
+                            _probe_table([("切换前", before), ("切换后", probes)]),
+                        ),
+                        "orange",
+                        _attempt_details([(current, before), *attempts, (name, probes)]),
+                    )
                 )
                 self._outage_alerted = False
                 return
-            attempts.append(f"{name}（{probes.summary()}）")
+            attempts.append((name, probes))
 
+        restored = original or current
         if original:
             await self._controller.select(group, original)
-        await self._alert_outage(f"{reason}；已尝试：{'；'.join(attempts)}")
+        await self._alert_outage(
+            Notice(
+                "网络监控：没有可用节点",
+                _compose(
+                    f"所有候选节点都不通，已恢复原选择「{restored}」",
+                    _fields(
+                        ("原因", reason),
+                        ("已尝试", "、".join(name for name, _ in attempts)),
+                        ("时间", self._now()),
+                    ),
+                    _probe_table([(current, before)]),
+                ),
+                "red",
+                _attempt_details([(current, before), *attempts]),
+            ),
+            f"{reason}; tried: "
+            + "; ".join(f"{name} ({probes.summary()})" for name, probes in attempts),
+        )
 
-    async def _alert_outage(self, detail: str) -> None:
+    async def _alert_outage(self, notice: Notice, detail: str) -> None:
         logger.error("net monitor: no usable proxy node: %s", detail)
         if self._outage_alerted:
             return
         self._outage_alerted = True
-        await self._notify("网络监控：没有可用节点", f"- {detail}\n- 时间：{self._now()}")
+        await self._notify(notice)
 
-    async def _clear_outage(self, node: str) -> None:
+    async def _clear_outage(self, node: str, probes: ProbeRound) -> None:
         if not self._outage_alerted:
             return
         self._outage_alerted = False
-        await self._notify("网络监控：代理已恢复", f"- 当前节点：{node}\n- 时间：{self._now()}")
+        await self._notify(
+            Notice(
+                "网络监控：代理已恢复",
+                _compose(
+                    f"代理已恢复，当前节点「{node}」",
+                    _fields(("时间", self._now())),
+                    _probe_table([("当前", probes)]),
+                ),
+                "green",
+            )
+        )
 
     async def _check_feishu(self) -> None:
         result = await self._probe(self._settings.net_monitor_feishu_url, False)
@@ -288,31 +429,39 @@ class NetMonitor:
             return
         since = self._feishu_down_since
         self._feishu_down_since = None
-        lines = [f"- 不可达时段：{self._fmt(since)} 至 {self._now()}"]
-        for title, _ in self._pending:
-            lines.append(f"- 期间事件：{title}")
         pending, self._pending = self._pending, []
-        if not await self._send("网络监控：飞书曾不可达", "\n".join(lines)):
+        fields = [("不可达时段", f"{self._fmt(since)} 至 {self._now()}")]
+        if pending:
+            events = "、".join(notice.title.removeprefix("网络监控：") for notice in pending)
+            fields.append(("期间事件", events))
+            lead = "飞书曾不可达，期间消息随后补发"
+        else:
+            lead = "飞书曾不可达，现已恢复"
+        notice = Notice("网络监控：飞书曾不可达", _compose(lead, _fields(*fields)), "grey")
+        if not await self._send(notice):
             self._pending = pending
             return
-        for title, markdown in pending:
-            await self._notify(title, markdown)
+        for queued in pending:
+            await self._notify(queued)
 
-    async def _notify(self, title: str, markdown: str) -> None:
+    async def _notify(self, notice: Notice) -> None:
         if self._feishu_down_since is not None:
-            self._pending.append((title, markdown))
-            logger.warning("net monitor: feishu down, queued notice: %s", title)
+            self._pending.append(notice)
+            logger.warning("net monitor: feishu down, queued notice: %s", notice.title)
             return
-        if not await self._send(title, markdown):
-            self._pending.append((title, markdown))
+        if not await self._send(notice):
+            self._pending.append(notice)
             self._feishu_down_since = self._now_dt()
 
-    async def _send(self, title: str, markdown: str) -> bool:
+    async def _send(self, notice: Notice) -> bool:
         chat_id = self._settings.effective_net_monitor_chat_id()
         if not chat_id:
-            logger.warning("net monitor notice dropped: no chat configured: %s", title)
+            logger.warning("net monitor notice dropped: no chat configured: %s", notice.title)
             return True
-        return await self._sender.send_to_chat(build_markdown_card(title, markdown), chat_id)
+        card = build_notice_card(
+            notice.title, notice.body, template=notice.template, details=notice.details
+        )
+        return await self._sender.send_to_chat(card, chat_id)
 
     async def _probe_round(self) -> ProbeRound:
         required = self._settings.net_monitor_required_urls
@@ -332,6 +481,10 @@ class NetMonitor:
     @staticmethod
     def _fmt(moment: datetime) -> str:
         return moment.strftime("%m-%d %H:%M")
+
+
+def _attempt_details(rounds: list[tuple[str, ProbeRound]]) -> str:
+    return "\n".join(f"- {name}：{probes.summary()}" for name, probes in rounds)
 
 
 def _elapsed_ms(started: float) -> int:

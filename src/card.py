@@ -148,6 +148,43 @@ def build_markdown_card(
     return json.dumps(card, ensure_ascii=False)
 
 
+def build_notice_card(
+    title: str,
+    body: str,
+    *,
+    template: str = "blue",
+    details: str = "",
+    details_title: str = "原始检测",
+) -> str:
+    """A short status card: colored header, markdown body, optional folded details."""
+    safe_title = _strip_emoji_symbols(title).strip() or "Notice"
+    elements: list[dict[str, object]] = [
+        {"tag": "markdown", "content": _strip_emoji_symbols(body).strip()}
+    ]
+    if details.strip():
+        elements.append(
+            {
+                "tag": "collapsible_panel",
+                "expanded": False,
+                "header": {
+                    "title": {"tag": "markdown", "content": f"**{details_title}**"},
+                    "vertical_align": "center",
+                    "padding": "4px 0px 4px 8px",
+                },
+                "elements": [{"tag": "markdown", "content": _strip_emoji_symbols(details).strip()}],
+            }
+        )
+    card = {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": safe_title},
+            "template": template,
+        },
+        "body": {"elements": elements},
+    }
+    return json.dumps(card, ensure_ascii=False)
+
+
 def card_message_wire_size(card_json: str) -> int:
     """Return a conservative UTF-8 size for either Feishu send mode."""
     reply_payload = {"content": card_json, "msg_type": "interactive"}
@@ -536,8 +573,10 @@ def _build_actions(meta: LinkMetadata) -> list[dict[str, object]]:
         actions.append(
             {
                 "tag": "button",
-                "text": {"tag": "plain_text",
-                         "content": "总结笔记" if supports_note_summary(meta) else "总结视频"},
+                "text": {
+                    "tag": "plain_text",
+                    "content": "总结笔记" if supports_note_summary(meta) else "总结视频",
+                },
                 "type": "default",
                 "value": {
                     "action": "summarize_video",
@@ -573,7 +612,11 @@ def _supports_comment_analysis_action(meta: LinkMetadata) -> bool:
     if platform in {"bilibili", "instagram", "tiktok", "youtube", "x"}:
         return True
     return detect_platform(meta.canonical_url or meta.source_url) in {
-        "bilibili", "instagram", "tiktok", "youtube", "x",
+        "bilibili",
+        "instagram",
+        "tiktok",
+        "youtube",
+        "x",
     }
 
 

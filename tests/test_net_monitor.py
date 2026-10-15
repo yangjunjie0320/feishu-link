@@ -117,6 +117,64 @@ async def test_healthy_node_outside_allowlist_moves_to_fastest_allowed() -> None
     assert sender.send_to_chat.await_args.args[1] == "oc_monitor"
 
 
+def sent_cards(sender: AsyncMock) -> list[dict[str, Any]]:
+    return [json.loads(call.args[0]) for call in sender.send_to_chat.await_args_list]
+
+
+async def test_switch_card_is_orange_with_before_after_table() -> None:
+    monitor, _, sender = build("台湾 01", DELAYS, {"日本 01"})
+
+    await monitor.check_once()
+
+    card = sent_cards(sender)[0]
+    assert card["header"]["template"] == "orange"
+    body, panel = card["body"]["elements"]
+    content = body["content"]
+    assert content.startswith("**出口已从「台湾 01」切换到「日本 01」**")
+    assert "**原因**\u3000Anthropic 不通（超时）" in content
+    assert "**已跳过**\u3000新加坡 01" in content
+    assert "| 目标 | 切换前 | 切换后 |" in content
+    assert "| Anthropic | 失败 超时 | 正常 100ms |" in content
+    assert "api.anthropic.com" not in content
+    assert panel["tag"] == "collapsible_panel"
+    assert panel["expanded"] is False
+    assert "api.anthropic.com" in panel["elements"][0]["content"]
+
+
+async def test_outage_and_recovery_cards_are_red_then_green() -> None:
+    monitor, network, sender = build("台湾 01", DELAYS, set())
+
+    await monitor.check_once()
+    network.good_nodes.add("台湾 01")
+    await monitor.check_once()
+
+    outage, recovered = sent_cards(sender)
+    assert outage["header"]["template"] == "red"
+    content = outage["body"]["elements"][0]["content"]
+    assert content.startswith("**所有候选节点都不通，已恢复原选择「台湾 01」**")
+    assert "**已尝试**\u3000新加坡 01、日本 01" in content
+    assert recovered["header"]["template"] == "green"
+
+
+def test_probe_cells_use_short_names_and_status_words() -> None:
+    probes = ProbeRound(
+        [ProbeResult(ANTHROPIC, 403, "", 686)],
+        [
+            ProbeResult(OPTIONAL[0], 204, "", 455),
+            ProbeResult(OPTIONAL[1], None, "ReadTimeout", 10000),
+            ProbeResult(OPTIONAL[2], 200, "", 701),
+        ],
+    )
+
+    assert probes.cells() == [
+        ("Anthropic", "失败 403"),
+        ("YouTube", "正常 455ms"),
+        ("Instagram", "失败 超时"),
+        ("X", "正常 701ms"),
+    ]
+    assert probes.failure_reason() == "Anthropic 返回 403（该地区被拒）"
+
+
 async def test_failed_node_is_rechecked_then_switched_past_bad_candidates() -> None:
     monitor, network, sender = build("台湾 01", DELAYS, {"日本 01"})
 
