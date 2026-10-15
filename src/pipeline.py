@@ -34,9 +34,10 @@ from .comment_analyzer import CommentAnalysisError, CommentAnalyzer
 from .config import Settings
 from .dispatch import Dispatcher, initial_card_result
 from .feishu_async import call_feishu_async
+from .http_errors import is_transient_network_error
 from .image_uploader import upload_cover
 from .listener import CardActionEvent, ListenerEvent, MessageEvent
-from .media_downloader import VideoSkipReason, download_video
+from .media_downloader import DownloadedVideo, VideoSkipReason, download_video
 from .parsers.base import CardParseResult, CardStatus, LinkMetadata, MediaType, ParserError
 from .platforms import detect_platform, is_short_video_platform
 from .sender import CardSender, TextSender, TypingReactionSender, VideoSender
@@ -61,6 +62,7 @@ logger = logging.getLogger(__name__)
 
 _SEEN_CAPACITY = 500
 _CHAPTER_SUMMARY_SEND_INTERVAL_SECONDS = 0.25
+_TRANSIENT_RETRY_DELAY_SECONDS = 30.0
 
 
 def _card_failure_description(reason: str) -> str:
@@ -592,7 +594,9 @@ class Pipeline:
         notify_user: bool,
         enforce_duration_limit: bool,
     ) -> None:
-        try:
+        async def prepare_and_download(
+            meta: LinkMetadata,
+        ) -> tuple[LinkMetadata, DownloadedVideo]:
             if meta.platform in {"douyin", "xiaohongshu"}:
                 raise VideoSkipReason(f"platform not allowed: {meta.platform}")
             if (
@@ -610,6 +614,28 @@ class Pipeline:
                 self._settings,
                 enforce_duration_limit=enforce_duration_limit,
             )
+            return meta, video
+
+        try:
+            try:
+                meta, video = await prepare_and_download(meta)
+            except VideoSkipReason:
+                raise
+            except Exception as first_error:
+                if not is_transient_network_error(first_error):
+                    raise
+                # The local proxy drops out for about a minute at a time; one
+                # delayed retry rides that out without hammering a dead link.
+                logger.warning(
+                    "video download hit network error, retrying in %ss: url=%s "
+                    "message_id=%s error=%s",
+                    _TRANSIENT_RETRY_DELAY_SECONDS,
+                    meta.source_url,
+                    event.message_id,
+                    first_error,
+                )
+                await asyncio.sleep(_TRANSIENT_RETRY_DELAY_SECONDS)
+                meta, video = await prepare_and_download(meta)
         except VideoSkipReason as e:
             logger.info(
                 "skip video append: url=%s message_id=%s reason=%s",

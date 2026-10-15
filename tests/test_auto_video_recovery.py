@@ -305,3 +305,59 @@ async def test_outer_card_exception_keeps_video_intent_for_independent_media_pre
     assert harness.trace == ["card", "metadata", "download", "video"]
     harness.card_sender.assert_awaited_once()
     harness.archive.enqueue.assert_not_called()
+
+
+@pytest.mark.parametrize("stage", ["metadata", "download"])
+async def test_transient_network_error_is_retried_once_then_video_is_sent(
+    harness: VideoHarness, monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    monkeypatch.setattr("src.pipeline._TRANSIENT_RETRY_DELAY_SECONDS", 0)
+    blip: Exception
+    if stage == "metadata":
+        blip = ParserError(
+            YOUTUBE,
+            "yt-dlp metadata failed: ERROR:__main__:DownloadError: ERROR: [youtube] x: "
+            "Unable to download webpage: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred",
+        )
+        harness.extract_media.side_effect = [blip, downloadable(YOUTUBE)]
+    else:
+        blip = VideoDownloadError("yt-dlp download failed: <urlopen error timed out>")
+        harness.download.side_effect = [blip, harness.video]
+
+    await harness.pipeline._process_url(YOUTUBE, message(YOUTUBE), True, True)
+
+    harness.video_sender.assert_awaited_once()
+    harness.text_sender.assert_not_awaited()
+    # A retry redoes media preparation too, whichever stage hit the blip.
+    assert harness.extract_media.await_count == 2
+    assert harness.download.await_count == (1 if stage == "metadata" else 2)
+
+
+async def test_transient_network_error_is_retried_only_once(
+    harness: VideoHarness, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr("src.pipeline._TRANSIENT_RETRY_DELAY_SECONDS", 0)
+    harness.download.side_effect = VideoDownloadError("ConnectTimeout")
+    caplog.set_level(logging.WARNING)
+
+    await harness.pipeline._process_url(YOUTUBE, message(YOUTUBE), True, True)
+
+    assert harness.download.await_count == 2
+    harness.video_sender.assert_not_awaited()
+    harness.text_sender.assert_awaited_once()
+    assert "retrying" in caplog.text
+    assert "video download failed" in caplog.text
+
+
+async def test_non_network_download_failure_is_not_retried(
+    harness: VideoHarness, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.pipeline.asyncio.sleep", sleep)
+    harness.download.side_effect = VideoDownloadError("download finished without output file")
+
+    await harness.pipeline._process_url(YOUTUBE, message(YOUTUBE), True, True)
+
+    assert harness.download.await_count == 1
+    sleep.assert_not_awaited()
+    harness.text_sender.assert_awaited_once()
