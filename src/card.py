@@ -599,10 +599,20 @@ def _has_distinct_x_article_title(meta: LinkMetadata) -> bool:
     )
 
 
+_CAPTIONED_VIDEO_PLATFORMS = frozenset({"instagram", "tiktok", "x", "douyin"})
+
+
+def card_shows_description(meta: LinkMetadata) -> bool:
+    """Whether the card renders meta.description (and so whether it needs translating).
+
+    Long-form video platforms put the title up front and drop the description;
+    short-video/social posts often have no title and lead with the caption.
+    """
+    return meta.media_type != MediaType.VIDEO or meta.platform in _CAPTIONED_VIDEO_PLATFORMS
+
+
 def _format_description_block(meta: LinkMetadata) -> str:
-    if meta.media_type == MediaType.VIDEO and meta.platform not in {
-        "instagram", "tiktok", "x", "douyin"
-    }:
+    if not card_shows_description(meta):
         return ""
 
     description = _clean_description_text(meta.description)

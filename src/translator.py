@@ -10,8 +10,9 @@ from typing import Any
 import httpx
 
 from .bibi_models import ChapterSummarySection
+from .card import card_shows_description
 from .config import Settings
-from .parsers.base import LinkMetadata, MediaType
+from .parsers.base import LinkMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -378,7 +379,7 @@ class TitleTranslator:
             meta.translated_title = translated
 
     async def _translate_description_if_needed(self, meta: LinkMetadata) -> None:
-        if meta.media_type == MediaType.VIDEO:
+        if not card_shows_description(meta):
             return
 
         description = meta.description.strip()

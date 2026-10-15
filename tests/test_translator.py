@@ -6,7 +6,7 @@ import respx
 
 from src.bibi_models import ChapterSummarySection
 from src.config import Settings
-from src.parsers.base import LinkMetadata
+from src.parsers.base import LinkMetadata, MediaType
 from src.translator import TitleTranslator, contains_chinese
 
 
@@ -504,3 +504,37 @@ async def test_format_chapter_summary_does_not_send_oversized_item() -> None:
     assert route.call_count == 1
     assert formatted[0].summary == "已格式化"
     assert formatted[1] == sections[1]
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("platform", "url", "translated"),
+    [
+        ("x", "https://x.com/usant_idea/status/2110370781356347778", True),
+        ("tiktok", "https://www.tiktok.com/@creator/video/7545221251367767318", True),
+        ("youtube", "https://www.youtube.com/watch?v=abcdefghijk", False),
+        ("bilibili", "https://www.bilibili.com/video/BV15itB6gEYE", False),
+    ],
+)
+async def test_video_caption_is_translated_only_where_the_card_shows_it(
+    platform: str, url: str, translated: bool,
+) -> None:
+    settings = Settings(title_translation_enabled=True, deepseek_api_key="test-key")
+    route = respx.post("https://api.deepseek.com/chat/completions").mock(
+        return_value=httpx.Response(
+            200, json={"choices": [{"message": {"content": "抖音 CEO 亲口说"}}]},
+        )
+    )
+    meta = LinkMetadata(
+        source_url=url,
+        title="",
+        description="틱톡 CEO 피셜: 요즘 숏폼 드라마 대부분 AI가 찍어내는 중",
+        platform=platform,
+        media_type=MediaType.VIDEO,
+    )
+
+    async with httpx.AsyncClient() as client:
+        await TitleTranslator(settings, client).translate_metadata(meta)
+
+    assert bool(meta.translated_description) is translated
+    assert route.called is translated
