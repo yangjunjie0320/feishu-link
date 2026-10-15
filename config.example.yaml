@@ -26,6 +26,18 @@ report_timezone: "Asia/Shanghai"
 report_chat_id: ""   # empty falls back to archive_chat_id
 report_chat_ids: []  # extra chats that also receive the same report card
 
+# Network monitor: every interval, probe the mihomo proxy egress; switch the
+# selector group to the fastest allowed node when probes fail or the current
+# node is outside the allowlist. See DESIGN.md (2026-10-15).
+net_monitor_enabled: false
+net_monitor_interval_seconds: 600
+net_monitor_proxy_url: "http://127.0.0.1:7897"
+net_monitor_controller_url: ""   # empty discovers it from the core's -ext-ctl flag
+net_monitor_selector_group: "TgfishAPP"
+net_monitor_candidate_group: "自动选择"
+net_monitor_allowed_node_keywords: ["新加坡", "台湾", "日本"]
+net_monitor_chat_id: ""          # empty falls back to report_chat_id, then archive_chat_id
+
 # Optional: YouTube Data API v3 key (for duration + channel info)
 # Without this, falls back to OG scraping (no duration).
 youtube_api_key: ""

@@ -86,6 +86,34 @@ class Settings(BaseSettings):
     report_chat_id: str = ""  # empty falls back to archive_chat_id
     report_chat_ids: list[str] = []  # extra chats that also receive the report
 
+    # Network monitor: probe the local mihomo proxy's egress and switch nodes.
+    net_monitor_enabled: bool = False
+    net_monitor_interval_seconds: float = Field(default=600.0, gt=0)
+    # Pause before re-probing a failed check, so a one-minute proxy blip does
+    # not cost a node switch.
+    net_monitor_confirm_delay_seconds: float = Field(default=60.0, ge=0)
+    net_monitor_probe_timeout: float = Field(default=10.0, gt=0)
+    net_monitor_proxy_url: str = "http://127.0.0.1:7897"
+    # Empty discovers the controller from the running core's `-ext-ctl` flag;
+    # TgfishVPN picks that port at launch, so a fixed value can go stale.
+    net_monitor_controller_url: str = ""
+    net_monitor_controller_secret: str = ""
+    net_monitor_selector_group: str = "TgfishAPP"  # group the proxy rules route to
+    net_monitor_candidate_group: str = "自动选择"  # group whose members are delay-tested
+    net_monitor_allowed_node_keywords: list[str] = ["新加坡", "台湾", "日本"]
+    net_monitor_max_switch_attempts: int = Field(default=5, ge=1)
+    # Must all pass through the proxy; api.anthropic.com answers 403 to regions
+    # it does not serve, which is exactly the node failure Opus cares about.
+    net_monitor_required_urls: list[str] = ["https://api.anthropic.com/v1/models"]
+    # At least half must answer, so one site's own outage does not churn nodes.
+    net_monitor_optional_urls: list[str] = [
+        "https://www.youtube.com/generate_204",
+        "https://www.instagram.com/",
+        "https://x.com/",
+    ]
+    net_monitor_feishu_url: str = "https://open.feishu.cn"
+    net_monitor_chat_id: str = ""  # empty falls back to report_chat_id, then archive_chat_id
+
     youtube_api_key: str = ""
     link_allowlist: list[str] = []
     link_blacklist: list[str] = []
@@ -244,6 +272,12 @@ class Settings(BaseSettings):
         if not targets and self.archive_chat_id:
             targets.append(self.archive_chat_id)
         return targets
+
+    def effective_net_monitor_chat_id(self) -> str:
+        for chat_id in (self.net_monitor_chat_id, self.report_chat_id, self.archive_chat_id):
+            if chat_id.strip():
+                return chat_id.strip()
+        return ""
 
     def comment_fetch_timeout_for(self, platform: str) -> float:
         """Wall-clock budget for one platform's comment fetch.

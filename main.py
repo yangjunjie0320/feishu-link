@@ -12,6 +12,7 @@ from src.archive_store import BitableArchive, ChatDirectory
 from src.config import Settings
 from src.daily_report import DailyReporter
 from src.listener import LarkEventListener, ListenerEvent
+from src.net_monitor import NetMonitor
 from src.pipeline import Pipeline
 from src.sender import CardSender
 
@@ -50,6 +51,13 @@ async def _run(settings: Settings) -> None:
         report_task = asyncio.create_task(reporter.run())
         tasks.add(report_task)
         report_task.add_done_callback(tasks.discard)
+
+    if settings.net_monitor_enabled:
+        monitor_task = asyncio.create_task(
+            NetMonitor(settings, CardSender(settings, lark_client)).run()
+        )
+        tasks.add(monitor_task)
+        monitor_task.add_done_callback(tasks.discard)
 
     logger.info("feishu-link started (mode=%s)", settings.mode.value)
     # Each event runs as its own task so a slow handler (comment analysis,
