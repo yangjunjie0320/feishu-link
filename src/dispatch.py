@@ -37,6 +37,12 @@ logger = logging.getLogger(__name__)
 
 _CardRead = Callable[[str], Awaitable[LinkMetadata]]
 
+# Separate API endpoints throttle independently of the site itself: their 429
+# cools down only that source, never the platform's page or Chrome sources.
+_ENDPOINT_CARD_SOURCES = frozenset({"youtube_api", "youtube_oembed", "tiktok_oembed", "x_oembed"})
+_ENDPOINT_RATE_LIMIT_SECONDS = 600.0
+_PLATFORM_RATE_LIMIT_SECONDS = 60.0
+
 
 @dataclass
 class _CardRecovery:
@@ -105,6 +111,11 @@ class Dispatcher:
                         if not await self._wait_for_platform(platform, deadline):
                             failure_reason = "rate_limit"
                             break
+                        endpoint = name in _ENDPOINT_CARD_SOURCES
+                        if endpoint and self._rate_limited_until.get(name, 0) > time.monotonic():
+                            logger.info("card source skipped: source=%s url=%s reason=rate_limit",
+                                        name, url)
+                            continue
                         try:
                             attempted.add(name)
                             if authenticated and not recovery.freshness_checked:
@@ -114,14 +125,16 @@ class Dispatcher:
                                 url, platform, read, recovery, authenticated=authenticated,
                             )
                         except ParserError as exc:
-                            failure_reason = _card_failure_reason(exc, failure_reason)
-                            if isinstance(exc, CardSourceError) and exc.kind == "rate_limit":
-                                self._rate_limited_until[platform] = max(
-                                    self._rate_limited_until.get(platform, 0),
-                                    time.monotonic() + (
-                                        exc.retry_after if exc.retry_after is not None else 60.0
-                                    ),
-                                )
+                            limited = isinstance(exc, CardSourceError) and exc.kind == "rate_limit"
+                            if limited and endpoint:
+                                # The site may still answer; later sources decide the outcome.
+                                self._note_rate_limit(name, exc, _ENDPOINT_RATE_LIMIT_SECONDS)
+                            else:
+                                failure_reason = _card_failure_reason(exc, failure_reason)
+                                if limited:
+                                    self._note_rate_limit(
+                                        platform, exc, _PLATFORM_RATE_LIMIT_SECONDS,
+                                    )
                             logger.warning("card source failed: source=%s url=%s reason=%s",
                                            name, url, exc.reason)
                             continue
@@ -250,15 +263,7 @@ class Dispatcher:
                         logger.warning("card metrics source failed: source=%s url=%s reason=%s",
                                        name, url, exc.reason)
                         if outcome == "rate_limit":
-                            retry_after = (
-                                exc.retry_after if isinstance(exc, CardSourceError) else None
-                            )
-                            self._rate_limited_until[meta.platform] = max(
-                                self._rate_limited_until.get(meta.platform, 0),
-                                time.monotonic() + (
-                                    retry_after if retry_after is not None else 60.0
-                                ),
-                            )
+                            self._note_rate_limit(meta.platform, exc, _PLATFORM_RATE_LIMIT_SECONDS)
                         if outcome in {"auth", "challenge", "deleted", "geo"} or (
                             "target_mismatch" in exc.reason
                         ):
@@ -282,6 +287,13 @@ class Dispatcher:
 
             self._browser = SocialBrowserParser(self._settings)
         return await self._browser.parse_metrics(url, timeout=timeout)
+
+    def _note_rate_limit(self, key: str, exc: ParserError, default: float) -> None:
+        retry_after = exc.retry_after if isinstance(exc, CardSourceError) else None
+        self._rate_limited_until[key] = max(
+            self._rate_limited_until.get(key, 0),
+            time.monotonic() + (retry_after if retry_after is not None else default),
+        )
 
     async def _wait_for_platform(self, platform: str, deadline: float) -> bool:
         while True:

@@ -239,17 +239,52 @@ async def test_short_retry_after_delays_next_source_then_can_complete(
 ) -> None:
     loop = asyncio.get_running_loop()
     received = loop.time()
-    dispatcher._oembed = AsyncMock()
-    dispatcher._oembed.parse.side_effect = CardSourceError(
-        YOUTUBE, "HTTP 429", kind="rate_limit", retry_after=0.02,
+    dispatcher._x_oembed = AsyncMock()
+    dispatcher._x_oembed.parse.side_effect = ParserError(X, "oEmbed failed")
+    dispatcher._x_graphql = AsyncMock()
+    dispatcher._x_graphql.parse.side_effect = CardSourceError(
+        X, "HTTP 429", kind="rate_limit", retry_after=0.02,
     )
 
     async def page(url: str) -> LinkMetadata:
         assert loop.time() - received >= 0.02
-        return video(url)
+        return video(url, "x")
 
     dispatcher._og.parse.side_effect = page
-    assert (await dispatcher.parse_card(YOUTUBE)).status == CardStatus.COMPLETE
+    assert (await dispatcher.parse_card(X)).status == CardStatus.COMPLETE
+
+
+async def test_tiktok_oembed_rate_limit_does_not_block_page_or_browser(
+    dispatcher: Dispatcher,
+) -> None:
+    url = "https://www.tiktok.com/@creator/video/123"
+    dispatcher._settings.card_metrics_timeout = 0
+    dispatcher._oembed = AsyncMock()
+    dispatcher._oembed.parse.side_effect = CardSourceError(url, "HTTP 429", kind="rate_limit")
+    dispatcher._og.parse.side_effect = ParserError(url, "no_content: page empty")
+    dispatcher._browser.parse.side_effect = None
+    dispatcher._browser.parse.return_value = video(url, "tiktok")
+    result = await dispatcher.parse_card(url)
+    assert result.status == CardStatus.COMPLETE
+    assert result.sources == ["browser"]
+    dispatcher._og.parse.assert_awaited_once()
+
+    other = "https://www.tiktok.com/@creator/video/456"
+    dispatcher._browser.parse.return_value = video(other, "tiktok")
+    assert (await dispatcher.parse_card(other)).status == CardStatus.COMPLETE
+    assert dispatcher._oembed.parse.await_count == 1
+
+
+async def test_endpoint_rate_limit_alone_is_not_the_card_failure_reason(
+    dispatcher: Dispatcher,
+) -> None:
+    url = "https://www.tiktok.com/@creator/video/123"
+    dispatcher._oembed = AsyncMock()
+    dispatcher._oembed.parse.side_effect = CardSourceError(url, "HTTP 429", kind="rate_limit")
+    result = await dispatcher.parse_card(url)
+    assert not result.has_content
+    assert result.reason != "rate_limit"
+    dispatcher._browser.parse_metrics.assert_awaited_once()
 
 
 async def test_bilibili_keeps_existing_metadata_source(dispatcher: Dispatcher) -> None:
