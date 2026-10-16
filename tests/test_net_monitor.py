@@ -28,6 +28,9 @@ class FakeController:
         self.delays = delays
         self.selected: list[str] = []
         self.unavailable = False
+        self.current_mode = "rule"
+        self.mode_sticks = False  # True: PATCH is accepted but the mode does not change
+        self.mode_patches: list[str] = []
 
     async def resolve_node(self, group: str) -> str:
         if self.unavailable:
@@ -36,6 +39,14 @@ class FakeController:
 
     async def group(self, name: str) -> dict[str, Any]:
         return {"now": self.now, "all": list(self.delays)}
+
+    async def mode(self) -> str:
+        return self.current_mode
+
+    async def set_mode(self, mode: str) -> None:
+        self.mode_patches.append(mode)
+        if not self.mode_sticks:
+            self.current_mode = mode
 
     async def select(self, group: str, node: str) -> None:
         self.selected.append(node)
@@ -58,6 +69,8 @@ class Network:
         self.calls += 1
         if not via_proxy:
             return ProbeResult(url, 200 if self.feishu_up else None, "ConnectTimeout", 5)
+        if self.controller.current_mode == "direct":
+            return ProbeResult(url, 403 if url == ANTHROPIC else None, "ConnectTimeout", 10000)
         if self.controller.now in self.good_nodes:
             return ProbeResult(url, 401 if url == ANTHROPIC else 200, "", 100)
         return ProbeResult(url, None, "ConnectTimeout", 10000)
@@ -320,3 +333,59 @@ async def test_mihomo_controller_discovers_ext_ctl(monkeypatch: pytest.MonkeyPat
     controller = MihomoController(Settings())
 
     assert await controller._discover() == "http://127.0.0.1:39798"
+
+
+async def test_direct_mode_is_patched_back_to_rule_without_switching_nodes() -> None:
+    monitor, network, sender = build("台湾 01", DELAYS, {"台湾 01"})
+    network.controller.current_mode = "direct"
+
+    await monitor.check_once()
+
+    assert network.controller.mode_patches == ["rule"]
+    assert network.controller.current_mode == "rule"
+    assert network.controller.selected == []
+    card = sent_cards(sender)[0]
+    assert card["header"]["title"]["content"] == "网络监控：代理模式已纠正"
+    assert card["header"]["template"] == "orange"
+    assert "代理内核处于「direct」模式，已切回「rule」" in card["body"]["elements"][0]["content"]
+
+
+async def test_direct_mode_that_cannot_be_fixed_alerts_once_and_skips_node_switch() -> None:
+    monitor, network, sender = build("台湾 01", DELAYS, {"台湾 01"})
+    network.controller.current_mode = "direct"
+    network.controller.mode_sticks = True
+
+    await monitor.check_once()
+    await monitor.check_once()
+
+    assert network.controller.selected == []
+    assert sent_titles(sender) == ["网络监控：代理处于直连模式"]
+    assert sent_cards(sender)[0]["header"]["template"] == "red"
+
+    network.controller.mode_sticks = False
+    await monitor.check_once()
+
+    assert sent_titles(sender)[-2:] == ["网络监控：代理模式已纠正", "网络监控：代理已恢复"]
+
+
+async def test_mode_guard_can_be_disabled() -> None:
+    monitor, network, _ = build("台湾 01", DELAYS, {"台湾 01"})
+    monitor._settings = monitor._settings.model_copy(update={"net_monitor_expected_mode": ""})
+    network.controller.current_mode = "global"
+
+    await monitor.check_once()
+
+    assert network.controller.mode_patches == []
+
+
+@respx.mock
+async def test_mihomo_controller_reads_and_patches_mode() -> None:
+    controller = MihomoController(Settings(net_monitor_controller_url="http://127.0.0.1:9"))
+    respx.get("http://127.0.0.1:9/configs").mock(
+        return_value=httpx.Response(200, json={"mode": "direct", "mixed-port": 7897})
+    )
+    patch = respx.patch("http://127.0.0.1:9/configs").mock(return_value=httpx.Response(204))
+
+    assert await controller.mode() == "direct"
+    await controller.set_mode("rule")
+    assert json.loads(patch.calls.last.request.content) == {"mode": "rule"}

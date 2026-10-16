@@ -102,6 +102,9 @@ class Settings(BaseSettings):
     net_monitor_candidate_group: str = "自动选择"  # group whose members are delay-tested
     net_monitor_allowed_node_keywords: list[str] = ["新加坡", "台湾", "日本"]
     net_monitor_max_switch_attempts: int = Field(default=5, ge=1)
+    # The core must run in this mode; anything else (e.g. "direct" after a
+    # TgfishVPN restart) bypasses every node and is patched back. Empty disables.
+    net_monitor_expected_mode: str = "rule"
     # Must all pass through the proxy; api.anthropic.com answers 403 to regions
     # it does not serve, which is exactly the node failure Opus cares about.
     net_monitor_required_urls: list[str] = ["https://api.anthropic.com/v1/models"]

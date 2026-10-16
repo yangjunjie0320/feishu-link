@@ -225,6 +225,13 @@ class MihomoController:
                 break
         return name
 
+    async def mode(self) -> str:
+        response = await self._request("GET", "/configs")
+        return str(response.json().get("mode") or "")
+
+    async def set_mode(self, mode: str) -> None:
+        await self._request("PATCH", "/configs", json={"mode": mode})
+
     async def select(self, group: str, node: str) -> None:
         await self._request("PUT", f"/proxies/{quote(group, safe='')}", json={"name": node})
 
@@ -295,6 +302,9 @@ class NetMonitor:
                 )
             return
 
+        if not await self._ensure_mode():
+            return
+
         probes = await self._probe_round()
         if not probes.healthy():
             logger.warning(
@@ -318,6 +328,71 @@ class NetMonitor:
         else:
             reason = probes.failure_reason()
         await self._switch(node, reason, probes)
+
+    async def _ensure_mode(self) -> bool:
+        """Patch the core back to the expected mode; False if it stays wrong.
+
+        In "direct" mode every request bypasses the nodes, so probing or
+        switching nodes would only misreport an outage of all of them.
+        """
+        expected = self._settings.net_monitor_expected_mode.strip().lower()
+        if not expected:
+            return True
+        try:
+            current = (await self._controller.mode()).lower()
+        except ControllerUnavailableError as e:
+            logger.warning("net monitor: cannot read core mode: %s", e)
+            return True
+        if current == expected:
+            return True
+
+        error = ""
+        try:
+            await self._controller.set_mode(expected)
+            restored = (await self._controller.mode()).lower() == expected
+        except ControllerUnavailableError as e:
+            restored, error = False, str(e)
+
+        impact = "所有流量绕过节点直连，X / YouTube / Instagram / Anthropic 都会不通"
+        if restored:
+            logger.warning("net monitor: core mode was %s, restored to %s", current, expected)
+            await self._notify(
+                Notice(
+                    "网络监控：代理模式已纠正",
+                    _compose(
+                        f"代理内核处于「{current}」模式，已切回「{expected}」",
+                        _fields(("影响", impact), ("时间", self._now())),
+                    ),
+                    "orange",
+                )
+            )
+            await self._sleep(_SWITCH_SETTLE_SECONDS)
+            return True
+
+        logger.error(
+            "net monitor: core stuck in %s mode, restore to %s failed: %s",
+            current, expected, error or "mode unchanged",
+        )
+        if not self._outage_alerted:
+            self._outage_alerted = True
+            title = "代理处于直连模式" if current == "direct" else "代理模式异常"
+            await self._notify(
+                Notice(
+                    f"网络监控：{title}",
+                    _compose(
+                        f"代理内核处于「{current}」模式，自动切回「{expected}」失败"
+                        "，节点本身未必有问题",
+                        _fields(
+                            ("影响", impact),
+                            ("处理", "在 TgfishVPN 客户端里切到「规则」模式"),
+                            ("时间", self._now()),
+                        ),
+                    ),
+                    "red",
+                    error,
+                )
+            )
+        return False
 
     async def _switch(self, current: str, reason: str, before: ProbeRound) -> None:
         group = self._settings.net_monitor_selector_group
